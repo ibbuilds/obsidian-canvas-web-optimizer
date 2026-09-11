@@ -8,7 +8,6 @@ import {
 	CanvasNodeData,
 	CanvasLeaf,
 } from "obsidian";
-import { NativeImage } from "electron";
 
 export default class CanvasLinkOptimizerPlugin extends Plugin {
 	name = "Canvas Link Optimizer";
@@ -78,7 +77,7 @@ export default class CanvasLinkOptimizerPlugin extends Plugin {
 					if (!this.frameEl) return;
 
 					thisPlugin.log(`Saving thumbnail for ${this.url}`);
-					const img: NativeImage = await this.frameEl.capturePage();
+					const img = await this.frameEl.capturePage();
 					this.app.vault.adapter.writeBinary(
 						this._getThumbnailPath(),
 						img.toJPEG(100)
