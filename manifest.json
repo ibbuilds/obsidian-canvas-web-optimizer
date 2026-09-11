@@ -1,10 +1,10 @@
 {
-	"id": "canvas-link-optimizer",
-	"name": "Canvas Link Optimizer",
-	"version": "1.3.0",
-	"minAppVersion": "1.1.9",
-	"description": "Optimize canvas links by displaying a page thumbnail.",
-	"author": "khaelar",
-	"authorUrl": "https://github.com/khaelar",
-	"isDesktopOnly": true
+  "id": "canvas-web-optimizer",
+  "name": "Canvas Web Optimizer",
+  "version": "0.1.0",
+  "minAppVersion": "1.1.9",
+  "description": "Optimize web pages in Obsidian Canvas with cached previews and smarter webview resource management.",
+  "author": "ibbuilds",
+  "authorUrl": "https://github.com/ibbuilds",
+  "isDesktopOnly": true
 }

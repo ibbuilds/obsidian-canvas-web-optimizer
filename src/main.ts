@@ -10,7 +10,7 @@ import {
 } from "obsidian";
 
 export default class CanvasLinkOptimizerPlugin extends Plugin {
-	name = "Canvas Link Optimizer";
+	name = "Canvas Web Optimizer";
 	cacheDir = `${this.manifest.dir}/data/linkCache`;
 
 	async onload() {
