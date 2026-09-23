@@ -4,23 +4,22 @@ import {
   type CanvasLeaf,
   type CanvasNodeData,
   debounce,
+  type LinkNode,
   type LinkNodeConstructor,
   Notice,
   Plugin
 } from 'obsidian'
 
-const THUMBNAIL_JPEG_QUALITY = 100
+const THUMBNAIL_JPEG_QUALITY = 88
 
 const RESIZE_DEBOUNCE_MS = 500
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
-const WEBVIEW_PAINT_SETTLE_MS = 100
+const GENERATION_JOB_TIMEOUT_MS = 10000
 
-const CAPTURE_MAX_WAIT_MS = 4000
-const IMAGE_DECODE_TIMEOUT_MS = 2500
-const ANIMATION_TIMEOUT_MS = 3000
-const MAX_FINITE_ANIMATION_MS = 3500
-const FINAL_SETTLE_MAX_MS = 750
+const CAPTURE_MAX_WAIT_MS = 1500
+const IMAGE_DECODE_TIMEOUT_MS = 1000
+const FINAL_SETTLE_MAX_MS = 150
 
 const LIGHT_THEME_CSS = `
   :root {
@@ -42,14 +41,6 @@ const LIGHT_THEME_SCRIPT = `
 
     meta.setAttribute('content', 'light')
   })()
-`
-
-const WEBVIEW_PAINT_READY_SCRIPT = `
-  new Promise(resolve => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(resolve)
-    })
-  })
 `
 
 const CAPTURE_READY_SCRIPT = `
@@ -78,36 +69,12 @@ const CAPTURE_READY_SCRIPT = `
       )
     }
 
-    const waitForAnimations = async () => {
-      const animations = document
-        .getAnimations()
-        .filter(animation => {
-          const timing = animation.effect?.getComputedTiming()
-
-          return (
-            animation.playState !== 'finished' &&
-            Number.isFinite(timing?.endTime) &&
-            timing.endTime <= ${MAX_FINITE_ANIMATION_MS}
-          )
-        })
-
-      await Promise.allSettled(
-        animations.map(animation =>
-          Promise.race([
-            animation.finished.catch(() => {}),
-            timeout(${ANIMATION_TIMEOUT_MS})
-          ])
-        )
-      )
-    }
-
     const ready = async () => {
       const started = performance.now()
 
       await Promise.allSettled([
         document.fonts?.ready ?? Promise.resolve(),
-        waitForImages(),
-        waitForAnimations()
+        waitForImages()
       ])
 
       const elapsed = performance.now() - started
@@ -163,6 +130,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   cacheHits = 0
   cacheMisses = 0
   generatingThumbnails = 0
+
+  generationQueue: LinkNode[] = []
+  queuedGenerationIds = new Set<string>()
+  activeGenerationNode: LinkNode | null = null
+  generationCompletions = new Map<string, () => void>()
+  generationQueueScheduled = false
 
   deactivateActiveWebview: (() => void) | null = null
 
@@ -224,6 +197,103 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     console.log(`[${this.name}]`, msg)
+  }
+
+  enqueueThumbnailGeneration(node: LinkNode) {
+    if (!node.nodeEl?.isConnected) return
+
+    if (this.activeGenerationNode?.id === node.id || this.queuedGenerationIds.has(node.id)) {
+      return
+    }
+
+    this.generationQueue.push(node)
+    this.queuedGenerationIds.add(node.id)
+    this.scheduleThumbnailQueue()
+  }
+
+  scheduleThumbnailQueue() {
+    if (this.activeGenerationNode || this.generationQueueScheduled) return
+
+    this.generationQueueScheduled = true
+
+    requestAnimationFrame(() => {
+      this.generationQueueScheduled = false
+      void this.processThumbnailQueue()
+    })
+  }
+
+  async processThumbnailQueue() {
+    if (this.activeGenerationNode) return
+
+    while (this.generationQueue.length > 0) {
+      const node = this.generationQueue.shift()
+
+      if (!node) return
+
+      this.queuedGenerationIds.delete(node.id)
+
+      if (!node.nodeEl?.isConnected) {
+        continue
+      }
+
+      this.activeGenerationNode = node
+
+      try {
+        await this.generateQueuedThumbnail(node)
+      } catch (error) {
+        this.log(error, true)
+      } finally {
+        this.generationCompletions.delete(node.id)
+
+        if (this.activeGenerationNode?.id === node.id) {
+          this.activeGenerationNode = null
+        }
+      }
+    }
+  }
+
+  generateQueuedThumbnail(node: LinkNode): Promise<void> {
+    return new Promise(resolve => {
+      let completed = false
+
+      const finish = () => {
+        if (completed) return
+
+        completed = true
+        window.clearTimeout(timeoutId)
+        this.generationCompletions.delete(node.id)
+        resolve()
+      }
+
+      const timeoutId = window.setTimeout(() => {
+        this.log(`Thumbnail generation timed out for ${node.url}`, true)
+
+        const frameEl = node.frameEl
+
+        if (frameEl?.isConnected) {
+          frameEl.remove()
+        }
+
+        if (node.frameEl === frameEl) {
+          node.frameEl = null
+        }
+
+        finish()
+      }, GENERATION_JOB_TIMEOUT_MS)
+
+      this.generationCompletions.set(node.id, finish)
+      node.recreateFrame()
+
+      requestAnimationFrame(() => {
+        if (!node.frameEl) {
+          finish()
+        }
+      })
+    })
+  }
+
+  completeThumbnailGeneration(node: LinkNode) {
+    this.generationCompletions.get(node.id)?.()
   }
 
   tryPatchLinkNode(): boolean {
@@ -425,8 +495,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
             if (!thumbnailExists || !metadataExists) {
               thisPlugin.cacheMisses++
-
-              this.recreateFrame()
+              thisPlugin.enqueueThumbnailGeneration(this)
 
               return
             }
@@ -483,22 +552,34 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
           frameEl.addEventListener('dom-ready', applyLightTheme)
 
+          const queuedGeneration = thisPlugin.activeGenerationNode?.id === this.id
+
+          const finishQueuedGeneration = () => {
+            if (!queuedGeneration) return
+
+            thisPlugin.completeThumbnailGeneration(this)
+          }
+
+          const removeQueuedFrame = () => {
+            if (!queuedGeneration) return
+
+            if (this.frameEl === frameEl) {
+              frameEl.remove()
+              this.frameEl = null
+            }
+          }
+
+          const onFrameFailed = () => {
+            if (!queuedGeneration) return
+
+            removeQueuedFrame()
+            finishQueuedGeneration()
+          }
+
+          frameEl.addEventListener('did-fail-load', onFrameFailed, { once: true })
+
           const onFrameLoaded = async () => {
             frameEl.removeEventListener('did-finish-load', onFrameLoaded)
-
-            if (this.frameEl !== frameEl || !frameEl.isConnected) {
-              return
-            }
-
-            try {
-              await frameEl.executeJavaScript(WEBVIEW_PAINT_READY_SCRIPT)
-
-              await frameEl.capturePage()
-            } catch {
-              // Best effort.
-            }
-
-            await sleep(WEBVIEW_PAINT_SETTLE_MS)
 
             if (this.frameEl !== frameEl || !frameEl.isConnected) {
               return
@@ -538,6 +619,46 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
             await this._saveThumbnail()
 
             thisPlugin.log(`Cached link ${this.url}`)
+
+            if (!queuedGeneration) {
+              return
+            }
+
+            const generatedPreview = this.contentEl.doc.createElement('img')
+
+            generatedPreview.classList.add('link-thumbnail')
+            generatedPreview.alt = 'Webpage thumbnail'
+            generatedPreview.src = thisPlugin.app.vault.adapter.getResourcePath(
+              this._getThumbnailPath()
+            )
+
+            this.contentEl.append(generatedPreview)
+            this._previewImageEl = generatedPreview
+
+            const finish = () => {
+              removeQueuedFrame()
+              finishQueuedGeneration()
+            }
+
+            if (generatedPreview.complete) {
+              finish()
+              return
+            }
+
+            generatedPreview.addEventListener('load', finish, { once: true })
+            generatedPreview.addEventListener(
+              'error',
+              () => {
+                generatedPreview.remove()
+
+                if (this._previewImageEl === generatedPreview) {
+                  this._previewImageEl = null
+                }
+
+                finish()
+              },
+              { once: true }
+            )
           }
 
           frameEl.addEventListener('did-finish-load', onFrameLoaded)
@@ -602,7 +723,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Cached previews: ${cachedPreviews}`,
       `Live webviews: ${liveWebviews}`,
       `Generating thumbnails: ${this.generatingThumbnails}`,
-      'Queued: 0',
+      `Queued: ${this.generationQueue.length}`,
       `Cache hits: ${this.cacheHits}`,
       `Cache misses: ${this.cacheMisses}`
     ].join('\n')
