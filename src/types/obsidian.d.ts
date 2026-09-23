@@ -27,7 +27,11 @@ declare module 'obsidian' {
   }
 
   interface LinkNode {
+    id: string
     url: string
+    nodeEl: HTMLElement
+    frameEl: (HTMLElement & { tagName: string }) | null
+    recreateFrame(...args: unknown[]): unknown
     constructor: LinkNodeConstructor
   }
 
