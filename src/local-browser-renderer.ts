@@ -885,13 +885,28 @@ export default class LocalBrowserRenderer {
       const errors: string[] = []
 
       for (const candidate of this.candidates) {
+        if (this.disposed) {
+          throw new Error('Local browser renderer is disposed')
+        }
+
         try {
           const runtime = await this.launchCandidate(candidate)
+
+          if (this.disposed) {
+            this.browser = runtime
+            await this.closeBrowser()
+            throw new Error('Local browser renderer is disposed')
+          }
+
           this.browser = runtime
           this.disabledReason = null
 
           return runtime
         } catch (error) {
+          if (this.disposed) {
+            throw toError(error)
+          }
+
           this.browserLaunchFailures++
           errors.push(`${candidate.name}: ${toError(error).message}`)
         }
