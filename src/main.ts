@@ -9,6 +9,10 @@ import {
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
+import LocalBrowserRenderer, {
+  type LocalBrowserRenderResult,
+  type LocalBrowserRenderTask
+} from './local-browser-renderer'
 import NetworkPreconnector from './network-preconnector'
 
 const CACHE_METADATA_VERSION = 2
@@ -25,6 +29,7 @@ const GENERATION_PAINT_TIMEOUT_MS = 120
 const GENERATION_JOB_TIMEOUT_MS = 5000
 const GENERATION_MAX_ATTEMPTS = 3
 const GENERATION_RETRY_DELAY_MS = 150
+const LOCAL_GENERATION_TIMEOUT_MS = 7500
 const PRECONNECT_LOOKAHEAD_ORIGINS = 6
 const HTTP_WARM_LOOKAHEAD_URLS = 2
 
@@ -87,6 +92,18 @@ type GenerationJob = {
   node: LinkNode
   attempt: number
   enqueuedAt: number
+  forceNative: boolean
+}
+
+type LocalConcurrentGeneration = {
+  job: GenerationJob
+  node: LinkNode
+  url: string
+  startedAt: number
+  task: LocalBrowserRenderTask
+  requeue: boolean
+  completed: boolean
+  timeoutId: number
 }
 
 type ActiveGeneration = {
@@ -201,6 +218,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly backgroundExecution = new BackgroundExecutionController()
   private backgroundExecutionRelease: (() => void) | null = null
   private networkPreconnector: NetworkPreconnector | null = null
+  private localBrowserRenderer: LocalBrowserRenderer | null = null
+  private readonly localGenerations = new Map<string, LocalConcurrentGeneration>()
 
   private activeInteractiveNode: LinkNode | null = null
   private requestedInteractiveNode: LinkNode | null = null
@@ -250,6 +269,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private previewReadyTotalMs = 0
   private previewReadyCount = 0
   private capturedThumbnailBytes = 0
+  private localGenerationTotalMs = 0
+  private localGenerationCount = 0
+  private localFallbacks = 0
+  private localTimeouts = 0
 
   async onload() {
     this.addCommand({
@@ -280,6 +303,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     await this.ensureCacheSchema()
     await this.buildCacheIndex()
     this.networkPreconnector = new NetworkPreconnector(this.getWebviewPartition())
+    this.localBrowserRenderer = new LocalBrowserRenderer()
 
     this.app.workspace.onLayoutReady(() => {
       if (this.tryPatchLinkNode()) return
@@ -311,9 +335,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.requestedInteractiveNode = null
     this.abortActiveGeneration(false)
     this.cancelGenerationPreload(true)
+    this.abortLocalGenerations(false)
     this.removeInteractiveFrameImmediately()
     this.releaseBackgroundExecution()
     this.backgroundExecution.dispose()
+    this.localBrowserRenderer?.dispose()
+    this.localBrowserRenderer = null
     this.networkPreconnector = null
 
     this.reloadActiveCanvasViews()
@@ -741,23 +768,40 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    const localGeneration = this.localGenerations.get(node.id)
+
+    if (localGeneration?.node === node) {
+      localGeneration.requeue = true
+      return
+    }
+
     if (this.isNodeContentMounted(node)) {
       this.enqueueThumbnailGeneration(node)
     }
   }
 
-  private enqueueThumbnailGeneration(node: LinkNode, front = false, attempt = 0) {
+  private enqueueThumbnailGeneration(
+    node: LinkNode,
+    front = false,
+    attempt = 0,
+    forceNative = false
+  ) {
     const state = this.getNodeState(node)
 
     if (state.cached || !node.nodeEl?.isConnected) return
 
-    if (this.activeGeneration?.node.id === node.id || this.queuedGenerationIds.has(node.id)) {
+    if (
+      this.activeGeneration?.node.id === node.id ||
+      this.localGenerations.has(node.id) ||
+      this.queuedGenerationIds.has(node.id)
+    ) {
       return
     }
 
     if (
       this.batchStartedAt === null &&
       !this.activeGeneration &&
+      this.localGenerations.size === 0 &&
       this.generationQueue.length === 0
     ) {
       this.batchStartedAt = performance.now()
@@ -767,7 +811,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const job: GenerationJob = {
       node,
       attempt,
-      enqueuedAt: performance.now()
+      enqueuedAt: performance.now(),
+      forceNative
     }
 
     if (front) {
@@ -784,7 +829,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.pruneDetachedActiveResources()
 
     if (
-      this.activeGeneration ||
       this.activeInteractiveNode ||
       this.generationQueueScheduled ||
       this.generationQueue.length === 0
@@ -803,7 +847,49 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private async processThumbnailQueue() {
-    if (this.activeGeneration || this.activeInteractiveNode) return
+    if (this.activeInteractiveNode) return
+
+    const renderer = this.localBrowserRenderer
+
+    if (renderer?.available) {
+      while (
+        renderer.available &&
+        !this.activeInteractiveNode &&
+        this.localGenerations.size < renderer.poolSize
+      ) {
+        const localJob = this.dequeueNextGenerationJob(job => !job.forceNative)
+
+        if (!localJob) break
+
+        if (!this.ensureNodeContentMounted(localJob.node)) {
+          this.generationQueue.unshift(localJob)
+          this.queuedGenerationIds.add(localJob.node.id)
+          break
+        }
+
+        this.startLocalGeneration(localJob, renderer)
+      }
+
+      if (!this.activeGeneration) {
+        const nativeFallbackJob = this.dequeueNextGenerationJob(job => job.forceNative)
+
+        if (nativeFallbackJob) {
+          if (!this.ensureNodeContentMounted(nativeFallbackJob.node)) {
+            this.generationQueue.unshift(nativeFallbackJob)
+            this.queuedGenerationIds.add(nativeFallbackJob.node.id)
+          } else {
+            this.preconnectQueuedWork()
+            this.warmQueuedWork()
+            await this.generateQueuedThumbnail(nativeFallbackJob)
+          }
+        }
+      }
+
+      this.releaseBackgroundExecutionIfIdle()
+      return
+    }
+
+    if (this.activeGeneration) return
 
     this.preconnectQueuedWork()
 
@@ -954,12 +1040,17 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.settleGenerationPreload(preload, false)
   }
 
-  private dequeueNextGenerationJob(): GenerationJob | null {
+  private dequeueNextGenerationJob(
+    predicate: (job: GenerationJob) => boolean = () => true
+  ): GenerationJob | null {
     let bestIndex = -1
     let bestPriority = Number.POSITIVE_INFINITY
 
     for (let index = this.generationQueue.length - 1; index >= 0; index--) {
       const job = this.generationQueue[index]
+
+      if (!predicate(job)) continue
+
       const { node } = job
 
       if (!node.nodeEl?.isConnected) {
@@ -1107,7 +1198,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         resolve()
 
         if (shouldPriorityRequeue) {
-          this.enqueueThumbnailGeneration(node, true, job.attempt)
+          this.enqueueThumbnailGeneration(node, true, job.attempt, job.forceNative)
         } else if (shouldRetryFailure) {
           this.setPendingStatus(
             node,
@@ -1115,7 +1206,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           )
 
           window.setTimeout(() => {
-            this.enqueueThumbnailGeneration(node, true, job.attempt + 1)
+            this.enqueueThumbnailGeneration(node, true, job.attempt + 1, job.forceNative)
           }, GENERATION_RETRY_DELAY_MS)
         } else {
           if ((outcome === 'failure' || outcome === 'timeout') && !this.getNodeState(node).cached) {
@@ -1174,6 +1265,242 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     })
   }
 
+  private startLocalGeneration(job: GenerationJob, renderer: LocalBrowserRenderer) {
+    const { node } = job
+    const size = this.getLocalRenderSize(node)
+    const task = renderer.render(node.url, size.width, size.height)
+    const generation: LocalConcurrentGeneration = {
+      job,
+      node,
+      url: node.url,
+      startedAt: performance.now(),
+      task,
+      requeue: false,
+      completed: false,
+      timeoutId: 0
+    }
+
+    this.localGenerations.set(node.id, generation)
+
+    generation.timeoutId = window.setTimeout(() => {
+      if (!this.isCurrentLocalGeneration(generation)) return
+
+      this.localTimeouts++
+      this.log(`Local browser render timed out for ${generation.url}; falling back to native`, true)
+      this.finishLocalGeneration(generation, 'fallback')
+    }, LOCAL_GENERATION_TIMEOUT_MS)
+
+    void task.promise
+      .then(result => {
+        if (!this.isCurrentLocalGeneration(generation)) return
+
+        void this.commitLocalThumbnail(node, generation, result)
+      })
+      .catch(error => {
+        if (!this.isCurrentLocalGeneration(generation)) return
+
+        this.log(`Local browser render failed for ${generation.url}: ${String(error)}`, true)
+        this.finishLocalGeneration(generation, 'fallback')
+      })
+  }
+
+  private isCurrentLocalGeneration(generation: LocalConcurrentGeneration): boolean {
+    return !generation.completed && this.localGenerations.get(generation.node.id) === generation
+  }
+
+  private finishLocalGeneration(
+    generation: LocalConcurrentGeneration,
+    outcome: GenerationOutcome | 'fallback'
+  ) {
+    if (generation.completed) return
+
+    generation.completed = true
+    window.clearTimeout(generation.timeoutId)
+
+    if (this.localGenerations.get(generation.node.id) === generation) {
+      this.localGenerations.delete(generation.node.id)
+    }
+
+    if (outcome !== 'success') {
+      generation.task.cancel()
+    }
+
+    const { job, node } = generation
+
+    if (outcome === 'success') {
+      const generationDuration = performance.now() - generation.startedAt
+
+      this.generationCompleted++
+      this.batchCompleted++
+      this.generationTotalMs += generationDuration
+      this.localGenerationTotalMs += generationDuration
+      this.localGenerationCount++
+    } else if (outcome === 'fallback') {
+      this.localFallbacks++
+
+      if (!this.getNodeState(node).cached && node.nodeEl?.isConnected) {
+        this.enqueueThumbnailGeneration(node, true, job.attempt, true)
+      }
+    } else if (outcome === 'preempted') {
+      this.generationPreemptions++
+    }
+
+    if (
+      generation.requeue &&
+      outcome !== 'fallback' &&
+      !this.getNodeState(node).cached &&
+      node.nodeEl?.isConnected
+    ) {
+      this.enqueueThumbnailGeneration(node, true, job.attempt)
+    }
+
+    if (!this.activeInteractiveNode) {
+      this.scheduleThumbnailQueue()
+    }
+
+    this.releaseBackgroundExecutionIfIdle()
+  }
+
+  private abortLocalGenerations(requeue: boolean) {
+    for (const generation of [...this.localGenerations.values()]) {
+      generation.requeue = requeue
+      this.finishLocalGeneration(generation, 'preempted')
+    }
+  }
+
+  private abortLocalGenerationForNode(
+    node: LinkNode,
+    outcome: GenerationOutcome,
+    requeue = false
+  ) {
+    const generation = this.localGenerations.get(node.id)
+
+    if (!generation || generation.node !== node) return
+
+    generation.requeue = requeue
+    this.finishLocalGeneration(generation, outcome)
+  }
+
+  private getLocalRenderSize(node: LinkNode): { width: number; height: number } {
+    let width = node.contentEl?.clientWidth || node.width || 640
+    let height = node.contentEl?.clientHeight || node.height || 360
+
+    width = Math.max(64, width)
+    height = Math.max(64, height)
+
+    const longEdge = Math.max(width, height)
+
+    if (longEdge > THUMBNAIL_MAX_LONG_EDGE) {
+      const scale = THUMBNAIL_MAX_LONG_EDGE / longEdge
+      width *= scale
+      height *= scale
+    }
+
+    return {
+      width: Math.round(width),
+      height: Math.round(height)
+    }
+  }
+
+  private async commitLocalThumbnail(
+    node: LinkNode,
+    generation: LocalConcurrentGeneration,
+    result: LocalBrowserRenderResult
+  ) {
+    if (!this.isCurrentLocalGeneration(generation)) return
+
+    if (node.url !== generation.url) {
+      this.finishLocalGeneration(generation, 'stale')
+      return
+    }
+
+    const captureStartedAt = performance.now()
+
+    try {
+      const thumbnailWriteStartedAt = performance.now()
+      await this.app.vault.adapter.writeBinary(
+        `${this.cacheDir}/${node.id}.thumbnail.jpg`,
+        result.jpeg
+      )
+      this.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
+      this.thumbnailWriteCount++
+      this.captureTotalMs += performance.now() - captureStartedAt
+      this.capturedThumbnailBytes += result.jpeg.byteLength
+    } catch (error) {
+      this.log(error, true)
+      this.finishLocalGeneration(generation, 'fallback')
+      return
+    }
+
+    if (!this.isCurrentLocalGeneration(generation)) return
+
+    if (node.url !== generation.url) {
+      this.finishLocalGeneration(generation, 'stale')
+      return
+    }
+
+    let title = result.title
+
+    if (!title) {
+      try {
+        title = new URL(generation.url).hostname
+      } catch {
+        title = generation.url
+      }
+    }
+
+    const metadata: CacheMetadata = {
+      version: CACHE_METADATA_VERSION,
+      url: generation.url,
+      title,
+      capturedAt: Date.now()
+    }
+
+    try {
+      const metadataWriteStartedAt = performance.now()
+
+      await this.app.vault.adapter.write(
+        `${this.cacheDir}/${node.id}.metadata.json`,
+        JSON.stringify(metadata)
+      )
+
+      this.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
+      this.metadataWriteCount++
+    } catch (error) {
+      this.log(error, true)
+      this.finishLocalGeneration(generation, 'fallback')
+      return
+    }
+
+    const state = this.getNodeState(node)
+
+    state.evaluated = true
+    state.cached = true
+    state.metadata = metadata
+
+    this.thumbnailCacheIds.add(node.id)
+    this.metadataCacheIds.add(node.id)
+    this.metadataMemory.set(node.id, metadata)
+
+    node.updateNodeLabel(title)
+
+    const previewStartedAt = performance.now()
+    const previewReady = await this.showPreviewOverFrame(node, false)
+    this.previewReadyTotalMs += performance.now() - previewStartedAt
+    this.previewReadyCount++
+
+    if (!this.isCurrentLocalGeneration(generation)) return
+
+    if (!previewReady || !this.getNodeState(node).cached) {
+      generation.requeue = true
+      this.finishLocalGeneration(generation, 'stale')
+      return
+    }
+
+    this.log(`Cached link ${node.url} with local browser renderer`)
+    this.finishLocalGeneration(generation, 'success')
+  }
+
   private ensureBackgroundExecution(node: LinkNode) {
     if (this.backgroundExecutionRelease) return
 
@@ -1188,7 +1515,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private releaseBackgroundExecutionIfIdle() {
-    if (this.activeGeneration || this.generationQueue.length > 0) return
+    if (
+      this.activeGeneration ||
+      this.localGenerations.size > 0 ||
+      this.generationQueue.length > 0
+    ) {
+      return
+    }
 
     if (this.batchStartedAt !== null) {
       this.lastBatchDurationMs = performance.now() - this.batchStartedAt
@@ -1251,6 +1584,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.cancelGenerationPreload(true)
     }
 
+    this.abortLocalGenerationForNode(node, 'stale')
+
     if (this.activeInteractiveNode === node) {
       this.removeNodeFrame(node)
       this.clearInteractiveState(node)
@@ -1270,9 +1605,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const session = this.activeGeneration
     const isInteractive = this.activeInteractiveNode === node
     const isGenerating = session?.node === node
+    const localGeneration = this.localGenerations.get(node.id)
+    const isLocalGenerating = localGeneration?.node === node
     const isPreloading = this.generationPreload?.node === node
 
-    if (!this.isNodeContentMounted(node) && (isInteractive || isGenerating || isPreloading)) {
+    if (
+      !this.isNodeContentMounted(node) &&
+      (isInteractive || isGenerating || isLocalGenerating || isPreloading)
+    ) {
       this.ensureNodeContentMounted(node)
     }
 
@@ -1296,6 +1636,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (isPreloading) {
       this.cancelGenerationPreload(true)
+    }
+
+    if (isLocalGenerating) {
+      this.abortLocalGenerationForNode(node, 'unmounted')
     }
 
     if (isGenerating) {
@@ -1368,6 +1712,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         }
 
         this.cancelGenerationPreload(true)
+        this.abortLocalGenerations(true)
         this.abortActiveGeneration(true)
         this.releaseBackgroundExecution()
         this.removePendingPlaceholder(requestedNode)
@@ -1424,6 +1769,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (preload && !preload.node.nodeEl?.isConnected) {
       this.cancelGenerationPreload(true)
+    }
+
+    for (const localGeneration of [...this.localGenerations.values()]) {
+      if (!localGeneration.node.nodeEl?.isConnected) {
+        this.finishLocalGeneration(localGeneration, 'unmounted')
+      }
     }
 
     const generation = this.activeGeneration
@@ -1979,7 +2330,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.generationPreloadedCount = 0
     this.generationTotalMs = 0
     this.batchStartedAt =
-      this.activeGeneration || this.generationQueue.length > 0 ? performance.now() : null
+      this.activeGeneration || this.localGenerations.size > 0 || this.generationQueue.length > 0
+        ? performance.now()
+        : null
     this.batchCompleted = 0
     this.lastBatchDurationMs = 0
     this.lastBatchCompleted = 0
@@ -2005,6 +2358,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.previewReadyTotalMs = 0
     this.previewReadyCount = 0
     this.capturedThumbnailBytes = 0
+    this.localGenerationTotalMs = 0
+    this.localGenerationCount = 0
+    this.localFallbacks = 0
+    this.localTimeouts = 0
+    this.localBrowserRenderer?.resetMetrics()
     this.networkPreconnector?.resetMetrics()
 
     new Notice('Canvas Web Optimizer diagnostics reset')
@@ -2084,23 +2442,53 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         : 0
     const averagePreviewReadyMs =
       this.previewReadyCount > 0 ? Math.round(this.previewReadyTotalMs / this.previewReadyCount) : 0
+    const averageLocalGenerationMs =
+      this.localGenerationCount > 0
+        ? Math.round(this.localGenerationTotalMs / this.localGenerationCount)
+        : 0
+    const localRendererAvailable = this.localBrowserRenderer?.available ?? false
+    const generationEngine = localRendererAvailable
+      ? `local browser sidecar (${this.localBrowserRenderer?.poolSize ?? 0} workers)`
+      : 'native webview'
+    const localBrowserStatus = this.localBrowserRenderer
+      ? `${this.localBrowserRenderer.browserName} / ${this.localBrowserRenderer.state}`
+      : 'not initialized'
 
     const diagnostics = [
       `Mounted web cards: ${mountedWebCards.size}`,
       `Cached previews: ${cachedPreviews}`,
       `Live webviews: ${liveWebviews}`,
-      `Generating thumbnails: ${this.activeGeneration ? 1 : 0}`,
+      `Generating thumbnails: ${(this.activeGeneration ? 1 : 0) + this.localGenerations.size}`,
       `Queued: ${this.generationQueue.length}`,
+      `Generation engine: ${generationEngine}`,
+      `Local browser: ${localBrowserStatus}`,
+      `Local browser active tasks: ${this.localBrowserRenderer?.activeCount ?? 0}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
-      `Network preconnect: ${this.networkPreconnector?.active ? 'on' : 'off'} (${this.networkPreconnector?.count ?? 0})`,
-      `HTTP warm cache: ${this.networkPreconnector?.fetchActive ? 'on' : 'off'} (${this.networkPreconnector?.warmCompletedCount ?? 0}/${this.networkPreconnector?.warmStartedCount ?? 0}, failed ${this.networkPreconnector?.warmFailedCount ?? 0})`,
+      `Network preconnect: ${
+        localRendererAvailable ? 'standby (local browser preferred)' : this.networkPreconnector?.active ? 'on' : 'off'
+      } (${this.networkPreconnector?.count ?? 0})`,
+      `HTTP warm cache: ${
+        localRendererAvailable
+          ? 'standby (local browser preferred)'
+          : this.networkPreconnector?.fetchActive
+            ? 'on'
+            : 'off'
+      } (${this.networkPreconnector?.warmCompletedCount ?? 0}/${this.networkPreconnector?.warmStartedCount ?? 0}, failed ${this.networkPreconnector?.warmFailedCount ?? 0})`,
       `Cache hits: ${this.cacheHits}`,
       `Cache misses: ${this.cacheMisses}`,
       `Generated: ${this.generationCompleted}`,
       `Generation failures: ${this.generationFailed}`,
       `Generation timeouts: ${this.generationTimedOut}`,
       `Generation preemptions: ${this.generationPreemptions}`,
+      `Local browser fallbacks/timeouts: ${this.localFallbacks}/${this.localTimeouts}`,
+      `Local browser render failures: ${this.localBrowserRenderer?.renderFailureCount ?? 0}`,
+      `Local browser launches/closes/launch failures: ${this.localBrowserRenderer?.launchCount ?? 0}/${this.localBrowserRenderer?.closeCount ?? 0}/${this.localBrowserRenderer?.launchFailureCount ?? 0}`,
+      `Local browser average launch: ${this.localBrowserRenderer?.averageLaunchMs ?? 0} ms`,
+      `Local browser average render: ${this.localBrowserRenderer?.averageRenderMs ?? 0} ms`,
+      `Local browser average navigation: ${this.localBrowserRenderer?.averageNavigationMs ?? 0} ms`,
+      `Local browser average screenshot: ${this.localBrowserRenderer?.averageScreenshotMs ?? 0} ms`,
+      `Average local generation: ${averageLocalGenerationMs} ms`,
       `Generation preload: ${this.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
       `Preloads started/ready/hit/failed: ${this.generationPreloadsStarted}/${this.generationPreloadsReady}/${this.generationPreloadHits}/${this.generationPreloadFailures}`,
       `Preload immediate/pending hits: ${this.preloadImmediateHits}/${this.preloadPendingHits}`,
