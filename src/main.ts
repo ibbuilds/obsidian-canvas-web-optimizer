@@ -363,6 +363,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     return Boolean(node.contentEl?.isConnected)
   }
 
+  private ensureNodeContentMounted(node: LinkNode): boolean {
+    if (!node.nodeEl?.isConnected) return false
+
+    if (this.isNodeContentMounted(node)) return true
+
+    node.mountContent()
+
+    return this.isNodeContentMounted(node)
+  }
+
   private prepareNode(node: LinkNode): Promise<void> {
     const state = this.getNodeState(node)
 
@@ -403,7 +413,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         return
       }
 
-      if (metadata.version !== CACHE_METADATA_VERSION || metadata.url !== node.url) {
+      if (metadata.url && metadata.url !== node.url) {
         this.markNodeCacheMiss(node, state)
         return
       }
@@ -849,6 +859,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handleBreakpointUpdate(node: LinkNode) {
+    if (
+      !this.isNodeContentMounted(node) &&
+      (this.activeInteractiveNode === node || this.getGenerationPriority(node) <= 1)
+    ) {
+      this.ensureNodeContentMounted(node)
+    }
+
     if (this.isNodeContentMounted(node)) {
       this.onNodeMounted(node)
       return
@@ -1318,7 +1335,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
           thisPlugin.attachActivationHandler(this)
 
-          if (thisPlugin.isNodeContentMounted(this)) {
+          if (
+            thisPlugin.isNodeContentMounted(this) ||
+            thisPlugin.getGenerationPriority(this) <= 1
+          ) {
+            thisPlugin.ensureNodeContentMounted(this)
             thisPlugin.onNodeMounted(this)
           }
 
