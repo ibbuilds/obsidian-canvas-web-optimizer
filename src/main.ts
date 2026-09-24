@@ -97,6 +97,7 @@ type ActiveGeneration = {
   frameCreatedAt?: number
   domReadyAt?: number
   usedPreload?: boolean
+  preparedByPreload?: boolean
   requeue: boolean
   finish: (outcome: GenerationOutcome) => void
 }
@@ -105,6 +106,7 @@ type GenerationPreload = {
   node: LinkNode
   startedAt: number
   frameEl: NonNullable<LinkNode['frameEl']> | null
+  prepared: boolean
   readyPromise: Promise<boolean>
   resolveReady: (ready: boolean) => void
   settled: boolean
@@ -876,6 +878,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       node: job.node,
       startedAt: performance.now(),
       frameEl: null,
+      prepared: false,
       readyPromise,
       resolveReady,
       settled: false,
@@ -1115,6 +1118,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
             return
           }
 
+          session.preparedByPreload = preload.prepared
           void this.captureGeneratedFrame(node, frameEl)
         })
       } else {
@@ -1437,12 +1441,39 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       preload.frameEl = frameEl
 
       const onReady = () => {
-        if (node.frameEl !== frameEl || !frameEl.isConnected) {
-          this.settleGenerationPreload(preload, false, true)
-          return
-        }
+        void (async () => {
+          if (node.frameEl !== frameEl || !frameEl.isConnected) {
+            this.settleGenerationPreload(preload, false, true)
+            return
+          }
 
-        this.settleGenerationPreload(preload, true)
+          const themeStartedAt = performance.now()
+          await this.applyGenerationLightTheme(frameEl)
+          this.themeTotalMs += performance.now() - themeStartedAt
+          this.themeCount++
+
+          const paintStartedAt = performance.now()
+
+          try {
+            await Promise.race([
+              frameEl.executeJavaScript(WEBVIEW_PAINT_READY_SCRIPT),
+              delay(GENERATION_PAINT_TIMEOUT_MS)
+            ])
+          } catch {
+            // Best effort, matching the normal generation path.
+          }
+
+          this.paintReadyTotalMs += performance.now() - paintStartedAt
+          this.paintReadyCount++
+
+          if (node.frameEl !== frameEl || !frameEl.isConnected) {
+            this.settleGenerationPreload(preload, false, true)
+            return
+          }
+
+          preload.prepared = true
+          this.settleGenerationPreload(preload, true)
+        })()
       }
       const onFailed = (event: Event) => {
         if (!isFatalLoadFailure(event as DidFailLoadEvent)) return
@@ -1569,24 +1600,26 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (session?.node !== node || node.frameEl !== frameEl) return
 
-    const themeStartedAt = performance.now()
-    await this.applyGenerationLightTheme(frameEl)
-    this.themeTotalMs += performance.now() - themeStartedAt
-    this.themeCount++
+    if (!session.preparedByPreload) {
+      const themeStartedAt = performance.now()
+      await this.applyGenerationLightTheme(frameEl)
+      this.themeTotalMs += performance.now() - themeStartedAt
+      this.themeCount++
 
-    const paintStartedAt = performance.now()
+      const paintStartedAt = performance.now()
 
-    try {
-      await Promise.race([
-        frameEl.executeJavaScript(WEBVIEW_PAINT_READY_SCRIPT),
-        delay(GENERATION_PAINT_TIMEOUT_MS)
-      ])
-    } catch {
-      // Best effort.
+      try {
+        await Promise.race([
+          frameEl.executeJavaScript(WEBVIEW_PAINT_READY_SCRIPT),
+          delay(GENERATION_PAINT_TIMEOUT_MS)
+        ])
+      } catch {
+        // Best effort.
+      }
+
+      this.paintReadyTotalMs += performance.now() - paintStartedAt
+      this.paintReadyCount++
     }
-
-    this.paintReadyTotalMs += performance.now() - paintStartedAt
-    this.paintReadyCount++
 
     if (this.activeGeneration !== session) return
 
