@@ -13,6 +13,17 @@
   cursor: pointer;
 }
 
+.canvas-wrapper.mod-zoomed-out .canvas-node:hover .canvas-node-label,
+.canvas-wrapper.mod-zoomed-out .canvas-node.is-selected .canvas-node-label,
+.canvas-wrapper.mod-zoomed-out .canvas-node.is-focused .canvas-node-label,
+.canvas-wrapper.mod-zoomed-out .canvas-node.canvas-web-active .canvas-node-label,
+.canvas.small-scale .canvas-node:hover .canvas-node-label,
+.canvas.small-scale .canvas-node.is-selected .canvas-node-label,
+.canvas.small-scale .canvas-node.is-focused .canvas-node-label,
+.canvas.small-scale .canvas-node.canvas-web-active .canvas-node-label {
+  display: block !important;
+}
+
 .canvas-web-has-active
   .canvas-node:not(.canvas-web-active):hover
   .canvas-node-label {
