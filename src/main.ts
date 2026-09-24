@@ -881,6 +881,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
             this.preconnectQueuedWork()
             this.warmQueuedWork()
             await this.generateQueuedThumbnail(nativeFallbackJob)
+
+            if (!this.activeInteractiveNode) {
+              this.scheduleThumbnailQueue()
+            }
           }
         }
       }
@@ -966,6 +970,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private startNextGenerationPreload() {
     if (
+      this.localBrowserRenderer?.available ||
       this.generationPreloadDisabled ||
       this.generationPreload ||
       !this.activeGeneration ||
