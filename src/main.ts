@@ -25,7 +25,8 @@ const PREVIEW_LOAD_TIMEOUT_MS = 500
 const INTERACTIVE_PAINT_SETTLE_MS = 50
 const GENERATION_PAINT_TIMEOUT_MS = 80
 const GENERATION_CAPTURE_RETRY_MS = 60
-const GENERATION_JOB_TIMEOUT_MS = 5000
+const GENERATION_FIRST_PASS_TIMEOUT_MS = 2500
+const GENERATION_RETRY_TIMEOUT_MS = 6000
 const FOREGROUND_GENERATION_CONCURRENCY = 2
 const BACKGROUND_GENERATION_CONCURRENCY = 3
 const BACKGROUND_THREE_WORKER_MIN_CORES = 8
@@ -100,6 +101,7 @@ type NodeState = {
 type GenerationJob = {
   node: LinkNode
   enqueuedAt: number
+  attempt: number
 }
 
 type ActiveGeneration = {
@@ -108,6 +110,7 @@ type ActiveGeneration = {
   startedAt: number
   domReadyAt?: number
   requeue: boolean
+  attempt: number
   finish: (outcome: GenerationOutcome) => void
 }
 
@@ -802,7 +805,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
   }
 
-  private enqueueThumbnailGeneration(node: LinkNode, front = false) {
+  private enqueueThumbnailGeneration(node: LinkNode, front = false, attempt = 0) {
     const state = this.getNodeState(node)
 
     if (state.cached || !node.nodeEl?.isConnected) return
@@ -813,7 +816,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const job: GenerationJob = {
       node,
-      enqueuedAt: performance.now()
+      enqueuedAt: performance.now(),
+      attempt
     }
 
     if (front) {
@@ -1017,15 +1021,18 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         url: node.url,
         startedAt: performance.now(),
         requeue: false,
+        attempt: job.attempt,
         finish: () => {}
       }
+      const timeoutMs =
+        job.attempt === 0 ? GENERATION_FIRST_PASS_TIMEOUT_MS : GENERATION_RETRY_TIMEOUT_MS
 
       const timeoutId = window.setTimeout(() => {
         this.log(`Thumbnail generation timed out for ${session.url}`, true)
 
         this.removeNodeFrame(node)
         session.finish('timeout')
-      }, GENERATION_JOB_TIMEOUT_MS)
+      }, timeoutMs)
 
       session.finish = outcome => {
         if (completed) return
@@ -1048,15 +1055,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           this.generationPreemptions++
         }
 
-        const shouldRequeue =
-          (session.requeue || outcome === 'stale') &&
-          !this.getNodeState(node).cached &&
-          Boolean(node.nodeEl?.isConnected)
+        const canRequeue =
+          !this.getNodeState(node).cached && Boolean(node.nodeEl?.isConnected)
+        const shouldPriorityRequeue =
+          canRequeue && (session.requeue || outcome === 'stale')
+        const shouldRetryTimeout =
+          canRequeue && outcome === 'timeout' && session.attempt === 0
 
         resolve()
 
-        if (shouldRequeue) {
-          this.enqueueThumbnailGeneration(node, true)
+        if (shouldPriorityRequeue) {
+          this.enqueueThumbnailGeneration(node, true, session.attempt)
+        } else if (shouldRetryTimeout) {
+          this.enqueueThumbnailGeneration(node, false, 1)
         }
 
         if (!this.activeInteractiveNode) {
