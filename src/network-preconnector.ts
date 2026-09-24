@@ -160,7 +160,7 @@ export default class NetworkPreconnector {
             Accept: 'text/html,application/xhtml+xml'
           }
         })
-        .then(async response => {
+        .then(async (response: WarmResponse) => {
           if (!response.ok) {
             this.warmFailed++
             return
