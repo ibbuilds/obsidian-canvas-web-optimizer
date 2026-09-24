@@ -471,7 +471,7 @@ export default class LocalBrowserRenderer {
 
   readonly poolSize = Math.max(
     2,
-    Math.min(5, Math.ceil((navigator.hardwareConcurrency || 4) * 0.625))
+    Math.min(6, Math.ceil((navigator.hardwareConcurrency || 4) * 0.75))
   )
 
   get available(): boolean {
