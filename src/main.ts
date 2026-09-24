@@ -41,108 +41,17 @@ const GENERATION_LIGHT_THEME_CSS = `
 
 const LIGHT_THEME_SCRIPT = `
   (() => {
-    const DARK_CLASS_NAMES = [
-      'dark',
-      'theme-dark',
-      'dark-theme',
-      'dark-mode',
-      'mode-dark'
-    ]
-    const THEME_ATTRIBUTES = [
-      'data-theme',
-      'data-color-mode',
-      'data-theme-mode',
-      'data-color-scheme',
-      'data-bs-theme',
-      'data-mode'
-    ]
-    const THEME_KEY = /(^|[_-])(theme|appearance|color[-_]?scheme|mode)([_-]|$)/i
-    const DARK_VALUE = /^(?:"|')?(dark|system|auto)(?:"|')?$/i
+    document.documentElement.style.setProperty('color-scheme', 'light', 'important')
 
-    const forceStorage = storage => {
-      try {
-        for (let index = 0; index < storage.length; index++) {
-          const key = storage.key(index)
+    let meta = document.querySelector('meta[name="color-scheme"]')
 
-          if (!key || !THEME_KEY.test(key)) continue
-
-          const value = storage.getItem(key)
-
-          if (!value || !DARK_VALUE.test(value.trim())) continue
-
-          storage.setItem(key, 'light')
-        }
-      } catch {
-        // Storage can be unavailable on some origins.
-      }
+    if (!meta) {
+      meta = document.createElement('meta')
+      meta.setAttribute('name', 'color-scheme')
+      document.head?.appendChild(meta)
     }
 
-    const forceElement = element => {
-      if (!element) return
-
-      element.style.setProperty('color-scheme', 'light', 'important')
-
-      for (const attribute of THEME_ATTRIBUTES) {
-        const value = element.getAttribute(attribute)
-
-        if (value && /^(dark|system|auto)$/i.test(value)) {
-          element.setAttribute(attribute, 'light')
-        }
-      }
-
-      for (const className of DARK_CLASS_NAMES) {
-        element.classList.remove(className)
-      }
-    }
-
-    const forceLight = () => {
-      forceStorage(window.localStorage)
-      forceStorage(window.sessionStorage)
-      forceElement(document.documentElement)
-      forceElement(document.body)
-
-      let meta = document.querySelector('meta[name="color-scheme"]')
-
-      if (!meta && document.head) {
-        meta = document.createElement('meta')
-        meta.setAttribute('name', 'color-scheme')
-        document.head.appendChild(meta)
-      }
-
-      meta?.setAttribute('content', 'light')
-    }
-
-    forceLight()
-
-    if (!window.__canvasWebOptimizerLightObserver) {
-      const observer = new MutationObserver(forceLight)
-
-      observer.observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ['class', ...THEME_ATTRIBUTES],
-        subtree: false
-      })
-
-      const observeBody = () => {
-        if (!document.body) return
-
-        observer.observe(document.body, {
-          attributes: true,
-          attributeFilter: ['class', ...THEME_ATTRIBUTES],
-          subtree: false
-        })
-      }
-
-      if (document.body) {
-        observeBody()
-      } else {
-        document.addEventListener('DOMContentLoaded', observeBody, { once: true })
-      }
-
-      window.__canvasWebOptimizerLightObserver = observer
-    }
-
-    window.addEventListener('storage', forceLight)
+    meta.setAttribute('content', 'light')
   })()
 `
 
@@ -172,7 +81,12 @@ type ElectronGuestWebContentsLike = {
   isDestroyed?(): boolean
 }
 
+type ElectronNativeThemeLike = {
+  themeSource: 'system' | 'light' | 'dark'
+}
+
 type ElectronRemoteLike = {
+  nativeTheme?: ElectronNativeThemeLike
   webContents?: {
     fromId(id: number): ElectronGuestWebContentsLike | undefined
   }
@@ -296,43 +210,20 @@ function resolveGuestWebContents(
     return null
   }
 }
-function openExternalUrl(url: string): Promise<void> {
+
+function resolveNativeTheme(): ElectronNativeThemeLike | null {
   const runtimeRequire = getRuntimeRequire()
 
-  if (!runtimeRequire) {
-    return Promise.reject(new Error('Electron runtime is unavailable'))
-  }
+  if (!runtimeRequire) return null
 
   try {
-    const electron = runtimeRequire('electron') as {
-      shell?: {
-        openExternal(target: string): Promise<void>
-      }
-    }
-
-    if (electron.shell?.openExternal) {
-      return electron.shell.openExternal(url)
-    }
+    const remote = runtimeRequire('@electron/remote') as ElectronRemoteLike
+    return remote.nativeTheme ?? null
   } catch {
-    // Fall through to @electron/remote.
+    return null
   }
-
-  try {
-    const remote = runtimeRequire('@electron/remote') as {
-      shell?: {
-        openExternal(target: string): Promise<void>
-      }
-    }
-
-    if (remote.shell?.openExternal) {
-      return remote.shell.openExternal(url)
-    }
-  } catch {
-    // Report one stable error below.
-  }
-
-  return Promise.reject(new Error('Electron shell is unavailable'))
 }
+
 
 function afterTransition(element: HTMLElement, callback: () => void) {
   let finished = false
@@ -421,6 +312,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private activeInteractiveNode: LinkNode | null = null
   private requestedInteractiveNode: LinkNode | null = null
   private interactiveTransitionRunning = false
+  private interactiveThemeOriginalSource: ElectronNativeThemeLike['themeSource'] | null = null
 
   private generationCompleted = 0
   private generationFailed = 0
@@ -882,21 +774,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       true
     )
 
-    node.nodeEl.addEventListener(
-      'dblclick',
-      event => {
-        const target = event.target as Element | null
-        const label = target?.closest?.('.canvas-node-label')
-
-        if (!label || !node.nodeEl.contains(label)) return
-
-        event.preventDefault()
-        event.stopImmediatePropagation()
-
-        void openExternalUrl(node.url).catch(error => this.log(error, true))
-      },
-      true
-    )
   }
 
   private ensurePendingPlaceholder(node: LinkNode) {
@@ -2131,6 +2008,34 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
   }
 
+  private acquireInteractiveLightThemeFallback() {
+    if (this.interactiveThemeOriginalSource !== null) return
+
+    const nativeTheme = resolveNativeTheme()
+
+    if (!nativeTheme) return
+
+    this.interactiveThemeOriginalSource = nativeTheme.themeSource
+
+    if (nativeTheme.themeSource !== 'light') {
+      nativeTheme.themeSource = 'light'
+    }
+  }
+
+  private releaseInteractiveLightThemeFallback() {
+    const original = this.interactiveThemeOriginalSource
+
+    if (original === null) return
+
+    this.interactiveThemeOriginalSource = null
+
+    const nativeTheme = resolveNativeTheme()
+
+    if (nativeTheme && nativeTheme.themeSource !== original) {
+      nativeTheme.themeSource = original
+    }
+  }
+
   private requestInteractiveActivation(node: LinkNode) {
     this.requestedInteractiveNode = node
 
@@ -2174,6 +2079,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         this.releaseBackgroundExecution()
         this.removePendingPlaceholder(requestedNode)
 
+        this.acquireInteractiveLightThemeFallback()
         this.activeInteractiveNode = requestedNode
         this.setInteractiveClasses(requestedNode, true)
         this.requestNodeFrame(requestedNode, 'interactive')
@@ -2247,6 +2153,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     this.setInteractiveClasses(node, false)
     this.activeInteractiveNode = null
+    this.releaseInteractiveLightThemeFallback()
     this.scheduleThumbnailQueue()
   }
 
@@ -2293,10 +2200,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    if (mode !== 'interactive') {
-      // Generation/preload still get the same browser-level preference as the
-      // local thumbnail renderer. Interactive mode performs a guaranteed
-      // light-pref reload below before revealing the live page.
+    if (mode === 'interactive') {
+      void this.forceWebviewLightPreference(frameEl).then(applied => {
+        if (applied && this.activeInteractiveNode === node && node.frameEl === frameEl) {
+          this.releaseInteractiveLightThemeFallback()
+        }
+      })
+    } else {
       void this.forceWebviewLightPreference(frameEl)
     }
 
@@ -2415,40 +2325,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    let lightPreferenceReloaded = false
-
-    const onInteractiveReady = () => {
-      void (async () => {
-        if (
-          this.activeInteractiveNode !== node ||
-          node.frameEl !== frameEl ||
-          !frameEl.isConnected
-        ) {
-          frameEl.removeEventListener('dom-ready', onInteractiveReady)
-          return
-        }
-
-        if (!lightPreferenceReloaded) {
-          const preferenceApplied = await this.forceWebviewLightPreference(frameEl)
-
-          if (
-            preferenceApplied &&
-            this.activeInteractiveNode === node &&
-            node.frameEl === frameEl &&
-            frameEl.isConnected
-          ) {
-            lightPreferenceReloaded = true
-            frameEl.reload()
-            return
-          }
-        }
-
-        frameEl.removeEventListener('dom-ready', onInteractiveReady)
-        await this.revealInteractiveFrame(node, frameEl)
-      })()
-    }
-
-    frameEl.addEventListener('dom-ready', onInteractiveReady)
+    frameEl.addEventListener(
+      'dom-ready',
+      () => {
+        void this.revealInteractiveFrame(node, frameEl)
+      },
+      { once: true }
+    )
   }
 
   private async forceWebviewLightPreference(frameEl: LinkNode['frameEl']): Promise<boolean> {
@@ -2460,7 +2343,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     try {
       if (!guest.debugger.isAttached()) {
-        guest.debugger.attach()
+        guest.debugger.attach('1.3')
       }
 
       // This is the same browser-level preference used by the local thumbnail
@@ -2486,14 +2369,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
   }
 
-  private async applyLightTheme(frameEl: LinkNode['frameEl']) {
-    if (!frameEl?.isConnected) return
+  private async applyLightTheme(frameEl: LinkNode['frameEl']): Promise<boolean> {
+    if (!frameEl?.isConnected) return false
 
-    await Promise.allSettled([
+    const [preferenceResult] = await Promise.allSettled([
       this.forceWebviewLightPreference(frameEl),
       frameEl.insertCSS(GENERATION_LIGHT_THEME_CSS),
       frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
     ])
+
+    return preferenceResult.status === 'fulfilled' && preferenceResult.value
   }
 
   private async applyGenerationLightTheme(frameEl: LinkNode['frameEl']) {
@@ -2507,7 +2392,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private async revealInteractiveFrame(node: LinkNode, frameEl: NonNullable<LinkNode['frameEl']>) {
-    await this.applyLightTheme(frameEl)
+    const preferenceApplied = await this.applyLightTheme(frameEl)
+
+    if (preferenceApplied) {
+      this.releaseInteractiveLightThemeFallback()
+    }
 
     try {
       await frameEl.executeJavaScript(WEBVIEW_PAINT_READY_SCRIPT)
