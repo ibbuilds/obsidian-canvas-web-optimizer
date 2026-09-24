@@ -9,6 +9,7 @@ Source code is available in this plugin's GitHub repository.
 `
 
 const prod = process.argv[2] === 'production'
+const nodeBuiltins = [...builtins, ...builtins.map(module => `node:${module}`)]
 
 const context = await esbuild.context({
   banner: {
@@ -30,7 +31,7 @@ const context = await esbuild.context({
     '@lezer/common',
     '@lezer/highlight',
     '@lezer/lr',
-    ...builtins
+    ...nodeBuiltins
   ],
   format: 'cjs',
   target: 'es2018',
