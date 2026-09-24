@@ -45,6 +45,8 @@ declare module 'obsidian' {
     executeJavaScript(code: string): Promise<unknown>
     getTitle(): string
     insertCSS(css: string): Promise<string>
+    setAudioMuted?(muted: boolean): void
+    stop?(): void
   }
 
   interface LinkNode {
