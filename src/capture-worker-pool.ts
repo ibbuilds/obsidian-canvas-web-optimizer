@@ -1,4 +1,7 @@
+const IDLE_WORKER_TTL_MS = 30_000
+
 type WorkerFrame = HTMLElement & {
+  loadURL?(url: string): Promise<void>
   stop?(): void
 }
 
@@ -7,6 +10,7 @@ type WorkerRecord = {
   document: Document
   host: HTMLElement
   inUse: boolean
+  idleTimer: number
 }
 
 function createHost(document: Document): HTMLElement {
@@ -50,7 +54,8 @@ export default class CaptureWorkerPool {
       frame,
       document,
       host,
-      inUse: true
+      inUse: true,
+      idleTimer: 0
     }
 
     this.records.add(record)
@@ -66,6 +71,11 @@ export default class CaptureWorkerPool {
         this.recordsByFrame.delete(record.frame)
         record.frame.remove()
         continue
+      }
+
+      if (record.idleTimer !== 0) {
+        record.document.defaultView?.clearTimeout(record.idleTimer)
+        record.idleTimer = 0
       }
 
       record.inUse = true
@@ -89,6 +99,30 @@ export default class CaptureWorkerPool {
     record.host.append(frame)
     record.inUse = false
 
+    try {
+      const navigation = frame.loadURL?.('about:blank')
+
+      if (navigation) {
+        void navigation.catch(() => {})
+      } else {
+        frame.setAttribute('src', 'about:blank')
+      }
+    } catch {
+      // The worker can still be reused even if blanking the guest fails.
+    }
+
+    const ownerWindow = record.document.defaultView
+
+    if (ownerWindow) {
+      record.idleTimer = ownerWindow.setTimeout(() => {
+        record.idleTimer = 0
+
+        if (!record.inUse) {
+          this.destroy(frame)
+        }
+      }, IDLE_WORKER_TTL_MS)
+    }
+
     return true
   }
 
@@ -100,17 +134,32 @@ export default class CaptureWorkerPool {
     const record = this.recordsByFrame.get(frame)
 
     if (record) {
+      if (record.idleTimer !== 0) {
+        record.document.defaultView?.clearTimeout(record.idleTimer)
+      }
+
       this.records.delete(record)
       this.recordsByFrame.delete(frame)
     }
 
     frame.remove()
+
+    if (
+      record &&
+      ![...this.records].some(candidate => candidate.host === record.host)
+    ) {
+      record.host.remove()
+    }
   }
 
   dispose() {
     const hosts = this.getKnownHosts()
 
     for (const record of this.records) {
+      if (record.idleTimer !== 0) {
+        record.document.defaultView?.clearTimeout(record.idleTimer)
+      }
+
       record.frame.remove()
     }
 
