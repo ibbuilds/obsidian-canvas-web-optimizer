@@ -23,6 +23,20 @@ export default class CaptureWorkerPool {
   private readonly recordsByFrame = new WeakMap<HTMLElement, WorkerRecord>()
   private readonly hosts = new WeakMap<Document, HTMLElement>()
 
+  get total(): number {
+    return this.records.size
+  }
+
+  get idle(): number {
+    let idle = 0
+
+    for (const record of this.records) {
+      if (!record.inUse) idle++
+    }
+
+    return idle
+  }
+
   register(frame: WorkerFrame, document: Document) {
     const existing = this.recordsByFrame.get(frame)
 
@@ -94,13 +108,15 @@ export default class CaptureWorkerPool {
   }
 
   dispose() {
+    const hosts = this.getKnownHosts()
+
     for (const record of this.records) {
       record.frame.remove()
     }
 
     this.records.clear()
 
-    for (const host of this.getKnownHosts()) {
+    for (const host of hosts) {
       host.remove()
     }
   }
