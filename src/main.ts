@@ -1,4 +1,3 @@
-import { shell } from 'electron'
 import { around } from 'monkey-around'
 import {
   type Canvas,
@@ -297,6 +296,30 @@ function resolveGuestWebContents(
     return null
   }
 }
+function openExternalUrl(url: string): Promise<void> {
+  const runtimeRequire = getRuntimeRequire()
+
+  if (!runtimeRequire) {
+    return Promise.reject(new Error('Electron runtime is unavailable'))
+  }
+
+  try {
+    const electron = runtimeRequire('electron') as {
+      shell?: {
+        openExternal(target: string): Promise<void>
+      }
+    }
+
+    if (!electron.shell?.openExternal) {
+      return Promise.reject(new Error('Electron shell is unavailable'))
+    }
+
+    return electron.shell.openExternal(url)
+  } catch (error) {
+    return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+  }
+}
+
 
 function afterTransition(element: HTMLElement, callback: () => void) {
   let finished = false
@@ -857,7 +880,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         event.preventDefault()
         event.stopImmediatePropagation()
 
-        void shell.openExternal(node.url)
+        void openExternalUrl(node.url).catch(error => this.log(error, true))
       },
       true
     )
