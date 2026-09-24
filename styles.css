@@ -68,3 +68,19 @@
 .canvas-web-pending-status {
   font-size: 0.8em;
 }
+
+.canvas-web-capture-worker-host {
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
+  width: 2px;
+  height: 2px;
+  overflow: hidden;
+  pointer-events: none;
+  contain: strict;
+}
+
+.canvas-web-capture-worker-host webview {
+  width: 1px;
+  height: 1px;
+}
