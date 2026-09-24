@@ -1,6 +1,6 @@
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { homedir, platform, tmpdir, totalmem } from 'node:os'
+import { constants as osConstants, homedir, platform, setPriority, tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 
 const BROWSER_START_TIMEOUT_MS = 6000
@@ -899,6 +899,14 @@ export default class LocalBrowserRenderer {
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
     })
+
+    if (child.pid) {
+      try {
+        setPriority(child.pid, osConstants.priority.PRIORITY_BELOW_NORMAL)
+      } catch {
+        // Best effort. Generation remains bounded by the adaptive worker pool.
+      }
+    }
 
     try {
       const pipeWrite = child.stdio[3] as NodeJS.WritableStream | null
