@@ -16,7 +16,9 @@ const URL_CACHE_INDEX_FILENAME = 'url-index.json'
 const URL_CACHE_INDEX_WRITE_DELAY_MS = 250
 
 const THUMBNAIL_JPEG_QUALITY = 72
+const THUMBNAIL_MIN_LONG_EDGE = 512
 const THUMBNAIL_MAX_LONG_EDGE = 768
+const THUMBNAIL_NODE_SCALE = 1.25
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
 const PREVIEW_LOAD_TIMEOUT_MS = 1000
@@ -1500,13 +1502,21 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     session.finish('success')
   }
 
-  private optimizeThumbnail(image: ThumbnailImage): ThumbnailImage {
+  private optimizeThumbnail(image: ThumbnailImage, node: LinkNode): ThumbnailImage {
     const size = image.getSize()
     const longEdge = Math.max(size.width, size.height)
+    const nodeLongEdge =
+      typeof node.width === 'number' && typeof node.height === 'number'
+        ? Math.max(node.width, node.height)
+        : THUMBNAIL_MAX_LONG_EDGE
+    const targetLongEdge = Math.min(
+      THUMBNAIL_MAX_LONG_EDGE,
+      Math.max(THUMBNAIL_MIN_LONG_EDGE, Math.ceil(nodeLongEdge * THUMBNAIL_NODE_SCALE))
+    )
 
-    if (longEdge <= THUMBNAIL_MAX_LONG_EDGE) return image
+    if (longEdge <= targetLongEdge) return image
 
-    const scale = THUMBNAIL_MAX_LONG_EDGE / longEdge
+    const scale = targetLongEdge / longEdge
 
     return image.resize({
       width: Math.max(1, Math.round(size.width * scale)),
@@ -1539,7 +1549,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       }
 
       const encodeStartedAt = performance.now()
-      const optimized = this.optimizeThumbnail(image)
+      const optimized = this.optimizeThumbnail(image, node)
       const jpeg = optimized.toJPEG(THUMBNAIL_JPEG_QUALITY)
       this.encodeTotalMs += performance.now() - encodeStartedAt
 
