@@ -2479,6 +2479,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Generation engine: ${generationEngine}`,
       `Local browser: ${localBrowserStatus}`,
       `Local browser unavailable reason: ${localBrowserUnavailableReason}`,
+      `Local browser hardware: ${this.localBrowserRenderer?.hardwareSummary ?? 'unknown'}`,
+      `Local browser concurrency: ${this.localBrowserRenderer?.concurrencySummary ?? 'unknown'}`,
       `Local browser active tasks: ${this.localBrowserRenderer?.activeCount ?? 0}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
