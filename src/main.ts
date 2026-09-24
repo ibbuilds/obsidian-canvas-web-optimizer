@@ -19,9 +19,9 @@ const PREVIEW_LOAD_TIMEOUT_MS = 1000
 const INTERACTIVE_PAINT_SETTLE_MS = 50
 const GENERATION_JOB_TIMEOUT_MS = 5000
 
-const CAPTURE_MAX_WAIT_MS = 1200
-const IMAGE_DECODE_TIMEOUT_MS = 800
-const FINAL_SETTLE_MAX_MS = 100
+const CAPTURE_MAX_WAIT_MS = 500
+const IMAGE_DECODE_TIMEOUT_MS = 300
+const FINAL_SETTLE_MAX_MS = 40
 
 const LIGHT_THEME_CSS = `
   :root {
@@ -560,6 +560,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (!preview) return false
 
+    if (!animate && !node.nodeEl.ownerDocument.hasFocus()) {
+      preview.classList.remove('link-thumbnail-enter', 'link-thumbnail-exit')
+      return true
+    }
+
     const loaded = await waitForImage(preview)
 
     if (!loaded || node._previewImageEl !== preview || !preview.isConnected) {
@@ -1095,12 +1100,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private async applyLightTheme(frameEl: LinkNode['frameEl']) {
     if (!frameEl?.isConnected) return
 
-    try {
-      await frameEl.insertCSS(LIGHT_THEME_CSS)
-      await frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
-    } catch {
-      // Best effort.
-    }
+    await Promise.allSettled([
+      frameEl.insertCSS(LIGHT_THEME_CSS),
+      frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
+    ])
   }
 
   private async revealInteractiveFrame(node: LinkNode, frameEl: NonNullable<LinkNode['frameEl']>) {
