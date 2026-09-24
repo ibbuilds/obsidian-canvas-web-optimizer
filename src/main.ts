@@ -25,6 +25,12 @@ const GENERATION_JOB_TIMEOUT_MS = 5000
 const GENERATION_MAX_ATTEMPTS = 3
 const GENERATION_RETRY_DELAY_MS = 150
 
+const GENERATION_LIGHT_THEME_CSS = `
+  :root {
+    color-scheme: light !important;
+  }
+`
+
 const LIGHT_THEME_SCRIPT = `
   (() => {
     document.documentElement.style.setProperty('color-scheme', 'light', 'important')
@@ -1249,6 +1255,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     await Promise.allSettled([frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)])
   }
 
+  private async applyGenerationLightTheme(frameEl: LinkNode['frameEl']) {
+    if (!frameEl?.isConnected) return
+
+    await Promise.allSettled([frameEl.insertCSS(GENERATION_LIGHT_THEME_CSS)])
+  }
+
   private async revealInteractiveFrame(node: LinkNode, frameEl: NonNullable<LinkNode['frameEl']>) {
     await this.applyLightTheme(frameEl)
 
@@ -1284,7 +1296,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (session?.node !== node || node.frameEl !== frameEl) return
 
     const themeStartedAt = performance.now()
-    await this.applyLightTheme(frameEl)
+    await this.applyGenerationLightTheme(frameEl)
     this.themeTotalMs += performance.now() - themeStartedAt
     this.themeCount++
 
