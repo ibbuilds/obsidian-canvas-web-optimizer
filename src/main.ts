@@ -1086,12 +1086,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           this.generationPreemptions++
         }
 
-        const canRequeue =
-          !this.getNodeState(node).cached && Boolean(node.nodeEl?.isConnected)
-        const shouldPriorityRequeue =
-          canRequeue && (session.requeue || outcome === 'stale')
-        const shouldRetryTimeout =
-          canRequeue && outcome === 'timeout' && session.attempt === 0
+        const canRequeue = !this.getNodeState(node).cached && Boolean(node.nodeEl?.isConnected)
+        const shouldPriorityRequeue = canRequeue && (session.requeue || outcome === 'stale')
+        const shouldRetryTimeout = canRequeue && outcome === 'timeout' && session.attempt === 0
 
         resolve()
 
