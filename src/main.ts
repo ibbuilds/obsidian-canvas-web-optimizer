@@ -1,4 +1,5 @@
 import { around } from 'monkey-around'
+import BackgroundExecutionController from './background-execution'
 import {
   type Canvas,
   type CanvasLeaf,
@@ -17,11 +18,8 @@ const THUMBNAIL_MAX_LONG_EDGE = 1024
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
 const PREVIEW_LOAD_TIMEOUT_MS = 1000
 const INTERACTIVE_PAINT_SETTLE_MS = 50
+const GENERATION_PAINT_TIMEOUT_MS = 120
 const GENERATION_JOB_TIMEOUT_MS = 5000
-
-const CAPTURE_MAX_WAIT_MS = 500
-const IMAGE_DECODE_TIMEOUT_MS = 300
-const FINAL_SETTLE_MAX_MS = 40
 
 const LIGHT_THEME_CSS = `
   :root {
@@ -53,66 +51,6 @@ const WEBVIEW_PAINT_READY_SCRIPT = `
   })
 `
 
-const CAPTURE_READY_SCRIPT = `
-  (() => {
-    const timeout = ms =>
-      new Promise(resolve => setTimeout(resolve, ms))
-
-    const waitForImages = async () => {
-      const images = [...document.images].filter(img => {
-        const rect = img.getBoundingClientRect()
-
-        return (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          !img.complete
-        )
-      })
-
-      await Promise.allSettled(
-        images.map(img =>
-          Promise.race([
-            img.decode?.() ?? Promise.resolve(),
-            timeout(${IMAGE_DECODE_TIMEOUT_MS})
-          ])
-        )
-      )
-    }
-
-    const ready = async () => {
-      const started = performance.now()
-
-      await Promise.allSettled([
-        document.fonts?.ready ?? Promise.resolve(),
-        waitForImages()
-      ])
-
-      const elapsed = performance.now() - started
-      const remaining = Math.max(
-        0,
-        Math.min(
-          ${FINAL_SETTLE_MAX_MS},
-          ${CAPTURE_MAX_WAIT_MS} - elapsed
-        )
-      )
-
-      if (remaining > 0) {
-        await timeout(remaining)
-      }
-
-      await new Promise(resolve =>
-        requestAnimationFrame(() =>
-          requestAnimationFrame(resolve)
-        )
-      )
-    }
-
-    return Promise.race([
-      ready(),
-      timeout(${CAPTURE_MAX_WAIT_MS})
-    ])
-  })()
-`
 
 type ThumbnailImage = {
   getSize(): { width: number; height: number }
@@ -232,6 +170,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly queuedGenerationIds = new Set<string>()
   private activeGeneration: ActiveGeneration | null = null
   private generationQueueScheduled = false
+  private readonly backgroundExecution = new BackgroundExecutionController()
+  private backgroundExecutionRelease: (() => void) | null = null
 
   private activeInteractiveNode: LinkNode | null = null
   private requestedInteractiveNode: LinkNode | null = null
@@ -297,6 +237,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.requestedInteractiveNode = null
     this.abortActiveGeneration(false)
     this.removeInteractiveFrameImmediately()
+    this.releaseBackgroundExecution()
+    this.backgroundExecution.dispose()
 
     this.reloadActiveCanvasViews()
   }
@@ -648,9 +590,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.generationQueueScheduled ||
       this.generationQueue.length === 0
     ) {
+      this.releaseBackgroundExecutionIfIdle()
       return
     }
 
+    this.ensureBackgroundExecution(this.generationQueue[0].node)
     this.generationQueueScheduled = true
 
     queueMicrotask(() => {
@@ -664,7 +608,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const job = this.dequeueNextGenerationJob()
 
-    if (!job) return
+    if (!job) {
+      this.releaseBackgroundExecutionIfIdle()
+      return
+    }
 
     if (!this.ensureNodeContentMounted(job.node)) {
       this.generationQueue.unshift(job)
@@ -810,12 +757,33 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
         if (shouldRequeue) {
           this.enqueueThumbnailGeneration(node, true)
+        } else {
+          this.releaseBackgroundExecutionIfIdle()
         }
       }
 
       this.activeGeneration = session
       this.requestNodeFrame(node, 'generation')
     })
+  }
+
+  private ensureBackgroundExecution(node: LinkNode) {
+    if (this.backgroundExecutionRelease) return
+
+    this.backgroundExecutionRelease = this.backgroundExecution.acquire(
+      node.nodeEl.ownerDocument.defaultView
+    )
+  }
+
+  private releaseBackgroundExecution() {
+    this.backgroundExecutionRelease?.()
+    this.backgroundExecutionRelease = null
+  }
+
+  private releaseBackgroundExecutionIfIdle() {
+    if (this.activeGeneration || this.generationQueue.length > 0) return
+
+    this.releaseBackgroundExecution()
   }
 
   private finishActiveGeneration(node: LinkNode, outcome: GenerationOutcome) {
@@ -964,6 +932,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         }
 
         this.abortActiveGeneration(true)
+        this.releaseBackgroundExecution()
 
         this.activeInteractiveNode = requestedNode
         this.setInteractiveClasses(requestedNode, true)
@@ -1142,12 +1111,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     await this.applyLightTheme(frameEl)
 
-    if (node.nodeEl.ownerDocument.hasFocus()) {
-      try {
-        await frameEl.executeJavaScript(CAPTURE_READY_SCRIPT)
-      } catch {
-        // Best effort.
-      }
+    try {
+      await Promise.race([
+        frameEl.executeJavaScript(WEBVIEW_PAINT_READY_SCRIPT),
+        delay(GENERATION_PAINT_TIMEOUT_MS)
+      ])
+    } catch {
+      // Best effort.
     }
 
     if (this.activeGeneration !== session) return
@@ -1458,6 +1428,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Generating thumbnails: ${this.activeGeneration ? 1 : 0}`,
       `Queued: ${this.generationQueue.length}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
+      `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
       `Cache hits: ${this.cacheHits}`,
       `Cache misses: ${this.cacheMisses}`,
       `Generated: ${this.generationCompleted}`,
