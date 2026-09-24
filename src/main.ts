@@ -15,8 +15,8 @@ const URL_CACHE_INDEX_VERSION = 1
 const URL_CACHE_INDEX_FILENAME = 'url-index.json'
 const URL_CACHE_INDEX_WRITE_DELAY_MS = 250
 
-const THUMBNAIL_JPEG_QUALITY = 76
-const THUMBNAIL_MAX_LONG_EDGE = 896
+const THUMBNAIL_JPEG_QUALITY = 72
+const THUMBNAIL_MAX_LONG_EDGE = 768
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
 const PREVIEW_LOAD_TIMEOUT_MS = 1000
@@ -815,7 +815,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       if (!job) break
 
-      if (!this.ensureNodeContentMounted(job.node)) {
+      this.queuedGenerationIds.add(job.node.id)
+      const mounted = this.ensureNodeContentMounted(job.node)
+      this.queuedGenerationIds.delete(job.node.id)
+
+      if (!mounted) {
         this.generationQueue.push(job)
         this.queuedGenerationIds.add(job.node.id)
         break
@@ -886,25 +890,36 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const intersects = (minX: number, minY: number, maxX: number, maxY: number) =>
       nodeMaxX >= minX && nodeMinX <= maxX && nodeMaxY >= minY && nodeMinY <= maxY
 
-    if (intersects(viewport.minX, viewport.minY, viewport.maxX, viewport.maxY)) {
-      return 0
-    }
+    const viewportWidth = Math.max(1, viewport.maxX - viewport.minX)
+    const viewportHeight = Math.max(1, viewport.maxY - viewport.minY)
+    const viewportCenterX = viewport.minX + viewportWidth / 2
+    const viewportCenterY = viewport.minY + viewportHeight / 2
+    const nodeCenterX = nodeMinX + node.width / 2
+    const nodeCenterY = nodeMinY + node.height / 2
+    const normalizedDistance = Math.min(
+      999,
+      Math.hypot(
+        (nodeCenterX - viewportCenterX) / viewportWidth,
+        (nodeCenterY - viewportCenterY) / viewportHeight
+      )
+    )
 
-    const marginX = viewport.maxX - viewport.minX
-    const marginY = viewport.maxY - viewport.minY
+    if (intersects(viewport.minX, viewport.minY, viewport.maxX, viewport.maxY)) {
+      return normalizedDistance
+    }
 
     if (
       intersects(
-        viewport.minX - marginX,
-        viewport.minY - marginY,
-        viewport.maxX + marginX,
-        viewport.maxY + marginY
+        viewport.minX - viewportWidth,
+        viewport.minY - viewportHeight,
+        viewport.maxX + viewportWidth,
+        viewport.maxY + viewportHeight
       )
     ) {
-      return 1
+      return 1000 + normalizedDistance
     }
 
-    return 2
+    return 2000 + normalizedDistance
   }
 
   private generateQueuedThumbnail(job: GenerationJob): Promise<void> {
@@ -1254,6 +1269,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     frameEl.addEventListener('did-fail-load', onFrameFailed)
 
     if (mode === 'generation') {
+      frameEl.setAudioMuted?.(true)
+
       frameEl.addEventListener(
         'dom-ready',
         () => {
@@ -1438,6 +1455,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     try {
       const image = await frameEl.capturePage()
+      frameEl.stop?.()
 
       if (node.frameEl !== frameEl || !frameEl.isConnected || image.isEmpty()) {
         return false
