@@ -381,6 +381,18 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return Promise.resolve()
     }
 
+    const cacheFilesExist =
+      this.thumbnailCacheIds.has(node.id) && this.metadataCacheIds.has(node.id)
+
+    if (!cacheFilesExist) {
+      this.markNodeCacheMiss(node, state)
+      return Promise.resolve()
+    }
+
+    if (!this.isNodeContentMounted(node)) {
+      return Promise.resolve()
+    }
+
     if (state.preparation) return state.preparation
 
     state.preparation = this.evaluateNodeCache(node, state).finally(() => {
@@ -391,14 +403,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private async evaluateNodeCache(node: LinkNode, state: NodeState) {
-    const cacheFilesExist =
-      this.thumbnailCacheIds.has(node.id) && this.metadataCacheIds.has(node.id)
-
-    if (!cacheFilesExist) {
-      this.markNodeCacheMiss(node, state)
-      return
-    }
-
     try {
       let metadata = this.metadataMemory.get(node.id)
 
@@ -445,10 +449,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private applyPreparedNodeState(node: LinkNode, state: NodeState) {
-    if (!this.isNodeContentMounted(node)) return
-
     if (state.cached) {
-      this.ensurePreview(node)
+      if (this.isNodeContentMounted(node)) {
+        this.ensurePreview(node)
+      }
+
       return
     }
 
@@ -550,8 +555,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     return preview
   }
 
-  private async showPreviewOverFrame(node: LinkNode): Promise<boolean> {
-    const preview = this.ensurePreview(node, true, true)
+  private async showPreviewOverFrame(
+    node: LinkNode,
+    animate = true
+  ): Promise<boolean> {
+    const preview = this.ensurePreview(node, true, animate)
 
     if (!preview) return false
 
@@ -559,6 +567,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (!loaded || node._previewImageEl !== preview || !preview.isConnected) {
       return false
+    }
+
+    if (!animate) {
+      preview.classList.remove('link-thumbnail-enter', 'link-thumbnail-exit')
+      return true
     }
 
     await new Promise<void>(resolve => {
@@ -606,7 +619,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private enqueueThumbnailGeneration(node: LinkNode, front = false) {
     const state = this.getNodeState(node)
 
-    if (state.cached || !this.isNodeContentMounted(node)) return
+    if (state.cached || !node.nodeEl?.isConnected) return
 
     if (this.activeGeneration?.node.id === node.id || this.queuedGenerationIds.has(node.id)) {
       return
@@ -638,7 +651,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     this.generationQueueScheduled = true
 
-    requestAnimationFrame(() => {
+    queueMicrotask(() => {
       this.generationQueueScheduled = false
       void this.processThumbnailQueue()
     })
@@ -650,6 +663,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const job = this.dequeueNextGenerationJob()
 
     if (!job) return
+
+    if (!this.ensureNodeContentMounted(job.node)) {
+      this.generationQueue.unshift(job)
+      this.queuedGenerationIds.add(job.node.id)
+      return
+    }
 
     await this.generateQueuedThumbnail(job)
 
@@ -666,7 +685,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       const job = this.generationQueue[index]
       const { node } = job
 
-      if (!this.isNodeContentMounted(node)) {
+      if (!node.nodeEl?.isConnected) {
         this.generationQueue.splice(index, 1)
         this.queuedGenerationIds.delete(node.id)
         continue
@@ -783,7 +802,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         const shouldRequeue =
           (session.requeue || outcome === 'stale') &&
           !this.getNodeState(node).cached &&
-          this.isNodeContentMounted(node)
+          Boolean(node.nodeEl?.isConnected)
 
         resolve()
 
@@ -859,9 +878,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handleBreakpointUpdate(node: LinkNode) {
+    const session = this.activeGeneration
+
     if (
       !this.isNodeContentMounted(node) &&
-      (this.activeInteractiveNode === node || this.getGenerationPriority(node) <= 1)
+      (this.activeInteractiveNode === node || session?.node === node)
     ) {
       this.ensureNodeContentMounted(node)
     }
@@ -871,14 +892,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    this.removeQueuedGeneration(node)
-
     if (this.activeInteractiveNode === node) {
       this.removeNodeFrame(node)
       this.clearInteractiveState(node)
     }
-
-    const session = this.activeGeneration
 
     if (session?.node === node) {
       this.removeNodeFrame(node)
@@ -890,18 +907,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.requestedFrameModes.set(node, mode)
     node.recreateFrame()
 
-    requestAnimationFrame(() => {
-      if (node.frameEl?.tagName === 'WEBVIEW') return
+    if (node.frameEl?.tagName === 'WEBVIEW') return
 
-      if (mode === 'generation') {
-        this.finishActiveGeneration(node, 'failure')
-        return
-      }
+    if (mode === 'generation') {
+      this.finishActiveGeneration(node, 'failure')
+      return
+    }
 
-      if (this.activeInteractiveNode === node) {
-        this.clearInteractiveState(node)
-      }
-    })
+    if (this.activeInteractiveNode === node) {
+      this.clearInteractiveState(node)
+    }
   }
 
   private requestInteractiveActivation(node: LinkNode) {
@@ -1122,10 +1137,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     await this.applyLightTheme(frameEl)
 
-    try {
-      await frameEl.executeJavaScript(CAPTURE_READY_SCRIPT)
-    } catch {
-      // Best effort.
+    if (node.nodeEl.ownerDocument.hasFocus()) {
+      try {
+        await frameEl.executeJavaScript(CAPTURE_READY_SCRIPT)
+      } catch {
+        // Best effort.
+      }
     }
 
     if (this.activeGeneration !== session) return
@@ -1196,7 +1213,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     node.updateNodeLabel(title)
 
-    const previewReady = await this.showPreviewOverFrame(node)
+    const previewReady = await this.showPreviewOverFrame(node, false)
 
     if (this.activeGeneration !== session) return
 
@@ -1334,14 +1351,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           }
 
           thisPlugin.attachActivationHandler(this)
-
-          if (
-            thisPlugin.isNodeContentMounted(this) ||
-            thisPlugin.getGenerationPriority(this) <= 1
-          ) {
-            thisPlugin.ensureNodeContentMounted(this)
-            thisPlugin.onNodeMounted(this)
-          }
+          void thisPlugin.prepareNode(this)
 
           return result
         },
