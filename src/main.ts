@@ -2145,10 +2145,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    // Match the local thumbnail renderer before the page finishes loading.
-    // This forces CSS/JS prefers-color-scheme to light for the lifetime of
-    // the guest WebContents, independent of the OS or Obsidian theme.
-    void this.forceWebviewLightPreference(frameEl)
+    if (mode !== 'interactive') {
+      // Generation/preload still get the same browser-level preference as the
+      // local thumbnail renderer. Interactive mode performs a guaranteed
+      // light-pref reload below before revealing the live page.
+      void this.forceWebviewLightPreference(frameEl)
+    }
 
     if (mode === 'preload') {
       const preload = this.generationPreload
@@ -2265,38 +2267,76 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    frameEl.addEventListener(
-      'dom-ready',
-      () => {
-        void this.revealInteractiveFrame(node, frameEl)
-      },
-      { once: true }
-    )
+    let lightPreferenceReloaded = false
+
+    const onInteractiveReady = () => {
+      void (async () => {
+        if (
+          this.activeInteractiveNode !== node ||
+          node.frameEl !== frameEl ||
+          !frameEl.isConnected
+        ) {
+          frameEl.removeEventListener('dom-ready', onInteractiveReady)
+          return
+        }
+
+        if (!lightPreferenceReloaded) {
+          const preferenceApplied = await this.forceWebviewLightPreference(frameEl)
+
+          if (
+            preferenceApplied &&
+            this.activeInteractiveNode === node &&
+            node.frameEl === frameEl &&
+            frameEl.isConnected
+          ) {
+            lightPreferenceReloaded = true
+            frameEl.reload()
+            return
+          }
+        }
+
+        frameEl.removeEventListener('dom-ready', onInteractiveReady)
+        await this.revealInteractiveFrame(node, frameEl)
+      })()
+    }
+
+    frameEl.addEventListener('dom-ready', onInteractiveReady)
   }
 
-  private async forceWebviewLightPreference(frameEl: LinkNode['frameEl']) {
-    if (!frameEl?.isConnected) return
+  private async forceWebviewLightPreference(
+    frameEl: LinkNode['frameEl']
+  ): Promise<boolean> {
+    if (!frameEl?.isConnected) return false
 
     const guest = resolveGuestWebContents(frameEl)
 
-    if (!guest || guest.isDestroyed?.()) return
+    if (!guest || guest.isDestroyed?.()) return false
 
     try {
       if (!guest.debugger.isAttached()) {
         guest.debugger.attach()
       }
 
+      // This is the same browser-level preference used by the local thumbnail
+      // renderer, but applied to Obsidian's guest WebContents.
+      await guest.debugger.sendCommand('Emulation.setEmulatedMedia', {
+        media: 'screen',
+        features: [{ name: 'prefers-color-scheme', value: 'light' }]
+      })
+
       await Promise.allSettled([
-        guest.debugger.sendCommand('Emulation.setEmulatedMedia', {
-          media: 'screen',
-          features: [{ name: 'prefers-color-scheme', value: 'light' }]
-        }),
         guest.debugger.sendCommand('Emulation.setAutoDarkModeOverride', {
           enabled: false
+        }),
+        guest.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+          source: LIGHT_THEME_SCRIPT
         })
       ])
+
+      return true
     } catch (error) {
       this.log(`Unable to force light color preference for webview: ${String(error)}`, true)
+      return false
     }
   }
 
