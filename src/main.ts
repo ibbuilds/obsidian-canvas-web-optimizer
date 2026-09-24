@@ -81,15 +81,13 @@ type ElectronGuestWebContentsLike = {
   isDestroyed?(): boolean
 }
 
-type ElectronNativeThemeLike = {
-  themeSource: 'system' | 'light' | 'dark'
+type ElectronWebContentsModuleLike = {
+  fromId(id: number): ElectronGuestWebContentsLike | undefined
 }
 
 type ElectronRemoteLike = {
-  nativeTheme?: ElectronNativeThemeLike
-  webContents?: {
-    fromId(id: number): ElectronGuestWebContentsLike | undefined
-  }
+  require?: (specifier: string) => unknown
+  webContents?: ElectronWebContentsModuleLike
 }
 
 type FrameMode = 'generation' | 'preload' | 'interactive'
@@ -205,33 +203,26 @@ function resolveGuestWebContents(
 
   try {
     const remote = runtimeRequire('@electron/remote') as ElectronRemoteLike
-    return remote.webContents?.fromId(id) ?? null
+    const direct = remote.webContents?.fromId(id)
+
+    if (direct) return direct
+
+    const remoteElectron = remote.require?.('electron') as
+      | { webContents?: ElectronWebContentsModuleLike }
+      | undefined
+    const throughRemoteRequire = remoteElectron?.webContents?.fromId(id)
+
+    if (throughRemoteRequire) return throughRemoteRequire
   } catch {
-    return null
-  }
-}
-
-function resolveNativeTheme(): ElectronNativeThemeLike | null {
-  const runtimeRequire = getRuntimeRequire()
-
-  if (!runtimeRequire) return null
-
-  try {
-    const remote = runtimeRequire('@electron/remote') as ElectronRemoteLike
-
-    if (remote.nativeTheme) {
-      return remote.nativeTheme
-    }
-  } catch {
-    // Fall through to the renderer's Electron export.
+    // Try the renderer Electron export as a last resort below.
   }
 
   try {
     const electron = runtimeRequire('electron') as {
-      nativeTheme?: ElectronNativeThemeLike
+      webContents?: ElectronWebContentsModuleLike
     }
 
-    return electron.nativeTheme ?? null
+    return electron.webContents?.fromId(id) ?? null
   } catch {
     return null
   }
@@ -324,7 +315,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private activeInteractiveNode: LinkNode | null = null
   private requestedInteractiveNode: LinkNode | null = null
   private interactiveTransitionRunning = false
-  private interactiveThemeOriginalSource: ElectronNativeThemeLike['themeSource'] | null = null
+  private interactiveLightPreferenceStatus = 'not attempted'
+  private interactiveMatchMediaLight: boolean | null = null
 
   private generationCompleted = 0
   private generationFailed = 0
@@ -2019,34 +2011,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
   }
 
-  private acquireInteractiveLightThemeFallback() {
-    if (this.interactiveThemeOriginalSource !== null) return
-
-    const nativeTheme = resolveNativeTheme()
-
-    if (!nativeTheme) return
-
-    this.interactiveThemeOriginalSource = nativeTheme.themeSource
-
-    if (nativeTheme.themeSource !== 'light') {
-      nativeTheme.themeSource = 'light'
-    }
-  }
-
-  private releaseInteractiveLightThemeFallback() {
-    const original = this.interactiveThemeOriginalSource
-
-    if (original === null) return
-
-    this.interactiveThemeOriginalSource = null
-
-    const nativeTheme = resolveNativeTheme()
-
-    if (nativeTheme && nativeTheme.themeSource !== original) {
-      nativeTheme.themeSource = original
-    }
-  }
-
   private requestInteractiveActivation(node: LinkNode) {
     this.requestedInteractiveNode = node
 
@@ -2090,7 +2054,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         this.releaseBackgroundExecution()
         this.removePendingPlaceholder(requestedNode)
 
-        this.acquireInteractiveLightThemeFallback()
         this.activeInteractiveNode = requestedNode
         this.setInteractiveClasses(requestedNode, true)
         this.requestNodeFrame(requestedNode, 'interactive')
@@ -2164,7 +2127,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     this.setInteractiveClasses(node, false)
     this.activeInteractiveNode = null
-    this.releaseInteractiveLightThemeFallback()
     this.scheduleThumbnailQueue()
   }
 
@@ -2211,7 +2173,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    void this.forceWebviewLightPreference(frameEl)
+    void this.forceWebviewLightPreference(frameEl, mode === 'interactive')
 
     if (mode === 'preload') {
       const preload = this.generationPreload
@@ -2337,20 +2299,37 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     )
   }
 
-  private async forceWebviewLightPreference(frameEl: LinkNode['frameEl']): Promise<boolean> {
-    if (!frameEl?.isConnected) return false
+  private async forceWebviewLightPreference(
+    frameEl: LinkNode['frameEl'],
+    trackInteractive = false
+  ): Promise<boolean> {
+    if (!frameEl?.isConnected) {
+      if (trackInteractive) {
+        this.interactiveLightPreferenceStatus = 'frame unavailable'
+      }
+
+      return false
+    }
 
     const guest = resolveGuestWebContents(frameEl)
 
-    if (!guest || guest.isDestroyed?.()) return false
+    if (!guest || guest.isDestroyed?.()) {
+      if (trackInteractive) {
+        this.interactiveLightPreferenceStatus = 'guest WebContents unavailable'
+      }
+
+      return false
+    }
 
     try {
       if (!guest.debugger.isAttached()) {
-        guest.debugger.attach('1.3')
+        try {
+          guest.debugger.attach('1.3')
+        } catch {
+          guest.debugger.attach()
+        }
       }
 
-      // This is the same browser-level preference used by the local thumbnail
-      // renderer, but applied to Obsidian's guest WebContents.
       await guest.debugger.sendCommand('Emulation.setEmulatedMedia', {
         media: 'screen',
         features: [{ name: 'prefers-color-scheme', value: 'light' }]
@@ -2365,8 +2344,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         })
       ])
 
+      if (trackInteractive) {
+        this.interactiveLightPreferenceStatus = 'CDP applied'
+      }
+
       return true
     } catch (error) {
+      if (trackInteractive) {
+        this.interactiveLightPreferenceStatus = `CDP failed: ${String(error)}`
+      }
+
       this.log(`Unable to force light color preference for webview: ${String(error)}`, true)
       return false
     }
@@ -2376,7 +2363,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (!frameEl?.isConnected) return false
 
     const [preferenceResult] = await Promise.allSettled([
-      this.forceWebviewLightPreference(frameEl),
+      this.forceWebviewLightPreference(frameEl, true),
       frameEl.insertCSS(GENERATION_LIGHT_THEME_CSS),
       frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
     ])
@@ -2385,6 +2372,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       .executeJavaScript("window.matchMedia('(prefers-color-scheme: light)').matches")
       .then(value => value === true)
       .catch(() => false)
+
+    this.interactiveMatchMediaLight = browserPreferenceIsLight
 
     return (
       preferenceResult.status === 'fulfilled' && preferenceResult.value && browserPreferenceIsLight
@@ -2395,18 +2384,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (!frameEl?.isConnected) return
 
     await Promise.allSettled([
-      this.forceWebviewLightPreference(frameEl),
+      this.forceWebviewLightPreference(frameEl, false),
       frameEl.insertCSS(GENERATION_LIGHT_THEME_CSS),
       frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
     ])
   }
 
   private async revealInteractiveFrame(node: LinkNode, frameEl: NonNullable<LinkNode['frameEl']>) {
-    const preferenceApplied = await this.applyLightTheme(frameEl)
-
-    if (preferenceApplied) {
-      this.releaseInteractiveLightThemeFallback()
-    }
+    await this.applyLightTheme(frameEl)
 
     try {
       await frameEl.executeJavaScript(WEBVIEW_PAINT_READY_SCRIPT)
@@ -2803,6 +2788,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.localGenerationCount = 0
     this.localFallbacks = 0
     this.localTimeouts = 0
+    this.interactiveLightPreferenceStatus = 'not attempted'
+    this.interactiveMatchMediaLight = null
     this.localBrowserRenderer?.resetMetrics()
     this.networkPreconnector?.resetMetrics()
 
@@ -2910,6 +2897,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Local browser tuning: ${this.localTuningStatus}`,
       `Local browser active tasks: ${this.localBrowserRenderer?.activeCount ?? 0}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
+      `Interactive light preference: ${this.interactiveLightPreferenceStatus}`,
+      `Interactive matchMedia light: ${
+        this.interactiveMatchMediaLight === null ? 'not tested' : this.interactiveMatchMediaLight
+      }`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
       `Network preconnect: ${
         localRendererAvailable
