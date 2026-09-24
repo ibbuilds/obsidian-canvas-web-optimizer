@@ -44,6 +44,7 @@ declare module 'obsidian' {
     capturePage(): Promise<CanvasThumbnailImage>
     executeJavaScript(code: string): Promise<unknown>
     getTitle(): string
+    getWebContentsId(): number
     insertCSS(css: string): Promise<string>
   }
 
