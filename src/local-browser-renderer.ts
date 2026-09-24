@@ -469,7 +469,10 @@ export default class LocalBrowserRenderer {
   private navigationTotalMs = 0
   private screenshotTotalMs = 0
 
-  readonly poolSize = Math.max(2, Math.min(5, Math.ceil((navigator.hardwareConcurrency || 4) * 0.625)))
+  readonly poolSize = Math.max(
+    2,
+    Math.min(5, Math.ceil((navigator.hardwareConcurrency || 4) * 0.625))
+  )
 
   get available(): boolean {
     return !this.disposed && this.disabledReason === null && this.candidates.length > 0
