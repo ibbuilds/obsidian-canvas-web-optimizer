@@ -843,7 +843,7 @@ export default class LocalBrowserRenderer {
     }
   }
 
-  dispose() {
+  async dispose(): Promise<void> {
     if (this.disposed) return
 
     this.disposed = true
@@ -853,7 +853,7 @@ export default class LocalBrowserRenderer {
       cancel()
     }
 
-    void this.closeBrowser()
+    await this.closeBrowser()
   }
 
   private ensureBrowser(): Promise<BrowserRuntime> {
