@@ -23,108 +23,17 @@ const LOCAL_BROWSER_MEMORY_PER_WORKER_GIB = 1.75
 
 const LIGHT_THEME_SCRIPT = `
   (() => {
-    const DARK_CLASS_NAMES = [
-      'dark',
-      'theme-dark',
-      'dark-theme',
-      'dark-mode',
-      'mode-dark'
-    ]
-    const THEME_ATTRIBUTES = [
-      'data-theme',
-      'data-color-mode',
-      'data-theme-mode',
-      'data-color-scheme',
-      'data-bs-theme',
-      'data-mode'
-    ]
-    const THEME_KEY = /(^|[_-])(theme|appearance|color[-_]?scheme|mode)([_-]|$)/i
-    const DARK_VALUE = /^(?:"|')?(dark|system|auto)(?:"|')?$/i
+    document.documentElement.style.setProperty('color-scheme', 'light', 'important')
 
-    const forceStorage = storage => {
-      try {
-        for (let index = 0; index < storage.length; index++) {
-          const key = storage.key(index)
+    let meta = document.querySelector('meta[name="color-scheme"]')
 
-          if (!key || !THEME_KEY.test(key)) continue
-
-          const value = storage.getItem(key)
-
-          if (!value || !DARK_VALUE.test(value.trim())) continue
-
-          storage.setItem(key, 'light')
-        }
-      } catch {
-        // Storage can be unavailable on some origins.
-      }
+    if (!meta) {
+      meta = document.createElement('meta')
+      meta.setAttribute('name', 'color-scheme')
+      document.head?.appendChild(meta)
     }
 
-    const forceElement = element => {
-      if (!element) return
-
-      element.style.setProperty('color-scheme', 'light', 'important')
-
-      for (const attribute of THEME_ATTRIBUTES) {
-        const value = element.getAttribute(attribute)
-
-        if (value && /^(dark|system|auto)$/i.test(value)) {
-          element.setAttribute(attribute, 'light')
-        }
-      }
-
-      for (const className of DARK_CLASS_NAMES) {
-        element.classList.remove(className)
-      }
-    }
-
-    const forceLight = () => {
-      forceStorage(window.localStorage)
-      forceStorage(window.sessionStorage)
-      forceElement(document.documentElement)
-      forceElement(document.body)
-
-      let meta = document.querySelector('meta[name="color-scheme"]')
-
-      if (!meta && document.head) {
-        meta = document.createElement('meta')
-        meta.setAttribute('name', 'color-scheme')
-        document.head.appendChild(meta)
-      }
-
-      meta?.setAttribute('content', 'light')
-    }
-
-    forceLight()
-
-    if (!window.__canvasWebOptimizerLightObserver) {
-      const observer = new MutationObserver(forceLight)
-
-      observer.observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ['class', ...THEME_ATTRIBUTES],
-        subtree: false
-      })
-
-      const observeBody = () => {
-        if (!document.body) return
-
-        observer.observe(document.body, {
-          attributes: true,
-          attributeFilter: ['class', ...THEME_ATTRIBUTES],
-          subtree: false
-        })
-      }
-
-      if (document.body) {
-        observeBody()
-      } else {
-        document.addEventListener('DOMContentLoaded', observeBody, { once: true })
-      }
-
-      window.__canvasWebOptimizerLightObserver = observer
-    }
-
-    window.addEventListener('storage', forceLight)
+    meta.setAttribute('content', 'light')
   })()
 `
 
