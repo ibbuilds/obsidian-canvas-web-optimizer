@@ -75,6 +75,23 @@ const GENERATION_READY_SCRIPT = `
 
     meta.setAttribute('content', 'light')
 
+    for (const media of document.querySelectorAll('video, audio')) {
+      media.muted = true
+      media.pause()
+    }
+
+    for (const animation of document.getAnimations()) {
+      const timing = animation.effect?.getComputedTiming()
+
+      if (!Number.isFinite(timing?.endTime)) continue
+
+      try {
+        animation.finish()
+      } catch {
+        // Some animations cannot be finished programmatically.
+      }
+    }
+
     return new Promise(resolve => {
       requestAnimationFrame(resolve)
     })
