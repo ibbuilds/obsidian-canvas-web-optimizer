@@ -320,7 +320,6 @@ function openExternalUrl(url: string): Promise<void> {
   }
 }
 
-
 function afterTransition(element: HTMLElement, callback: () => void) {
   let finished = false
   let timeoutId = 0
