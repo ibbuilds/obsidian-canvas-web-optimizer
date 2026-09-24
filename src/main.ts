@@ -1,3 +1,4 @@
+import { shell } from 'electron'
 import { around } from 'monkey-around'
 import {
   type Canvas,
@@ -41,17 +42,108 @@ const GENERATION_LIGHT_THEME_CSS = `
 
 const LIGHT_THEME_SCRIPT = `
   (() => {
-    document.documentElement.style.setProperty('color-scheme', 'light', 'important')
+    const DARK_CLASS_NAMES = [
+      'dark',
+      'theme-dark',
+      'dark-theme',
+      'dark-mode',
+      'mode-dark'
+    ]
+    const THEME_ATTRIBUTES = [
+      'data-theme',
+      'data-color-mode',
+      'data-theme-mode',
+      'data-color-scheme',
+      'data-bs-theme',
+      'data-mode'
+    ]
+    const THEME_KEY = /(^|[_-])(theme|appearance|color[-_]?scheme|mode)([_-]|$)/i
+    const DARK_VALUE = /^(?:"|')?(dark|system|auto)(?:"|')?$/i
 
-    let meta = document.querySelector('meta[name="color-scheme"]')
+    const forceStorage = storage => {
+      try {
+        for (let index = 0; index < storage.length; index++) {
+          const key = storage.key(index)
 
-    if (!meta) {
-      meta = document.createElement('meta')
-      meta.setAttribute('name', 'color-scheme')
-      document.head?.appendChild(meta)
+          if (!key || !THEME_KEY.test(key)) continue
+
+          const value = storage.getItem(key)
+
+          if (!value || !DARK_VALUE.test(value.trim())) continue
+
+          storage.setItem(key, 'light')
+        }
+      } catch {
+        // Storage can be unavailable on some origins.
+      }
     }
 
-    meta.setAttribute('content', 'light')
+    const forceElement = element => {
+      if (!element) return
+
+      element.style.setProperty('color-scheme', 'light', 'important')
+
+      for (const attribute of THEME_ATTRIBUTES) {
+        const value = element.getAttribute(attribute)
+
+        if (value && /^(dark|system|auto)$/i.test(value)) {
+          element.setAttribute(attribute, 'light')
+        }
+      }
+
+      for (const className of DARK_CLASS_NAMES) {
+        element.classList.remove(className)
+      }
+    }
+
+    const forceLight = () => {
+      forceStorage(window.localStorage)
+      forceStorage(window.sessionStorage)
+      forceElement(document.documentElement)
+      forceElement(document.body)
+
+      let meta = document.querySelector('meta[name="color-scheme"]')
+
+      if (!meta && document.head) {
+        meta = document.createElement('meta')
+        meta.setAttribute('name', 'color-scheme')
+        document.head.appendChild(meta)
+      }
+
+      meta?.setAttribute('content', 'light')
+    }
+
+    forceLight()
+
+    if (!window.__canvasWebOptimizerLightObserver) {
+      const observer = new MutationObserver(forceLight)
+
+      observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['class', ...THEME_ATTRIBUTES],
+        subtree: false
+      })
+
+      const observeBody = () => {
+        if (!document.body) return
+
+        observer.observe(document.body, {
+          attributes: true,
+          attributeFilter: ['class', ...THEME_ATTRIBUTES],
+          subtree: false
+        })
+      }
+
+      if (document.body) {
+        observeBody()
+      } else {
+        document.addEventListener('DOMContentLoaded', observeBody, { once: true })
+      }
+
+      window.__canvasWebOptimizerLightObserver = observer
+    }
+
+    window.addEventListener('storage', forceLight)
   })()
 `
 
@@ -750,6 +842,22 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         event.stopImmediatePropagation()
 
         this.requestInteractiveActivation(node)
+      },
+      true
+    )
+
+    node.nodeEl.addEventListener(
+      'dblclick',
+      event => {
+        const target = event.target as Element | null
+        const label = target?.closest?.('.canvas-node-label')
+
+        if (!label || !node.nodeEl.contains(label)) return
+
+        event.preventDefault()
+        event.stopImmediatePropagation()
+
+        void shell.openExternal(node.url)
       },
       true
     )
@@ -2108,6 +2216,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private setInteractiveClasses(node: LinkNode, active: boolean) {
     const root = node.canvas?.wrapperEl ?? node.nodeEl.ownerDocument.body
+
+    if (active) {
+      node.updateNodeLabel(this.getNodeState(node).metadata?.title ?? node.url)
+    }
 
     node.nodeEl.classList.toggle('canvas-web-active', active)
     root.classList.toggle('canvas-web-has-active', active)
