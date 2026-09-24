@@ -1,6 +1,6 @@
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { homedir, platform, tmpdir } from 'node:os'
+import { homedir, platform, tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 
 const BROWSER_START_TIMEOUT_MS = 6000
@@ -9,6 +9,9 @@ const NAVIGATION_TIMEOUT_MS = 5000
 const PAINT_READY_TIMEOUT_MS = 250
 const IDLE_SHUTDOWN_MS = 2500
 const MIN_SCREENSHOT_BYTES = 512
+const LOCAL_BROWSER_MAX_WORKERS = 8
+const LOCAL_BROWSER_MEMORY_RESERVE_GIB = 2
+const LOCAL_BROWSER_MEMORY_PER_WORKER_GIB = 1.75
 
 const LIGHT_THEME_SCRIPT = `
   (() => {
@@ -469,9 +472,29 @@ export default class LocalBrowserRenderer {
   private navigationTotalMs = 0
   private screenshotTotalMs = 0
 
+  private readonly logicalCpuCount = Math.max(1, navigator.hardwareConcurrency || 4)
+  private readonly totalMemoryGiB = totalmem() / 1024 ** 3
+  private readonly cpuConcurrencyLimit = Math.max(1, Math.floor(this.logicalCpuCount * 0.75))
+  private readonly memoryConcurrencyLimit = Math.max(
+    1,
+    Math.floor(
+      Math.max(0, this.totalMemoryGiB - LOCAL_BROWSER_MEMORY_RESERVE_GIB) /
+        LOCAL_BROWSER_MEMORY_PER_WORKER_GIB
+    )
+  )
+
+  readonly maxPoolSize = Math.max(
+    1,
+    Math.min(
+      LOCAL_BROWSER_MAX_WORKERS,
+      this.cpuConcurrencyLimit,
+      this.memoryConcurrencyLimit
+    )
+  )
+
   readonly poolSize = Math.max(
-    2,
-    Math.min(5, Math.ceil((navigator.hardwareConcurrency || 4) * 0.625))
+    1,
+    Math.min(this.maxPoolSize, Math.ceil(this.logicalCpuCount * 0.625))
   )
 
   get available(): boolean {
@@ -502,6 +525,14 @@ export default class LocalBrowserRenderer {
 
   get activeCount(): number {
     return this.activeTasks
+  }
+
+  get hardwareSummary(): string {
+    return `${this.logicalCpuCount} logical CPUs / ${this.totalMemoryGiB.toFixed(1)} GiB RAM`
+  }
+
+  get concurrencySummary(): string {
+    return `${this.poolSize} active / ${this.maxPoolSize} hardware cap`
   }
 
   get launchCount(): number {
