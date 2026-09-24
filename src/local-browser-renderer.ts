@@ -157,9 +157,7 @@ function detectBrowserCandidates(): BrowserCandidate[] {
       candidates,
       seen,
       'Google Chrome',
-      localAppData
-        ? join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe')
-        : undefined
+      localAppData ? join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe') : undefined
     )
     addCandidate(
       candidates,
@@ -402,7 +400,11 @@ class CdpConnection {
     })
   }
 
-  waitForEvent<T>(method: string, sessionId?: string, timeoutMs = CDP_COMMAND_TIMEOUT_MS): Promise<T> {
+  waitForEvent<T>(
+    method: string,
+    sessionId?: string,
+    timeoutMs = CDP_COMMAND_TIMEOUT_MS
+  ): Promise<T> {
     if (!this.isOpen) {
       return Promise.reject(new Error('Local browser DevTools connection is not open'))
     }
@@ -579,10 +581,7 @@ export default class LocalBrowserRenderer {
   private navigationTotalMs = 0
   private screenshotTotalMs = 0
 
-  readonly poolSize = Math.max(
-    2,
-    Math.min(4, Math.floor((navigator.hardwareConcurrency || 4) / 2))
-  )
+  readonly poolSize = Math.max(2, Math.min(4, Math.floor((navigator.hardwareConcurrency || 4) / 2)))
 
   get available(): boolean {
     return !this.disposed && this.disabledReason === null && this.candidates.length > 0
@@ -631,7 +630,9 @@ export default class LocalBrowserRenderer {
   }
 
   get averageLaunchMs(): number {
-    return this.browserLaunches > 0 ? Math.round(this.browserLaunchTotalMs / this.browserLaunches) : 0
+    return this.browserLaunches > 0
+      ? Math.round(this.browserLaunchTotalMs / this.browserLaunches)
+      : 0
   }
 
   get averageRenderMs(): number {
@@ -870,7 +871,7 @@ export default class LocalBrowserRenderer {
       return Promise.reject(new Error('Local browser renderer is disposed'))
     }
 
-    if (this.browser && this.browser.connection.isOpen && this.browser.process.exitCode === null) {
+    if (this.browser?.connection.isOpen && this.browser.process.exitCode === null) {
       return Promise.resolve(this.browser)
     }
 
