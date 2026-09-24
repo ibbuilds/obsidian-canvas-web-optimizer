@@ -356,12 +356,17 @@ export default class OffscreenThumbnailRenderer {
     let domReadyAt = 0
     let themeMs = 0
     let paintReadyStartedAt = 0
-    let overallTimeoutId = 0
-    let paintTimeoutId = 0
+    let overallTimeoutId: ReturnType<typeof globalThis.setTimeout> | undefined
+    let paintTimeoutId: ReturnType<typeof globalThis.setTimeout> | undefined
 
     const cleanup = () => {
-      globalThis.clearTimeout(overallTimeoutId)
-      globalThis.clearTimeout(paintTimeoutId)
+      if (overallTimeoutId !== undefined) {
+        globalThis.clearTimeout(overallTimeoutId)
+      }
+
+      if (paintTimeoutId !== undefined) {
+        globalThis.clearTimeout(paintTimeoutId)
+      }
       webContents.removeListener('dom-ready', onDomReady)
       webContents.removeListener('did-fail-load', onDidFailLoad)
       webContents.removeListener('render-process-gone', onRenderProcessGone)
