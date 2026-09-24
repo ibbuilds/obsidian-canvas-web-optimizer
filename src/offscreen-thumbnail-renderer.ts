@@ -397,8 +397,7 @@ export default class OffscreenThumbnailRenderer {
         totalMs: performance.now() - task.startedAt,
         domReadyMs: domReadyAt > 0 ? domReadyAt - task.startedAt : 0,
         themeMs,
-        paintReadyMs:
-          paintReadyStartedAt > 0 ? performance.now() - paintReadyStartedAt : 0
+        paintReadyMs: paintReadyStartedAt > 0 ? performance.now() - paintReadyStartedAt : 0
       })
     }
 
@@ -441,10 +440,7 @@ export default class OffscreenThumbnailRenderer {
         themeMs = performance.now() - themeStartedAt
 
         try {
-          await Promise.race([
-            webContents.executeJavaScript(PAINT_READY_SCRIPT),
-            delay(120)
-          ])
+          await Promise.race([webContents.executeJavaScript(PAINT_READY_SCRIPT), delay(120)])
         } catch {
           // Paint readiness is best effort.
         }
@@ -498,7 +494,9 @@ export default class OffscreenThumbnailRenderer {
     if (result) {
       task.resolve(result)
     } else {
-      task.reject(error instanceof Error ? error : new Error(String(error ?? 'Offscreen render failed')))
+      task.reject(
+        error instanceof Error ? error : new Error(String(error ?? 'Offscreen render failed'))
+      )
     }
 
     this.pump()
