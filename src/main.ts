@@ -330,14 +330,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const loadedData = await this.loadData()
 
-    this.pluginData =
-      loadedData && typeof loadedData === 'object' ? (loadedData as PluginData) : {}
+    this.pluginData = loadedData && typeof loadedData === 'object' ? (loadedData as PluginData) : {}
 
     this.networkPreconnector = new NetworkPreconnector(this.getWebviewPartition())
     this.localBrowserRenderer = new LocalBrowserRenderer()
 
-    const tuningRecord =
-      this.pluginData.localRendererTuning?.[this.localBrowserRenderer.tuningKey]
+    const tuningRecord = this.pluginData.localRendererTuning?.[this.localBrowserRenderer.tuningKey]
 
     if (tuningRecord) {
       this.localBrowserRenderer.setPoolSize(tuningRecord.bestConcurrency)
@@ -850,15 +848,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       const renderer = this.localBrowserRenderer
 
-      this.localBatchTuning =
-        renderer?.available
-          ? {
-              concurrency: renderer.poolSize,
-              localGenerationCount: this.localGenerationCount,
-              localFallbacks: this.localFallbacks,
-              generationPreemptions: this.generationPreemptions
-            }
-          : null
+      this.localBatchTuning = renderer?.available
+        ? {
+            concurrency: renderer.poolSize,
+            localGenerationCount: this.localGenerationCount,
+            localFallbacks: this.localFallbacks,
+            generationPreemptions: this.generationPreemptions
+          }
+        : null
     }
 
     const job: GenerationJob = {
@@ -1640,12 +1637,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.pluginData.localRendererTuning = {}
     }
 
-    const record =
-      this.pluginData.localRendererTuning[key] ??
-      {
-        bestConcurrency: snapshot.concurrency,
-        scores: {}
-      }
+    const record = this.pluginData.localRendererTuning[key] ?? {
+      bestConcurrency: snapshot.concurrency,
+      scores: {}
+    }
 
     const scoreKey = String(snapshot.concurrency)
     const existing = record.scores[scoreKey]
@@ -1678,11 +1673,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           ? Number.POSITIVE_INFINITY
           : top.score / currentBest.mean - 1
 
-      if (
-        top.concurrency === record.bestConcurrency ||
-        improvement >= 0.02 ||
-        !currentBest
-      ) {
+      if (top.concurrency === record.bestConcurrency || improvement >= 0.02 || !currentBest) {
         record.bestConcurrency = top.concurrency
       }
     }
@@ -1701,9 +1692,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     renderer.setPoolSize(nextConcurrency)
     this.localTuningStatus =
-      nextConcurrency === best
-        ? `settled at ${best}`
-        : `testing ${nextConcurrency}; best ${best}`
+      nextConcurrency === best ? `settled at ${best}` : `testing ${nextConcurrency}; best ${best}`
 
     this.pluginData.localRendererTuning[key] = record
 
