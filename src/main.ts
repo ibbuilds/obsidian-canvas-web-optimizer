@@ -96,12 +96,14 @@ type NodeState = {
 
 type GenerationJob = {
   node: LinkNode
+  enqueuedAt: number
 }
 
 type ActiveGeneration = {
   node: LinkNode
   url: string
   startedAt: number
+  domReadyAt?: number
   requeue: boolean
   finish: (outcome: GenerationOutcome) => void
 }
@@ -211,7 +213,15 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private generationTimedOut = 0
   private generationPreemptions = 0
   private generationTotalMs = 0
+  private generationDomReadyTotalMs = 0
+  private generationDomReadyCount = 0
+  private queueWaitTotalMs = 0
+  private dequeuedGenerationJobs = 0
+  private peakGenerationWorkers = 0
   private captureTotalMs = 0
+  private capturePageTotalMs = 0
+  private encodeTotalMs = 0
+  private writeTotalMs = 0
   private capturedThumbnailBytes = 0
 
   async onload() {
@@ -784,7 +794,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    const job: GenerationJob = { node }
+    const job: GenerationJob = {
+      node,
+      enqueuedAt: performance.now()
+    }
 
     if (front) {
       this.generationQueue.unshift(job)
@@ -881,6 +894,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const [job] = this.generationQueue.splice(bestIndex, 1)
     this.queuedGenerationIds.delete(job.node.id)
+    this.queueWaitTotalMs += performance.now() - job.enqueuedAt
+    this.dequeuedGenerationJobs++
 
     return job
   }
@@ -1017,6 +1032,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       }
 
       this.activeGenerations.set(node.id, session)
+      this.peakGenerationWorkers = Math.max(
+        this.peakGenerationWorkers,
+        this.activeGenerations.size
+      )
       this.requestNodeFrame(node, 'generation')
     })
   }
@@ -1308,6 +1327,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       frameEl.addEventListener(
         'dom-ready',
         () => {
+          const session = this.activeGenerations.get(node.id)
+
+          if (session?.node === node && session.domReadyAt === undefined) {
+            session.domReadyAt = performance.now()
+            this.generationDomReadyTotalMs += session.domReadyAt - session.startedAt
+            this.generationDomReadyCount++
+          }
+
           void this.captureGeneratedFrame(node, frameEl)
         },
         { once: true }
@@ -1488,6 +1515,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const startedAt = performance.now()
 
     try {
+      const captureStartedAt = performance.now()
       let image = await frameEl.capturePage()
 
       if (image.isEmpty() && node.frameEl === frameEl && frameEl.isConnected) {
@@ -1495,16 +1523,21 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         image = await frameEl.capturePage()
       }
 
+      this.capturePageTotalMs += performance.now() - captureStartedAt
       frameEl.stop?.()
 
       if (node.frameEl !== frameEl || !frameEl.isConnected || image.isEmpty()) {
         return false
       }
 
+      const encodeStartedAt = performance.now()
       const optimized = this.optimizeThumbnail(image)
       const jpeg = optimized.toJPEG(THUMBNAIL_JPEG_QUALITY)
+      this.encodeTotalMs += performance.now() - encodeStartedAt
 
+      const writeStartedAt = performance.now()
       await this.app.vault.adapter.writeBinary(`${this.cacheDir}/${node.id}.thumbnail.jpg`, jpeg)
+      this.writeTotalMs += performance.now() - writeStartedAt
 
       this.captureTotalMs += performance.now() - startedAt
       this.capturedThumbnailBytes += jpeg.byteLength
@@ -1688,6 +1721,22 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const averageCaptureMs =
       this.generationCompleted > 0 ? Math.round(this.captureTotalMs / this.generationCompleted) : 0
+    const averageDomReadyMs =
+      this.generationDomReadyCount > 0
+        ? Math.round(this.generationDomReadyTotalMs / this.generationDomReadyCount)
+        : 0
+    const averageQueueWaitMs =
+      this.dequeuedGenerationJobs > 0
+        ? Math.round(this.queueWaitTotalMs / this.dequeuedGenerationJobs)
+        : 0
+    const averageCapturePageMs =
+      this.generationCompleted > 0
+        ? Math.round(this.capturePageTotalMs / this.generationCompleted)
+        : 0
+    const averageEncodeMs =
+      this.generationCompleted > 0 ? Math.round(this.encodeTotalMs / this.generationCompleted) : 0
+    const averageWriteMs =
+      this.generationCompleted > 0 ? Math.round(this.writeTotalMs / this.generationCompleted) : 0
 
     const diagnostics = [
       `Mounted web cards: ${mountedWebCards.size}`,
@@ -1703,8 +1752,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Generation failures: ${this.generationFailed}`,
       `Generation timeouts: ${this.generationTimedOut}`,
       `Generation preemptions: ${this.generationPreemptions}`,
+      `Peak generation workers: ${this.peakGenerationWorkers}`,
+      `Average queue wait: ${averageQueueWaitMs} ms`,
+      `Average DOM ready: ${averageDomReadyMs} ms`,
       `Average generation: ${averageGenerationMs} ms`,
-      `Average capture: ${averageCaptureMs} ms`,
+      `Average thumbnail pipeline: ${averageCaptureMs} ms`,
+      `Average capturePage: ${averageCapturePageMs} ms`,
+      `Average encode: ${averageEncodeMs} ms`,
+      `Average write: ${averageWriteMs} ms`,
       `Thumbnail bytes written: ${this.capturedThumbnailBytes}`
     ].join('\n')
 
