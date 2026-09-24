@@ -1043,12 +1043,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
         if (!localJob) break
 
-        if (!this.ensureNodeContentMounted(localJob.node)) {
-          this.generationQueue.unshift(localJob)
-          this.queuedGenerationIds.add(localJob.node.id)
-          break
-        }
-
+        // The sidecar only needs URL + logical card dimensions. Do not mount
+        // Canvas content just to generate a background thumbnail.
         this.startLocalGeneration(localJob, renderer)
       }
 
@@ -1667,31 +1663,33 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     node.updateNodeLabel(title)
 
-    const previewStartedAt = performance.now()
-    const previewReady = await this.showPreviewOverFrame(node, false)
-    this.previewReadyTotalMs += performance.now() - previewStartedAt
-    this.previewReadyCount++
+    if (this.isNodeContentMounted(node)) {
+      const previewStartedAt = performance.now()
+      const previewReady = await this.showPreviewOverFrame(node, false)
+      this.previewReadyTotalMs += performance.now() - previewStartedAt
+      this.previewReadyCount++
 
-    if (!this.isCurrentLocalGeneration(generation)) return
+      if (!this.isCurrentLocalGeneration(generation)) return
 
-    if (!previewReady || !this.getNodeState(node).cached) {
-      const failedState = this.getNodeState(node)
+      if (!previewReady || !this.getNodeState(node).cached) {
+        const failedState = this.getNodeState(node)
 
-      failedState.evaluated = true
-      failedState.cached = false
-      failedState.metadata = null
+        failedState.evaluated = true
+        failedState.cached = false
+        failedState.metadata = null
 
-      this.thumbnailCacheIds.delete(node.id)
-      this.metadataCacheIds.delete(node.id)
-      this.metadataMemory.delete(node.id)
+        this.thumbnailCacheIds.delete(node.id)
+        this.metadataCacheIds.delete(node.id)
+        this.metadataMemory.delete(node.id)
 
-      await Promise.allSettled([
-        this.app.vault.adapter.remove(`${this.cacheDir}/${node.id}.thumbnail.jpg`),
-        this.app.vault.adapter.remove(`${this.cacheDir}/${node.id}.metadata.json`)
-      ])
+        await Promise.allSettled([
+          this.app.vault.adapter.remove(`${this.cacheDir}/${node.id}.thumbnail.jpg`),
+          this.app.vault.adapter.remove(`${this.cacheDir}/${node.id}.metadata.json`)
+        ])
 
-      this.finishLocalGeneration(generation, 'fallback')
-      return
+        this.finishLocalGeneration(generation, 'fallback')
+        return
+      }
     }
 
     this.log(`Cached link ${node.url} with local browser renderer`)
