@@ -92,6 +92,7 @@ type NodeState = {
   metadata: CacheMetadata | null
   preparation: Promise<void> | null
   activationHandlerAttached: boolean
+  mounted: boolean | null
 }
 
 type GenerationJob = {
@@ -385,7 +386,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       cached: false,
       metadata: null,
       preparation: null,
-      activationHandlerAttached: false
+      activationHandlerAttached: false,
+      mounted: null
     }
 
     this.nodeStates.set(node, state)
@@ -583,6 +585,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private onNodeMounted(node: LinkNode) {
+    this.getNodeState(node).mounted = true
     void this.prepareNode(node)
   }
 
@@ -1113,6 +1116,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handleBreakpointUpdate(node: LinkNode) {
+    const state = this.getNodeState(node)
     const session = this.activeGenerations.get(node.id)
     const isInteractive = this.activeInteractiveNode === node
     const isGenerating = session?.node === node
@@ -1121,16 +1125,29 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.ensureNodeContentMounted(node)
     }
 
-    if (this.isNodeContentMounted(node)) {
+    const mounted = this.isNodeContentMounted(node)
+
+    if (mounted) {
+      const needsFrameRecovery =
+        (isGenerating || isInteractive) && node.frameEl?.tagName !== 'WEBVIEW'
+
+      if (state.mounted === true && !needsFrameRecovery) return
+
+      state.mounted = true
+
       if (isGenerating && node.frameEl?.tagName !== 'WEBVIEW') {
         this.requestNodeFrame(node, 'generation')
       } else if (isInteractive && node.frameEl?.tagName !== 'WEBVIEW') {
         this.requestNodeFrame(node, 'interactive')
       }
 
-      this.onNodeMounted(node)
+      void this.prepareNode(node)
       return
     }
+
+    if (state.mounted === false && !isInteractive && !isGenerating) return
+
+    state.mounted = false
 
     if (isInteractive) {
       this.removeNodeFrame(node)
