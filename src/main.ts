@@ -315,10 +315,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       if (index.version !== URL_CACHE_INDEX_VERSION || !index.entries) return
 
       for (const [url, nodeId] of Object.entries(index.entries)) {
-        if (
-          this.thumbnailCacheIds.has(nodeId) &&
-          this.metadataCacheIds.has(nodeId)
-        ) {
+        if (this.thumbnailCacheIds.has(nodeId) && this.metadataCacheIds.has(nodeId)) {
           this.urlCacheSources.set(url, nodeId)
         }
       }
@@ -456,8 +453,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       if (
         typeof sourceMetadata.title !== 'string' ||
-        (sourceMetadata.url &&
-          normalizeCacheUrl(sourceMetadata.url) !== normalizedUrl)
+        (sourceMetadata.url && normalizeCacheUrl(sourceMetadata.url) !== normalizedUrl)
       ) {
         this.urlCacheSources.delete(normalizedUrl)
         this.scheduleUrlCacheIndexWrite()
@@ -473,10 +469,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       }
 
       await Promise.all([
-        this.app.vault.adapter.writeBinary(
-          `${this.cacheDir}/${node.id}.thumbnail.jpg`,
-          thumbnail
-        ),
+        this.app.vault.adapter.writeBinary(`${this.cacheDir}/${node.id}.thumbnail.jpg`, thumbnail),
         this.app.vault.adapter.write(
           `${this.cacheDir}/${node.id}.metadata.json`,
           JSON.stringify(metadata)
