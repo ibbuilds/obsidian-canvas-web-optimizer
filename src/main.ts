@@ -10,6 +10,10 @@ import {
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
 import NetworkPreconnector from './network-preconnector'
+import OffscreenThumbnailRenderer, {
+  type OffscreenRenderResult,
+  type OffscreenRenderTask
+} from './offscreen-thumbnail-renderer'
 
 const CACHE_METADATA_VERSION = 2
 const CACHE_SCHEMA_VERSION = 2
@@ -114,6 +118,14 @@ type GenerationPreload = {
   cleanup: () => void
 }
 
+type OffscreenGenerationPreload = {
+  node: LinkNode
+  url: string
+  task: OffscreenRenderTask
+  ready: boolean
+  cancelled: boolean
+}
+
 type DidFailLoadEvent = Event & {
   errorCode?: number
   isMainFrame?: boolean
@@ -201,6 +213,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly backgroundExecution = new BackgroundExecutionController()
   private backgroundExecutionRelease: (() => void) | null = null
   private networkPreconnector: NetworkPreconnector | null = null
+  private offscreenRenderer: OffscreenThumbnailRenderer | null = null
+  private offscreenPreload: OffscreenGenerationPreload | null = null
+  private offscreenActiveTask: OffscreenRenderTask | null = null
 
   private activeInteractiveNode: LinkNode | null = null
   private requestedInteractiveNode: LinkNode | null = null
@@ -250,6 +265,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private previewReadyTotalMs = 0
   private previewReadyCount = 0
   private capturedThumbnailBytes = 0
+  private offscreenRenderTotalMs = 0
+  private offscreenRenderCount = 0
 
   async onload() {
     this.addCommand({
@@ -279,7 +296,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     await this.app.vault.adapter.mkdir(this.cacheDir)
     await this.ensureCacheSchema()
     await this.buildCacheIndex()
-    this.networkPreconnector = new NetworkPreconnector(this.getWebviewPartition())
+    const webviewPartition = this.getWebviewPartition()
+    this.networkPreconnector = new NetworkPreconnector(webviewPartition)
+    this.offscreenRenderer = new OffscreenThumbnailRenderer(webviewPartition, 2)
 
     this.app.workspace.onLayoutReady(() => {
       if (this.tryPatchLinkNode()) return
@@ -311,9 +330,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.requestedInteractiveNode = null
     this.abortActiveGeneration(false)
     this.cancelGenerationPreload(true)
+    this.cancelOffscreenPreload()
     this.removeInteractiveFrameImmediately()
     this.releaseBackgroundExecution()
     this.backgroundExecution.dispose()
+    this.offscreenRenderer?.dispose()
+    this.offscreenRenderer = null
     this.networkPreconnector = null
 
     this.reloadActiveCanvasViews()
@@ -820,7 +842,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    this.warmQueuedWork()
+    if (!this.offscreenRenderer?.available) {
+      this.warmQueuedWork()
+    }
 
     await this.generateQueuedThumbnail(job)
 
@@ -1037,6 +1061,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private generateQueuedThumbnail(job: GenerationJob): Promise<void> {
+    const renderer = this.offscreenRenderer
+
+    if (renderer?.available) {
+      return this.generateQueuedThumbnailOffscreen(job, renderer)
+    }
+
     const { node } = job
 
     return new Promise(resolve => {
@@ -1174,6 +1204,361 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     })
   }
 
+  private generateQueuedThumbnailOffscreen(
+    job: GenerationJob,
+    renderer: OffscreenThumbnailRenderer
+  ): Promise<void> {
+    const { node } = job
+
+    return new Promise(resolve => {
+      let completed = false
+      let task: OffscreenRenderTask | null = null
+
+      const session: ActiveGeneration = {
+        node,
+        url: node.url,
+        startedAt: performance.now(),
+        requeue: false,
+        finish: () => {}
+      }
+
+      const timeoutId = window.setTimeout(() => {
+        this.log(`Thumbnail generation timed out for ${session.url}`, true)
+        task?.cancel()
+        session.finish('timeout')
+      }, GENERATION_JOB_TIMEOUT_MS)
+
+      session.finish = outcome => {
+        if (completed) return
+
+        completed = true
+        window.clearTimeout(timeoutId)
+
+        if (this.activeGeneration === session) {
+          this.activeGeneration = null
+        }
+
+        if (this.offscreenActiveTask === task) {
+          this.offscreenActiveTask = null
+        }
+
+        if (outcome !== 'success') {
+          task?.cancel()
+        }
+
+        if (outcome === 'success') {
+          const generationDuration = performance.now() - session.startedAt
+
+          this.generationCompleted++
+          this.batchCompleted++
+          this.generationTotalMs += generationDuration
+
+          if (session.usedPreload) {
+            this.generationPreloadedTotalMs += generationDuration
+            this.generationPreloadedCount++
+          } else {
+            this.generationColdTotalMs += generationDuration
+            this.generationColdCount++
+          }
+        } else if (outcome === 'timeout') {
+          this.generationTimedOut++
+        } else if (outcome === 'failure') {
+          this.generationFailed++
+        } else if (outcome === 'preempted') {
+          this.generationPreemptions++
+        }
+
+        const canRetry =
+          !this.getNodeState(node).cached &&
+          Boolean(node.nodeEl?.isConnected) &&
+          job.attempt + 1 < GENERATION_MAX_ATTEMPTS
+        const shouldPriorityRequeue =
+          (session.requeue || outcome === 'stale') &&
+          !this.getNodeState(node).cached &&
+          Boolean(node.nodeEl?.isConnected)
+        const shouldRetryFailure = canRetry && (outcome === 'failure' || outcome === 'timeout')
+
+        resolve()
+
+        if (shouldPriorityRequeue) {
+          this.enqueueThumbnailGeneration(node, true, job.attempt)
+        } else if (shouldRetryFailure) {
+          this.setPendingStatus(
+            node,
+            `Retrying preview (${job.attempt + 2}/${GENERATION_MAX_ATTEMPTS})`
+          )
+
+          window.setTimeout(() => {
+            this.enqueueThumbnailGeneration(node, true, job.attempt + 1)
+          }, GENERATION_RETRY_DELAY_MS)
+        } else {
+          if ((outcome === 'failure' || outcome === 'timeout') && !this.getNodeState(node).cached) {
+            this.setPendingStatus(node, 'Click to load live')
+          }
+
+          this.releaseBackgroundExecutionIfIdle()
+        }
+      }
+
+      const preload =
+        this.offscreenPreload?.node === node && this.offscreenPreload.url === node.url
+          ? this.offscreenPreload
+          : null
+
+      if (this.offscreenPreload && !preload) {
+        this.cancelOffscreenPreload()
+      }
+
+      if (preload) {
+        this.offscreenPreload = null
+      }
+
+      this.activeGeneration = session
+
+      let promotionWaitStartedAt = 0
+
+      if (preload) {
+        session.usedPreload = true
+        this.generationPreloadHits++
+        promotionWaitStartedAt = performance.now()
+
+        if (preload.ready) {
+          this.preloadImmediateHits++
+        } else {
+          this.preloadPendingHits++
+        }
+
+        task = preload.task
+      } else {
+        const size = this.getOffscreenRenderSize(node)
+        task = renderer.render(node.url, size.width, size.height)
+      }
+
+      this.offscreenActiveTask = task
+
+      void task.promise
+        .then(result => {
+          if (session.usedPreload) {
+            this.preloadPromotionWaitTotalMs += performance.now() - promotionWaitStartedAt
+            this.preloadPromotionWaitCount++
+          }
+
+          if (this.activeGeneration !== session) return
+
+          this.recordOffscreenRenderMetrics(result)
+          void this.commitOffscreenThumbnail(node, session, result)
+        })
+        .catch(error => {
+          if (this.activeGeneration !== session) return
+
+          if (!renderer.available) {
+            this.log(
+              `Offscreen renderer unavailable, falling back to native pipeline: ${String(error)}`,
+              true
+            )
+            session.requeue = true
+            session.finish('stale')
+            return
+          }
+
+          this.log(error, true)
+          session.finish('failure')
+        })
+
+      this.startNextOffscreenPreload(renderer)
+    })
+  }
+
+  private startNextOffscreenPreload(renderer: OffscreenThumbnailRenderer) {
+    if (
+      !renderer.available ||
+      this.offscreenPreload ||
+      !this.activeGeneration ||
+      this.activeInteractiveNode
+    ) {
+      return
+    }
+
+    const job = this.peekNextGenerationJob()
+
+    if (!job || !job.node.nodeEl?.isConnected) return
+
+    const size = this.getOffscreenRenderSize(job.node)
+    const preload: OffscreenGenerationPreload = {
+      node: job.node,
+      url: job.node.url,
+      task: renderer.render(job.node.url, size.width, size.height),
+      ready: false,
+      cancelled: false
+    }
+
+    this.offscreenPreload = preload
+    this.generationPreloadsStarted++
+
+    void preload.task.promise
+      .then(() => {
+        if (preload.cancelled) return
+
+        preload.ready = true
+        this.generationPreloadsReady++
+        this.generationPreloadReadyTotalMs += performance.now() - preload.task.startedAt
+      })
+      .catch(error => {
+        if (preload.cancelled) return
+
+        this.generationPreloadFailures++
+
+        if (this.offscreenPreload === preload) {
+          this.offscreenPreload = null
+        }
+
+        this.log(error, true)
+      })
+  }
+
+  private cancelOffscreenPreload() {
+    const preload = this.offscreenPreload
+
+    if (!preload) return
+
+    this.offscreenPreload = null
+    preload.cancelled = true
+    preload.task.cancel()
+  }
+
+  private getOffscreenRenderSize(node: LinkNode): { width: number; height: number } {
+    let width = node.contentEl?.clientWidth || node.width || 640
+    let height = node.contentEl?.clientHeight || node.height || 360
+
+    width = Math.max(64, width)
+    height = Math.max(64, height)
+
+    const longEdge = Math.max(width, height)
+
+    if (longEdge > THUMBNAIL_MAX_LONG_EDGE) {
+      const scale = THUMBNAIL_MAX_LONG_EDGE / longEdge
+      width *= scale
+      height *= scale
+    }
+
+    return {
+      width: Math.round(width),
+      height: Math.round(height)
+    }
+  }
+
+  private recordOffscreenRenderMetrics(result: OffscreenRenderResult) {
+    this.offscreenRenderTotalMs += result.totalMs
+    this.offscreenRenderCount++
+
+    if (result.domReadyMs > 0) {
+      this.domReadyTotalMs += result.domReadyMs
+      this.domReadyCount++
+    }
+
+    if (result.themeMs > 0) {
+      this.themeTotalMs += result.themeMs
+      this.themeCount++
+    }
+
+    if (result.paintReadyMs > 0) {
+      this.paintReadyTotalMs += result.paintReadyMs
+      this.paintReadyCount++
+    }
+  }
+
+  private async commitOffscreenThumbnail(
+    node: LinkNode,
+    session: ActiveGeneration,
+    result: OffscreenRenderResult
+  ) {
+    if (this.activeGeneration !== session) return
+
+    if (node.url !== session.url) {
+      session.finish('stale')
+      return
+    }
+
+    const captureStartedAt = performance.now()
+
+    try {
+      const encodeStartedAt = performance.now()
+      const optimized = this.optimizeThumbnail(result.image as ThumbnailImage)
+      const jpeg = optimized.toJPEG(THUMBNAIL_JPEG_QUALITY)
+      this.encodeTotalMs += performance.now() - encodeStartedAt
+      this.encodeCount++
+
+      const thumbnailWriteStartedAt = performance.now()
+      await this.app.vault.adapter.writeBinary(`${this.cacheDir}/${node.id}.thumbnail.jpg`, jpeg)
+      this.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
+      this.thumbnailWriteCount++
+      this.captureTotalMs += performance.now() - captureStartedAt
+      this.capturedThumbnailBytes += jpeg.byteLength
+    } catch (error) {
+      this.log(error, true)
+      session.finish('failure')
+      return
+    }
+
+    if (this.activeGeneration !== session) return
+
+    if (node.url !== session.url) {
+      session.finish('stale')
+      return
+    }
+
+    const metadata: CacheMetadata = {
+      version: CACHE_METADATA_VERSION,
+      url: session.url,
+      title: result.title,
+      capturedAt: Date.now()
+    }
+
+    try {
+      const metadataWriteStartedAt = performance.now()
+
+      await this.app.vault.adapter.write(
+        `${this.cacheDir}/${node.id}.metadata.json`,
+        JSON.stringify(metadata)
+      )
+
+      this.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
+      this.metadataWriteCount++
+    } catch (error) {
+      this.log(error, true)
+      session.finish('failure')
+      return
+    }
+
+    const state = this.getNodeState(node)
+
+    state.evaluated = true
+    state.cached = true
+    state.metadata = metadata
+
+    this.thumbnailCacheIds.add(node.id)
+    this.metadataCacheIds.add(node.id)
+    this.metadataMemory.set(node.id, metadata)
+
+    node.updateNodeLabel(result.title)
+
+    const previewStartedAt = performance.now()
+    const previewReady = await this.showPreviewOverFrame(node, false)
+    this.previewReadyTotalMs += performance.now() - previewStartedAt
+    this.previewReadyCount++
+
+    if (this.activeGeneration !== session) return
+
+    if (!previewReady || !this.getNodeState(node).cached) {
+      session.requeue = true
+      session.finish('failure')
+      return
+    }
+
+    this.log(`Cached link ${node.url} with offscreen paint`)
+    session.finish('success')
+  }
+
   private ensureBackgroundExecution(node: LinkNode) {
     if (this.backgroundExecutionRelease) return
 
@@ -1214,6 +1599,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (!session) return
 
     session.requeue = requeue
+    this.offscreenActiveTask?.cancel()
+    this.offscreenActiveTask = null
     this.removeNodeFrame(session.node)
     session.finish('preempted')
   }
@@ -1251,6 +1638,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.cancelGenerationPreload(true)
     }
 
+    if (this.offscreenPreload?.node === node) {
+      this.cancelOffscreenPreload()
+    }
+
     if (this.activeInteractiveNode === node) {
       this.removeNodeFrame(node)
       this.clearInteractiveState(node)
@@ -1271,6 +1662,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const isInteractive = this.activeInteractiveNode === node
     const isGenerating = session?.node === node
     const isPreloading = this.generationPreload?.node === node
+    const isOffscreenPreloading = this.offscreenPreload?.node === node
 
     if (!this.isNodeContentMounted(node) && (isInteractive || isGenerating || isPreloading)) {
       this.ensureNodeContentMounted(node)
@@ -1296,6 +1688,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (isPreloading) {
       this.cancelGenerationPreload(true)
+    }
+
+    if (isOffscreenPreloading) {
+      this.cancelOffscreenPreload()
     }
 
     if (isGenerating) {
@@ -1368,6 +1764,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         }
 
         this.cancelGenerationPreload(true)
+        this.cancelOffscreenPreload()
         this.abortActiveGeneration(true)
         this.releaseBackgroundExecution()
         this.removePendingPlaceholder(requestedNode)
@@ -1424,6 +1821,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (preload && !preload.node.nodeEl?.isConnected) {
       this.cancelGenerationPreload(true)
+    }
+
+    const offscreenPreload = this.offscreenPreload
+
+    if (offscreenPreload && !offscreenPreload.node.nodeEl?.isConnected) {
+      this.cancelOffscreenPreload()
     }
 
     const generation = this.activeGeneration
@@ -2005,6 +2408,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.previewReadyTotalMs = 0
     this.previewReadyCount = 0
     this.capturedThumbnailBytes = 0
+    this.offscreenRenderTotalMs = 0
+    this.offscreenRenderCount = 0
     this.networkPreconnector?.resetMetrics()
 
     new Notice('Canvas Web Optimizer diagnostics reset')
@@ -2084,6 +2489,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         : 0
     const averagePreviewReadyMs =
       this.previewReadyCount > 0 ? Math.round(this.previewReadyTotalMs / this.previewReadyCount) : 0
+    const averageOffscreenRenderMs =
+      this.offscreenRenderCount > 0
+        ? Math.round(this.offscreenRenderTotalMs / this.offscreenRenderCount)
+        : 0
+    const offscreenAvailable = this.offscreenRenderer?.available ?? false
+    const generationEngine = offscreenAvailable
+      ? `offscreen paint (${this.offscreenRenderer?.poolSize ?? 0} workers)`
+      : 'native webview'
 
     const diagnostics = [
       `Mounted web cards: ${mountedWebCards.size}`,
@@ -2091,10 +2504,18 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Live webviews: ${liveWebviews}`,
       `Generating thumbnails: ${this.activeGeneration ? 1 : 0}`,
       `Queued: ${this.generationQueue.length}`,
+      `Generation engine: ${generationEngine}`,
+      `Offscreen renderers active: ${this.offscreenRenderer?.activeCount ?? 0}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
       `Network preconnect: ${this.networkPreconnector?.active ? 'on' : 'off'} (${this.networkPreconnector?.count ?? 0})`,
-      `HTTP warm cache: ${this.networkPreconnector?.fetchActive ? 'on' : 'off'} (${this.networkPreconnector?.warmCompletedCount ?? 0}/${this.networkPreconnector?.warmStartedCount ?? 0}, failed ${this.networkPreconnector?.warmFailedCount ?? 0})`,
+      `HTTP warm cache: ${
+        offscreenAvailable
+          ? 'off (offscreen paint active)'
+          : this.networkPreconnector?.fetchActive
+            ? 'on'
+            : 'off'
+      } (${this.networkPreconnector?.warmCompletedCount ?? 0}/${this.networkPreconnector?.warmStartedCount ?? 0}, failed ${this.networkPreconnector?.warmFailedCount ?? 0})`,
       `Cache hits: ${this.cacheHits}`,
       `Cache misses: ${this.cacheMisses}`,
       `Generated: ${this.generationCompleted}`,
@@ -2116,6 +2537,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Average theme apply: ${averageThemeMs} ms`,
       `Average paint ready: ${averagePaintReadyMs} ms`,
       `Average capturePage: ${averageCapturePageMs} ms`,
+      `Average offscreen render: ${averageOffscreenRenderMs} ms`,
       `Average encode: ${averageEncodeMs} ms`,
       `Average thumbnail write: ${averageThumbnailWriteMs} ms`,
       `Average metadata write: ${averageMetadataWriteMs} ms`,
