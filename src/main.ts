@@ -118,12 +118,15 @@ type GenerationPreload = {
   cleanup: () => void
 }
 
-type OffscreenGenerationPreload = {
+type OffscreenConcurrentGeneration = {
+  job: GenerationJob
   node: LinkNode
   url: string
+  startedAt: number
   task: OffscreenRenderTask
-  ready: boolean
-  cancelled: boolean
+  requeue: boolean
+  completed: boolean
+  timeoutId: number
 }
 
 type DidFailLoadEvent = Event & {
@@ -214,8 +217,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private backgroundExecutionRelease: (() => void) | null = null
   private networkPreconnector: NetworkPreconnector | null = null
   private offscreenRenderer: OffscreenThumbnailRenderer | null = null
-  private offscreenPreload: OffscreenGenerationPreload | null = null
-  private offscreenActiveTask: OffscreenRenderTask | null = null
+  private readonly offscreenGenerations = new Map<string, OffscreenConcurrentGeneration>()
 
   private activeInteractiveNode: LinkNode | null = null
   private requestedInteractiveNode: LinkNode | null = null
@@ -298,7 +300,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     await this.buildCacheIndex()
     const webviewPartition = this.getWebviewPartition()
     this.networkPreconnector = new NetworkPreconnector(webviewPartition)
-    this.offscreenRenderer = new OffscreenThumbnailRenderer(webviewPartition, 2)
+    this.offscreenRenderer = new OffscreenThumbnailRenderer(webviewPartition, 3)
 
     this.app.workspace.onLayoutReady(() => {
       if (this.tryPatchLinkNode()) return
@@ -330,7 +332,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.requestedInteractiveNode = null
     this.abortActiveGeneration(false)
     this.cancelGenerationPreload(true)
-    this.cancelOffscreenPreload()
+    this.abortOffscreenGenerations(false)
     this.removeInteractiveFrameImmediately()
     this.releaseBackgroundExecution()
     this.backgroundExecution.dispose()
@@ -763,6 +765,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    const offscreenGeneration = this.offscreenGenerations.get(node.id)
+
+    if (offscreenGeneration?.node === node) {
+      offscreenGeneration.requeue = true
+      return
+    }
+
     if (this.isNodeContentMounted(node)) {
       this.enqueueThumbnailGeneration(node)
     }
@@ -773,13 +782,18 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (state.cached || !node.nodeEl?.isConnected) return
 
-    if (this.activeGeneration?.node.id === node.id || this.queuedGenerationIds.has(node.id)) {
+    if (
+      this.activeGeneration?.node.id === node.id ||
+      this.offscreenGenerations.has(node.id) ||
+      this.queuedGenerationIds.has(node.id)
+    ) {
       return
     }
 
     if (
       this.batchStartedAt === null &&
       !this.activeGeneration &&
+      this.offscreenGenerations.size === 0 &&
       this.generationQueue.length === 0
     ) {
       this.batchStartedAt = performance.now()
@@ -805,8 +819,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private scheduleThumbnailQueue() {
     this.pruneDetachedActiveResources()
 
+    const renderer = this.offscreenRenderer
+    const offscreenAvailable = renderer?.available ?? false
+    const generationAtCapacity = offscreenAvailable
+      ? this.offscreenGenerations.size >= (renderer?.poolSize ?? 1)
+      : Boolean(this.activeGeneration)
+
     if (
-      this.activeGeneration ||
+      generationAtCapacity ||
       this.activeInteractiveNode ||
       this.generationQueueScheduled ||
       this.generationQueue.length === 0
@@ -825,7 +845,17 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private async processThumbnailQueue() {
-    if (this.activeGeneration || this.activeInteractiveNode) return
+    if (this.activeInteractiveNode) return
+
+    const renderer = this.offscreenRenderer
+
+    if (renderer?.available) {
+      this.preconnectQueuedWork()
+      this.processOffscreenQueue(renderer)
+      return
+    }
+
+    if (this.activeGeneration) return
 
     this.preconnectQueuedWork()
 
@@ -842,15 +872,35 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    if (!this.offscreenRenderer?.available) {
-      this.warmQueuedWork()
-    }
+    this.warmQueuedWork()
 
     await this.generateQueuedThumbnail(job)
 
     if (!this.activeInteractiveNode) {
       this.scheduleThumbnailQueue()
     }
+  }
+
+  private processOffscreenQueue(renderer: OffscreenThumbnailRenderer) {
+    while (
+      renderer.available &&
+      !this.activeInteractiveNode &&
+      this.offscreenGenerations.size < renderer.poolSize
+    ) {
+      const job = this.dequeueNextGenerationJob()
+
+      if (!job) break
+
+      if (!this.ensureNodeContentMounted(job.node)) {
+        this.generationQueue.unshift(job)
+        this.queuedGenerationIds.add(job.node.id)
+        break
+      }
+
+      this.startOffscreenGeneration(job, renderer)
+    }
+
+    this.releaseBackgroundExecutionIfIdle()
   }
 
   private preconnectQueuedWork() {
@@ -1061,12 +1111,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private generateQueuedThumbnail(job: GenerationJob): Promise<void> {
-    const renderer = this.offscreenRenderer
-
-    if (renderer?.available) {
-      return this.generateQueuedThumbnailOffscreen(job, renderer)
-    }
-
     const { node } = job
 
     return new Promise(resolve => {
@@ -1204,226 +1248,151 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     })
   }
 
-  private generateQueuedThumbnailOffscreen(
+  private startOffscreenGeneration(
     job: GenerationJob,
     renderer: OffscreenThumbnailRenderer
-  ): Promise<void> {
+  ) {
     const { node } = job
-
-    return new Promise(resolve => {
-      let completed = false
-      let task: OffscreenRenderTask | null = null
-
-      const session: ActiveGeneration = {
-        node,
-        url: node.url,
-        startedAt: performance.now(),
-        requeue: false,
-        finish: () => {}
-      }
-
-      const timeoutId = window.setTimeout(() => {
-        this.log(`Thumbnail generation timed out for ${session.url}`, true)
-        task?.cancel()
-        session.finish('timeout')
-      }, GENERATION_JOB_TIMEOUT_MS)
-
-      session.finish = outcome => {
-        if (completed) return
-
-        completed = true
-        window.clearTimeout(timeoutId)
-
-        if (this.activeGeneration === session) {
-          this.activeGeneration = null
-        }
-
-        if (this.offscreenActiveTask === task) {
-          this.offscreenActiveTask = null
-        }
-
-        if (outcome !== 'success') {
-          task?.cancel()
-        }
-
-        if (outcome === 'success') {
-          const generationDuration = performance.now() - session.startedAt
-
-          this.generationCompleted++
-          this.batchCompleted++
-          this.generationTotalMs += generationDuration
-
-          if (session.usedPreload) {
-            this.generationPreloadedTotalMs += generationDuration
-            this.generationPreloadedCount++
-          } else {
-            this.generationColdTotalMs += generationDuration
-            this.generationColdCount++
-          }
-        } else if (outcome === 'timeout') {
-          this.generationTimedOut++
-        } else if (outcome === 'failure') {
-          this.generationFailed++
-        } else if (outcome === 'preempted') {
-          this.generationPreemptions++
-        }
-
-        const canRetry =
-          !this.getNodeState(node).cached &&
-          Boolean(node.nodeEl?.isConnected) &&
-          job.attempt + 1 < GENERATION_MAX_ATTEMPTS
-        const shouldPriorityRequeue =
-          (session.requeue || outcome === 'stale') &&
-          !this.getNodeState(node).cached &&
-          Boolean(node.nodeEl?.isConnected)
-        const shouldRetryFailure = canRetry && (outcome === 'failure' || outcome === 'timeout')
-
-        resolve()
-
-        if (shouldPriorityRequeue) {
-          this.enqueueThumbnailGeneration(node, true, job.attempt)
-        } else if (shouldRetryFailure) {
-          this.setPendingStatus(
-            node,
-            `Retrying preview (${job.attempt + 2}/${GENERATION_MAX_ATTEMPTS})`
-          )
-
-          window.setTimeout(() => {
-            this.enqueueThumbnailGeneration(node, true, job.attempt + 1)
-          }, GENERATION_RETRY_DELAY_MS)
-        } else {
-          if ((outcome === 'failure' || outcome === 'timeout') && !this.getNodeState(node).cached) {
-            this.setPendingStatus(node, 'Click to load live')
-          }
-
-          this.releaseBackgroundExecutionIfIdle()
-        }
-      }
-
-      const preload =
-        this.offscreenPreload?.node === node && this.offscreenPreload.url === node.url
-          ? this.offscreenPreload
-          : null
-
-      if (this.offscreenPreload && !preload) {
-        this.cancelOffscreenPreload()
-      }
-
-      if (preload) {
-        this.offscreenPreload = null
-      }
-
-      this.activeGeneration = session
-
-      let promotionWaitStartedAt = 0
-
-      if (preload) {
-        session.usedPreload = true
-        this.generationPreloadHits++
-        promotionWaitStartedAt = performance.now()
-
-        if (preload.ready) {
-          this.preloadImmediateHits++
-        } else {
-          this.preloadPendingHits++
-        }
-
-        task = preload.task
-      } else {
-        const size = this.getOffscreenRenderSize(node)
-        task = renderer.render(node.url, size.width, size.height)
-      }
-
-      this.offscreenActiveTask = task
-
-      void task.promise
-        .then(result => {
-          if (session.usedPreload) {
-            this.preloadPromotionWaitTotalMs += performance.now() - promotionWaitStartedAt
-            this.preloadPromotionWaitCount++
-          }
-
-          if (this.activeGeneration !== session) return
-
-          this.recordOffscreenRenderMetrics(result)
-          void this.commitOffscreenThumbnail(node, session, result)
-        })
-        .catch(error => {
-          if (this.activeGeneration !== session) return
-
-          if (!renderer.available) {
-            this.log(
-              `Offscreen renderer unavailable, falling back to native pipeline: ${String(error)}`,
-              true
-            )
-            session.requeue = true
-            session.finish('stale')
-            return
-          }
-
-          this.log(error, true)
-          session.finish('failure')
-        })
-
-      this.startNextOffscreenPreload(renderer)
-    })
-  }
-
-  private startNextOffscreenPreload(renderer: OffscreenThumbnailRenderer) {
-    if (
-      !renderer.available ||
-      this.offscreenPreload ||
-      !this.activeGeneration ||
-      this.activeInteractiveNode
-    ) {
-      return
+    const size = this.getOffscreenRenderSize(node)
+    const task = renderer.render(node.url, size.width, size.height)
+    const generation: OffscreenConcurrentGeneration = {
+      job,
+      node,
+      url: node.url,
+      startedAt: performance.now(),
+      task,
+      requeue: false,
+      completed: false,
+      timeoutId: 0
     }
 
-    const job = this.peekNextGenerationJob()
+    this.offscreenGenerations.set(node.id, generation)
 
-    if (!job?.node.nodeEl?.isConnected) return
+    generation.timeoutId = window.setTimeout(() => {
+      this.log(`Thumbnail generation timed out for ${generation.url}`, true)
+      this.finishOffscreenGeneration(generation, 'timeout')
+    }, GENERATION_JOB_TIMEOUT_MS)
 
-    const size = this.getOffscreenRenderSize(job.node)
-    const preload: OffscreenGenerationPreload = {
-      node: job.node,
-      url: job.node.url,
-      task: renderer.render(job.node.url, size.width, size.height),
-      ready: false,
-      cancelled: false
-    }
+    void task.promise
+      .then(result => {
+        if (!this.isCurrentOffscreenGeneration(generation)) return
 
-    this.offscreenPreload = preload
-    this.generationPreloadsStarted++
-
-    void preload.task.promise
-      .then(() => {
-        if (preload.cancelled) return
-
-        preload.ready = true
-        this.generationPreloadsReady++
-        this.generationPreloadReadyTotalMs += performance.now() - preload.task.startedAt
+        this.recordOffscreenRenderMetrics(result)
+        void this.commitOffscreenThumbnail(node, generation, result)
       })
       .catch(error => {
-        if (preload.cancelled) return
+        if (!this.isCurrentOffscreenGeneration(generation)) return
 
-        this.generationPreloadFailures++
-
-        if (this.offscreenPreload === preload) {
-          this.offscreenPreload = null
+        if (!renderer.available) {
+          this.log(
+            `Offscreen renderer unavailable, falling back to native pipeline: ${String(error)}`,
+            true
+          )
+          generation.requeue = true
+          this.finishOffscreenGeneration(generation, 'stale')
+          return
         }
 
         this.log(error, true)
+        this.finishOffscreenGeneration(generation, 'failure')
       })
   }
 
-  private cancelOffscreenPreload() {
-    const preload = this.offscreenPreload
+  private isCurrentOffscreenGeneration(generation: OffscreenConcurrentGeneration): boolean {
+    return (
+      !generation.completed &&
+      this.offscreenGenerations.get(generation.node.id) === generation
+    )
+  }
 
-    if (!preload) return
+  private finishOffscreenGeneration(
+    generation: OffscreenConcurrentGeneration,
+    outcome: GenerationOutcome
+  ) {
+    if (generation.completed) return
 
-    this.offscreenPreload = null
-    preload.cancelled = true
-    preload.task.cancel()
+    generation.completed = true
+    window.clearTimeout(generation.timeoutId)
+
+    if (this.offscreenGenerations.get(generation.node.id) === generation) {
+      this.offscreenGenerations.delete(generation.node.id)
+    }
+
+    if (outcome !== 'success') {
+      generation.task.cancel()
+    }
+
+    const { job, node } = generation
+
+    if (outcome === 'success') {
+      const generationDuration = performance.now() - generation.startedAt
+
+      this.generationCompleted++
+      this.batchCompleted++
+      this.generationTotalMs += generationDuration
+      this.generationColdTotalMs += generationDuration
+      this.generationColdCount++
+    } else if (outcome === 'timeout') {
+      this.generationTimedOut++
+    } else if (outcome === 'failure') {
+      this.generationFailed++
+    } else if (outcome === 'preempted') {
+      this.generationPreemptions++
+    }
+
+    const canRetry =
+      !this.getNodeState(node).cached &&
+      Boolean(node.nodeEl?.isConnected) &&
+      job.attempt + 1 < GENERATION_MAX_ATTEMPTS
+    const shouldPriorityRequeue =
+      (generation.requeue || outcome === 'stale') &&
+      !this.getNodeState(node).cached &&
+      Boolean(node.nodeEl?.isConnected)
+    const shouldRetryFailure = canRetry && (outcome === 'failure' || outcome === 'timeout')
+
+    if (shouldPriorityRequeue) {
+      this.enqueueThumbnailGeneration(node, true, job.attempt)
+    } else if (shouldRetryFailure) {
+      this.setPendingStatus(
+        node,
+        `Retrying preview (${job.attempt + 2}/${GENERATION_MAX_ATTEMPTS})`
+      )
+
+      window.setTimeout(() => {
+        this.enqueueThumbnailGeneration(node, true, job.attempt + 1)
+      }, GENERATION_RETRY_DELAY_MS)
+    } else if (
+      (outcome === 'failure' || outcome === 'timeout') &&
+      !this.getNodeState(node).cached
+    ) {
+      this.setPendingStatus(node, 'Click to load live')
+    }
+
+    if (!this.activeInteractiveNode) {
+      this.scheduleThumbnailQueue()
+    }
+
+    this.releaseBackgroundExecutionIfIdle()
+  }
+
+  private abortOffscreenGenerations(requeue: boolean) {
+    for (const generation of [...this.offscreenGenerations.values()]) {
+      generation.requeue = requeue
+      this.finishOffscreenGeneration(generation, 'preempted')
+    }
+  }
+
+  private abortOffscreenGenerationForNode(
+    node: LinkNode,
+    outcome: GenerationOutcome,
+    requeue = false
+  ) {
+    const generation = this.offscreenGenerations.get(node.id)
+
+    if (!generation || generation.node !== node) return
+
+    generation.requeue = requeue
+    this.finishOffscreenGeneration(generation, outcome)
   }
 
   private getOffscreenRenderSize(node: LinkNode): { width: number; height: number } {
@@ -1469,13 +1438,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private async commitOffscreenThumbnail(
     node: LinkNode,
-    session: ActiveGeneration,
+    generation: OffscreenConcurrentGeneration,
     result: OffscreenRenderResult
   ) {
-    if (this.activeGeneration !== session) return
+    if (!this.isCurrentOffscreenGeneration(generation)) return
 
-    if (node.url !== session.url) {
-      session.finish('stale')
+    if (node.url !== generation.url) {
+      this.finishOffscreenGeneration(generation, 'stale')
       return
     }
 
@@ -1496,20 +1465,20 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.capturedThumbnailBytes += jpeg.byteLength
     } catch (error) {
       this.log(error, true)
-      session.finish('failure')
+      this.finishOffscreenGeneration(generation, 'failure')
       return
     }
 
-    if (this.activeGeneration !== session) return
+    if (!this.isCurrentOffscreenGeneration(generation)) return
 
-    if (node.url !== session.url) {
-      session.finish('stale')
+    if (node.url !== generation.url) {
+      this.finishOffscreenGeneration(generation, 'stale')
       return
     }
 
     const metadata: CacheMetadata = {
       version: CACHE_METADATA_VERSION,
-      url: session.url,
+      url: generation.url,
       title: result.title,
       capturedAt: Date.now()
     }
@@ -1526,7 +1495,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.metadataWriteCount++
     } catch (error) {
       this.log(error, true)
-      session.finish('failure')
+      this.finishOffscreenGeneration(generation, 'failure')
       return
     }
 
@@ -1547,16 +1516,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.previewReadyTotalMs += performance.now() - previewStartedAt
     this.previewReadyCount++
 
-    if (this.activeGeneration !== session) return
+    if (!this.isCurrentOffscreenGeneration(generation)) return
 
     if (!previewReady || !this.getNodeState(node).cached) {
-      session.requeue = true
-      session.finish('failure')
+      generation.requeue = true
+      this.finishOffscreenGeneration(generation, 'failure')
       return
     }
 
     this.log(`Cached link ${node.url} with offscreen paint`)
-    session.finish('success')
+    this.finishOffscreenGeneration(generation, 'success')
   }
 
   private ensureBackgroundExecution(node: LinkNode) {
@@ -1573,7 +1542,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private releaseBackgroundExecutionIfIdle() {
-    if (this.activeGeneration || this.generationQueue.length > 0) return
+    if (
+      this.activeGeneration ||
+      this.offscreenGenerations.size > 0 ||
+      this.generationQueue.length > 0
+    ) {
+      return
+    }
 
     if (this.batchStartedAt !== null) {
       this.lastBatchDurationMs = performance.now() - this.batchStartedAt
@@ -1599,8 +1574,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (!session) return
 
     session.requeue = requeue
-    this.offscreenActiveTask?.cancel()
-    this.offscreenActiveTask = null
     this.removeNodeFrame(session.node)
     session.finish('preempted')
   }
@@ -1638,9 +1611,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.cancelGenerationPreload(true)
     }
 
-    if (this.offscreenPreload?.node === node) {
-      this.cancelOffscreenPreload()
-    }
+    this.abortOffscreenGenerationForNode(node, 'stale')
 
     if (this.activeInteractiveNode === node) {
       this.removeNodeFrame(node)
@@ -1661,16 +1632,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const session = this.activeGeneration
     const isInteractive = this.activeInteractiveNode === node
     const isGenerating = session?.node === node
-    const isOffscreenGenerating = isGenerating && this.offscreenActiveTask !== null
+    const offscreenGeneration = this.offscreenGenerations.get(node.id)
+    const isOffscreenGenerating = offscreenGeneration?.node === node
     const isPreloading = this.generationPreload?.node === node
-    const isOffscreenPreloading = this.offscreenPreload?.node === node
 
-    if (!this.isNodeContentMounted(node) && (isInteractive || isGenerating || isPreloading)) {
+    if (
+      !this.isNodeContentMounted(node) &&
+      (isInteractive || isGenerating || isOffscreenGenerating || isPreloading)
+    ) {
       this.ensureNodeContentMounted(node)
     }
 
     if (this.isNodeContentMounted(node)) {
-      if (isGenerating && !isOffscreenGenerating && node.frameEl?.tagName !== 'WEBVIEW') {
+      if (isGenerating && node.frameEl?.tagName !== 'WEBVIEW') {
         this.requestNodeFrame(node, 'generation')
       } else if (isPreloading && node.frameEl?.tagName !== 'WEBVIEW') {
         this.requestNodeFrame(node, 'preload')
@@ -1691,8 +1665,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.cancelGenerationPreload(true)
     }
 
-    if (isOffscreenPreloading) {
-      this.cancelOffscreenPreload()
+    if (isOffscreenGenerating) {
+      this.abortOffscreenGenerationForNode(node, 'unmounted')
     }
 
     if (isGenerating) {
@@ -1765,7 +1739,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         }
 
         this.cancelGenerationPreload(true)
-        this.cancelOffscreenPreload()
+        this.abortOffscreenGenerations(true)
         this.abortActiveGeneration(true)
         this.releaseBackgroundExecution()
         this.removePendingPlaceholder(requestedNode)
@@ -1824,10 +1798,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.cancelGenerationPreload(true)
     }
 
-    const offscreenPreload = this.offscreenPreload
-
-    if (offscreenPreload && !offscreenPreload.node.nodeEl?.isConnected) {
-      this.cancelOffscreenPreload()
+    for (const offscreenGeneration of [...this.offscreenGenerations.values()]) {
+      if (!offscreenGeneration.node.nodeEl?.isConnected) {
+        this.finishOffscreenGeneration(offscreenGeneration, 'unmounted')
+      }
     }
 
     const generation = this.activeGeneration
@@ -2383,7 +2357,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.generationPreloadedCount = 0
     this.generationTotalMs = 0
     this.batchStartedAt =
-      this.activeGeneration || this.generationQueue.length > 0 ? performance.now() : null
+      this.activeGeneration ||
+      this.offscreenGenerations.size > 0 ||
+      this.generationQueue.length > 0
+        ? performance.now()
+        : null
     this.batchCompleted = 0
     this.lastBatchDurationMs = 0
     this.lastBatchCompleted = 0
@@ -2506,7 +2484,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Mounted web cards: ${mountedWebCards.size}`,
       `Cached previews: ${cachedPreviews}`,
       `Live webviews: ${liveWebviews}`,
-      `Generating thumbnails: ${this.activeGeneration ? 1 : 0}`,
+      `Generating thumbnails: ${(this.activeGeneration ? 1 : 0) + this.offscreenGenerations.size}`,
       `Queued: ${this.generationQueue.length}`,
       `Generation engine: ${generationEngine}`,
       `Offscreen renderer: ${offscreenStatus}`,
