@@ -46,6 +46,7 @@ declare module 'obsidian' {
     getTitle(): string
     getWebContentsId(): number
     insertCSS(css: string): Promise<string>
+    reload(): void
   }
 
   interface LinkNode {
