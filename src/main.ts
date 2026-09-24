@@ -218,12 +218,24 @@ function resolveNativeTheme(): ElectronNativeThemeLike | null {
 
   try {
     const remote = runtimeRequire('@electron/remote') as ElectronRemoteLike
-    return remote.nativeTheme ?? null
+
+    if (remote.nativeTheme) {
+      return remote.nativeTheme
+    }
+  } catch {
+    // Fall through to the renderer's Electron export.
+  }
+
+  try {
+    const electron = runtimeRequire('electron') as {
+      nativeTheme?: ElectronNativeThemeLike
+    }
+
+    return electron.nativeTheme ?? null
   } catch {
     return null
   }
 }
-
 
 function afterTransition(element: HTMLElement, callback: () => void) {
   let finished = false
@@ -2200,15 +2212,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    if (mode === 'interactive') {
-      void this.forceWebviewLightPreference(frameEl).then(applied => {
-        if (applied && this.activeInteractiveNode === node && node.frameEl === frameEl) {
-          this.releaseInteractiveLightThemeFallback()
-        }
-      })
-    } else {
-      void this.forceWebviewLightPreference(frameEl)
-    }
+    void this.forceWebviewLightPreference(frameEl)
 
     if (mode === 'preload') {
       const preload = this.generationPreload
@@ -2378,7 +2382,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
     ])
 
-    return preferenceResult.status === 'fulfilled' && preferenceResult.value
+    const browserPreferenceIsLight = await frameEl
+      .executeJavaScript("window.matchMedia('(prefers-color-scheme: light)').matches")
+      .then(value => value === true)
+      .catch(() => false)
+
+    return (
+      preferenceResult.status === 'fulfilled' &&
+      preferenceResult.value &&
+      browserPreferenceIsLight
+    )
   }
 
   private async applyGenerationLightTheme(frameEl: LinkNode['frameEl']) {
