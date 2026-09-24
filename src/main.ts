@@ -555,10 +555,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     return preview
   }
 
-  private async showPreviewOverFrame(
-    node: LinkNode,
-    animate = true
-  ): Promise<boolean> {
+  private async showPreviewOverFrame(node: LinkNode, animate = true): Promise<boolean> {
     const preview = this.ensurePreview(node, true, animate)
 
     if (!preview) return false
