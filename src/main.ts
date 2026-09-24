@@ -837,7 +837,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     let bestJob: GenerationJob | null = null
     let bestPriority = Number.POSITIVE_INFINITY
 
-    for (const job of this.generationQueue) {
+    for (let index = this.generationQueue.length - 1; index >= 0; index--) {
+      const job = this.generationQueue[index]
       const { node } = job
 
       if (!node.nodeEl?.isConnected || this.getNodeState(node).cached) continue
@@ -886,7 +887,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.requestNodeFrame(job.node, 'preload')
   }
 
-  private settleGenerationPreload(preload: GenerationPreload, ready: boolean) {
+  private settleGenerationPreload(
+    preload: GenerationPreload,
+    ready: boolean,
+    runtimeFailure = false
+  ) {
     if (preload.settled) return
 
     preload.settled = true
@@ -896,8 +901,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.generationPreloadsReady++
       this.generationPreloadReadyTotalMs += performance.now() - preload.startedAt
     } else {
-      this.generationPreloadFailures++
-      this.generationPreloadDisabled = true
+      if (runtimeFailure) {
+        this.generationPreloadFailures++
+        this.generationPreloadDisabled = true
+      }
 
       if (this.generationPreload === preload) {
         this.generationPreload = null
@@ -1257,7 +1264,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       const preload = this.generationPreload
 
       if (preload?.node === node) {
-        this.settleGenerationPreload(preload, false)
+        this.settleGenerationPreload(preload, false, true)
       }
 
       return
@@ -1409,7 +1416,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         const preload = this.generationPreload
 
         if (preload?.node === node) {
-          this.settleGenerationPreload(preload, false)
+          this.settleGenerationPreload(preload, false, true)
         }
       } else if (this.activeInteractiveNode === node) {
         this.ensurePreview(node, true)
@@ -1431,7 +1438,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       const onReady = () => {
         if (node.frameEl !== frameEl || !frameEl.isConnected) {
-          this.settleGenerationPreload(preload, false)
+          this.settleGenerationPreload(preload, false, true)
           return
         }
 
