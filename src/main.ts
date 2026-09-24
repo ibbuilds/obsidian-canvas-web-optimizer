@@ -2303,9 +2303,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     frameEl.addEventListener('dom-ready', onInteractiveReady)
   }
 
-  private async forceWebviewLightPreference(
-    frameEl: LinkNode['frameEl']
-  ): Promise<boolean> {
+  private async forceWebviewLightPreference(frameEl: LinkNode['frameEl']): Promise<boolean> {
     if (!frameEl?.isConnected) return false
 
     const guest = resolveGuestWebContents(frameEl)
