@@ -70,6 +70,24 @@ type ThumbnailImage = {
   toJPEG(quality: number): ArrayBuffer
 }
 
+type ElectronDebuggerLike = {
+  attach(protocolVersion?: string): void
+  isAttached(): boolean
+  sendCommand(method: string, params?: Record<string, unknown>): Promise<unknown>
+}
+
+type ElectronGuestWebContentsLike = {
+  debugger: ElectronDebuggerLike
+  isDestroyed?(): boolean
+}
+
+type ElectronRemoteLike = {
+  webContents?: {
+    fromId(id: number): ElectronGuestWebContentsLike | undefined
+  }
+}
+
+
 type FrameMode = 'generation' | 'preload' | 'interactive'
 type GenerationOutcome = 'success' | 'failure' | 'timeout' | 'preempted' | 'stale' | 'unmounted'
 
@@ -161,6 +179,34 @@ type DidFailLoadEvent = Event & {
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => window.setTimeout(resolve, ms))
 }
+
+function getRuntimeRequire(): ((specifier: string) => unknown) | null {
+  const runtimeGlobal = globalThis as typeof globalThis & {
+    require?: (specifier: string) => unknown
+  }
+
+  return typeof runtimeGlobal.require === 'function' ? runtimeGlobal.require : null
+}
+
+function resolveGuestWebContents(
+  frameEl: LinkNode['frameEl']
+): ElectronGuestWebContentsLike | null {
+  const id = frameEl?.getWebContentsId?.()
+
+  if (typeof id !== 'number') return null
+
+  const runtimeRequire = getRuntimeRequire()
+
+  if (!runtimeRequire) return null
+
+  try {
+    const remote = runtimeRequire('@electron/remote') as ElectronRemoteLike
+    return remote.webContents?.fromId(id) ?? null
+  } catch {
+    return null
+  }
+}
+
 
 function afterTransition(element: HTMLElement, callback: () => void) {
   let finished = false
@@ -1928,6 +1974,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    // Match the local thumbnail renderer before the page finishes loading.
+    // This forces CSS/JS prefers-color-scheme to light for the lifetime of
+    // the guest WebContents, independent of the OS or Obsidian theme.
+    void this.forceWebviewLightPreference(frameEl)
+
     if (mode === 'preload') {
       const preload = this.generationPreload
 
@@ -2225,16 +2276,50 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     )
   }
 
+  private async forceWebviewLightPreference(frameEl: LinkNode['frameEl']) {
+    if (!frameEl?.isConnected) return
+
+    const guest = resolveGuestWebContents(frameEl)
+
+    if (!guest || guest.isDestroyed?.()) return
+
+    try {
+      if (!guest.debugger.isAttached()) {
+        guest.debugger.attach()
+      }
+
+      await Promise.allSettled([
+        guest.debugger.sendCommand('Emulation.setEmulatedMedia', {
+          media: 'screen',
+          features: [{ name: 'prefers-color-scheme', value: 'light' }]
+        }),
+        guest.debugger.sendCommand('Emulation.setAutoDarkModeOverride', {
+          enabled: false
+        })
+      ])
+    } catch (error) {
+      this.log(`Unable to force light color preference for webview: ${String(error)}`, true)
+    }
+  }
+
   private async applyLightTheme(frameEl: LinkNode['frameEl']) {
     if (!frameEl?.isConnected) return
 
-    await Promise.allSettled([frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)])
+    await Promise.allSettled([
+      this.forceWebviewLightPreference(frameEl),
+      frameEl.insertCSS(GENERATION_LIGHT_THEME_CSS),
+      frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
+    ])
   }
 
   private async applyGenerationLightTheme(frameEl: LinkNode['frameEl']) {
     if (!frameEl?.isConnected) return
 
-    await Promise.allSettled([frameEl.insertCSS(GENERATION_LIGHT_THEME_CSS)])
+    await Promise.allSettled([
+      this.forceWebviewLightPreference(frameEl),
+      frameEl.insertCSS(GENERATION_LIGHT_THEME_CSS),
+      frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
+    ])
   }
 
   private async revealInteractiveFrame(node: LinkNode, frameEl: NonNullable<LinkNode['frameEl']>) {
