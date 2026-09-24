@@ -21,9 +21,12 @@ const THUMBNAIL_MAX_LONG_EDGE = 768
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
 const PREVIEW_LOAD_TIMEOUT_MS = 1000
 const INTERACTIVE_PAINT_SETTLE_MS = 50
-const GENERATION_PAINT_TIMEOUT_MS = 120
+const GENERATION_PAINT_TIMEOUT_MS = 80
+const GENERATION_CAPTURE_RETRY_MS = 60
 const GENERATION_JOB_TIMEOUT_MS = 5000
-const MAX_GENERATION_CONCURRENCY = 2
+const FOREGROUND_GENERATION_CONCURRENCY = 2
+const BACKGROUND_GENERATION_CONCURRENCY = 3
+const BACKGROUND_THREE_WORKER_MIN_CORES = 8
 
 const LIGHT_THEME_CSS = `
   :root {
@@ -52,6 +55,12 @@ const WEBVIEW_PAINT_READY_SCRIPT = `
     requestAnimationFrame(() => {
       requestAnimationFrame(resolve)
     })
+  })
+`
+
+const GENERATION_PAINT_READY_SCRIPT = `
+  new Promise(resolve => {
+    requestAnimationFrame(resolve)
   })
 `
 
@@ -789,7 +798,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.activeInteractiveNode ||
       this.generationQueueScheduled ||
       this.generationQueue.length === 0 ||
-      this.activeGenerations.size >= MAX_GENERATION_CONCURRENCY
+      this.activeGenerations.size >= this.getGenerationConcurrency()
     ) {
       this.releaseBackgroundExecutionIfIdle()
       return
@@ -807,8 +816,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private processThumbnailQueue() {
     if (this.activeInteractiveNode) return
 
+    const concurrency = this.getGenerationConcurrency()
+
     while (
-      this.activeGenerations.size < MAX_GENERATION_CONCURRENCY &&
+      this.activeGenerations.size < concurrency &&
       this.generationQueue.length > 0
     ) {
       const job = this.dequeueNextGenerationJob()
@@ -867,6 +878,24 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.queuedGenerationIds.delete(job.node.id)
 
     return job
+  }
+
+  private getGenerationConcurrency(): number {
+    const hardwareConcurrency = navigator.hardwareConcurrency || 4
+
+    if (hardwareConcurrency < BACKGROUND_THREE_WORKER_MIN_CORES) {
+      return FOREGROUND_GENERATION_CONCURRENCY
+    }
+
+    const hasFocusedCanvas =
+      [...this.activeGenerations.values()].some(session =>
+        session.node.nodeEl.ownerDocument.hasFocus()
+      ) ||
+      this.generationQueue.some(job => job.node.nodeEl.ownerDocument.hasFocus())
+
+    return hasFocusedCanvas
+      ? FOREGROUND_GENERATION_CONCURRENCY
+      : BACKGROUND_GENERATION_CONCURRENCY
   }
 
   private getGenerationPriority(node: LinkNode): number {
@@ -1338,7 +1367,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     try {
       await Promise.race([
-        frameEl.executeJavaScript(WEBVIEW_PAINT_READY_SCRIPT),
+        frameEl.executeJavaScript(GENERATION_PAINT_READY_SCRIPT),
         delay(GENERATION_PAINT_TIMEOUT_MS)
       ])
     } catch {
@@ -1454,7 +1483,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const startedAt = performance.now()
 
     try {
-      const image = await frameEl.capturePage()
+      let image = await frameEl.capturePage()
+
+      if (image.isEmpty() && node.frameEl === frameEl && frameEl.isConnected) {
+        await delay(GENERATION_CAPTURE_RETRY_MS)
+        image = await frameEl.capturePage()
+      }
+
       frameEl.stop?.()
 
       if (node.frameEl !== frameEl || !frameEl.isConnected || image.isEmpty()) {
@@ -1653,7 +1688,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Mounted web cards: ${mountedWebCards.size}`,
       `Cached previews: ${cachedPreviews}`,
       `Live webviews: ${liveWebviews}`,
-      `Generating thumbnails: ${this.activeGenerations.size}/${MAX_GENERATION_CONCURRENCY}`,
+      `Generating thumbnails: ${this.activeGenerations.size}/${this.getGenerationConcurrency()}`,
       `Queued: ${this.generationQueue.length}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
