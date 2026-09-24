@@ -1,6 +1,14 @@
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { freemem, homedir, constants as osConstants, platform, setPriority, tmpdir, totalmem } from 'node:os'
+import {
+  freemem,
+  homedir,
+  constants as osConstants,
+  platform,
+  setPriority,
+  tmpdir,
+  totalmem
+} from 'node:os'
 import { join } from 'node:path'
 
 const BROWSER_START_TIMEOUT_MS = 6000
