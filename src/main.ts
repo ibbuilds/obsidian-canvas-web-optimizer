@@ -345,16 +345,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       if (untested !== undefined) {
         this.localBrowserRenderer.setPoolSize(untested)
-        const testedCount = candidates.length - candidates.filter(
-          candidate => tuningRecord.scores[String(candidate)] === undefined
-        ).length
-        this.localTuningStatus =
-          `calibrating ${untested} (${testedCount}/${candidates.length} tested)`
+        const testedCount =
+          candidates.length -
+          candidates.filter(candidate => tuningRecord.scores[String(candidate)] === undefined)
+            .length
+        this.localTuningStatus = `calibrating ${untested} (${testedCount}/${candidates.length} tested)`
       } else {
-        const best = this.getPreferredLocalConcurrency(
-          tuningRecord,
-          this.localBrowserRenderer
-        )
+        const best = this.getPreferredLocalConcurrency(tuningRecord, this.localBrowserRenderer)
 
         tuningRecord.bestConcurrency = best
         this.localBrowserRenderer.setPoolSize(best)
@@ -1706,17 +1703,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     record.bestConcurrency = best
 
-    const untested = candidates.find(
-      candidate => record.scores[String(candidate)] === undefined
-    )
+    const untested = candidates.find(candidate => record.scores[String(candidate)] === undefined)
 
     if (untested !== undefined) {
       renderer.setPoolSize(untested)
-      const testedCount = candidates.length - candidates.filter(
-        candidate => record.scores[String(candidate)] === undefined
-      ).length
-      this.localTuningStatus =
-        `calibrating ${untested}; provisional best ${best} (${testedCount}/${candidates.length})`
+      const testedCount =
+        candidates.length -
+        candidates.filter(candidate => record.scores[String(candidate)] === undefined).length
+      this.localTuningStatus = `calibrating ${untested}; provisional best ${best} (${testedCount}/${candidates.length})`
     } else {
       const scored = candidates
         .map(concurrency => ({
@@ -1732,8 +1726,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       if (confirmation) {
         renderer.setPoolSize(confirmation.concurrency)
-        this.localTuningStatus =
-          `confirming ${confirmation.concurrency}; provisional best ${best}`
+        this.localTuningStatus = `confirming ${confirmation.concurrency}; provisional best ${best}`
       } else {
         renderer.setPoolSize(best)
         this.localTuningStatus = `settled at ${best}`
