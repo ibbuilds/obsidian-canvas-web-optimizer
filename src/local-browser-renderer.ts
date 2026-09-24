@@ -1,7 +1,7 @@
-import { type ChildProcess, execFileSync, spawn } from 'child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
-import { homedir, platform, tmpdir } from 'os'
-import { join } from 'path'
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { homedir, platform, tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const BROWSER_START_TIMEOUT_MS = 6000
 const CDP_COMMAND_TIMEOUT_MS = 3500
