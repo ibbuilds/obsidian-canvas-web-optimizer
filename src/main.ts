@@ -1972,11 +1972,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    // Match the local thumbnail renderer before the page finishes loading.
-    // This forces CSS/JS prefers-color-scheme to light for the lifetime of
-    // the guest WebContents, independent of the OS or Obsidian theme.
-    void this.forceWebviewLightPreference(frameEl)
-
     if (mode === 'preload') {
       const preload = this.generationPreload
 
@@ -2149,6 +2144,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       return
     }
+
+    // Match the local thumbnail renderer before the page finishes loading.
+    // This forces CSS/JS prefers-color-scheme to light for the lifetime of
+    // the guest WebContents, independent of the OS or Obsidian theme.
+    void this.forceWebviewLightPreference(frameEl)
 
     if (mode === 'preload') {
       const preload = this.generationPreload
