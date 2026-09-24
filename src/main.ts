@@ -702,6 +702,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
   }
 
+  private getPreviewResourceUrl(node: LinkNode): string {
+    const resourcePath = this.app.vault.adapter.getResourcePath(
+      `${this.cacheDir}/${node.id}.thumbnail.jpg`
+    )
+    const cacheVersion = this.getNodeState(node).metadata?.capturedAt
+
+    if (!cacheVersion) return resourcePath
+
+    const separator = resourcePath.includes('?') ? '&' : '?'
+
+    return `${resourcePath}${separator}v=${cacheVersion}`
+  }
+
   private ensurePreview(
     node: LinkNode,
     force = false,
@@ -709,15 +722,33 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   ): HTMLImageElement | null {
     this.removePendingPlaceholder(node)
 
+    const expectedSrc = this.getPreviewResourceUrl(node)
     const current = node._previewImageEl
 
     if (current?.isConnected) {
-      if (force) {
-        current.classList.remove('link-thumbnail-exit')
+      const ownedByPlugin = current.dataset.canvasWebOptimizerPreview === node.id
+
+      if (ownedByPlugin) {
+        current.classList.add('link-thumbnail')
+
+        if (force) {
+          current.classList.remove('link-thumbnail-exit')
+        }
+
+        current.classList.toggle('link-thumbnail-enter', enterHidden)
+
+        if (current.getAttribute('src') !== expectedSrc) {
+          current.src = expectedSrc
+        }
+
+        return current
       }
 
-      current.classList.toggle('link-thumbnail-enter', enterHidden)
-      return current
+      // Canvas can recreate its own preview element when a view is reopened.
+      // Never trust that element as our cache surface: it may point at a stale
+      // or transient frame. Replace it with a preview backed by our cache file.
+      current.remove()
+      node._previewImageEl = null
     }
 
     if (!this.isNodeContentMounted(node)) return null
@@ -726,11 +757,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return null
     }
 
-    current?.remove()
-
     const preview = node.contentEl.doc.createElement('img')
 
     preview.classList.add('link-thumbnail')
+    preview.dataset.canvasWebOptimizerPreview = node.id
 
     if (enterHidden) {
       preview.classList.add('link-thumbnail-enter')
@@ -739,17 +769,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     preview.alt = 'Webpage thumbnail'
     preview.decoding = 'async'
     preview.draggable = false
-    const resourcePath = this.app.vault.adapter.getResourcePath(
-      `${this.cacheDir}/${node.id}.thumbnail.jpg`
-    )
-    const cacheVersion = this.getNodeState(node).metadata?.capturedAt
-
-    if (cacheVersion) {
-      const separator = resourcePath.includes('?') ? '&' : '?'
-      preview.src = `${resourcePath}${separator}v=${cacheVersion}`
-    } else {
-      preview.src = resourcePath
-    }
+    preview.src = expectedSrc
 
     preview.addEventListener(
       'error',
