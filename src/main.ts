@@ -338,8 +338,28 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const tuningRecord = this.pluginData.localRendererTuning?.[this.localBrowserRenderer.tuningKey]
 
     if (tuningRecord) {
-      this.localBrowserRenderer.setPoolSize(tuningRecord.bestConcurrency)
-      this.localTuningStatus = `saved best ${this.localBrowserRenderer.poolSize}`
+      const candidates = this.localBrowserRenderer.tuningCandidates
+      const untested = candidates.find(
+        candidate => tuningRecord.scores[String(candidate)] === undefined
+      )
+
+      if (untested !== undefined) {
+        this.localBrowserRenderer.setPoolSize(untested)
+        const testedCount = candidates.length - candidates.filter(
+          candidate => tuningRecord.scores[String(candidate)] === undefined
+        ).length
+        this.localTuningStatus =
+          `calibrating ${untested} (${testedCount}/${candidates.length} tested)`
+      } else {
+        const best = this.getPreferredLocalConcurrency(
+          tuningRecord,
+          this.localBrowserRenderer
+        )
+
+        tuningRecord.bestConcurrency = best
+        this.localBrowserRenderer.setPoolSize(best)
+        this.localTuningStatus = `saved best ${best}`
+      }
     } else {
       this.localTuningStatus = `hardware heuristic ${this.localBrowserRenderer.poolSize}`
     }
@@ -1609,6 +1629,32 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.releaseBackgroundExecution()
   }
 
+  private getPreferredLocalConcurrency(
+    record: LocalConcurrencyTuningRecord,
+    renderer: LocalBrowserRenderer
+  ): number {
+    const scored = renderer.tuningCandidates
+      .map(concurrency => ({
+        concurrency,
+        score: record.scores[String(concurrency)]?.mean
+      }))
+      .filter(
+        (entry): entry is { concurrency: number; score: number } =>
+          typeof entry.score === 'number' && Number.isFinite(entry.score)
+      )
+
+    if (scored.length === 0) {
+      return renderer.poolSize
+    }
+
+    const topScore = Math.max(...scored.map(entry => entry.score))
+    const nearTop = scored
+      .filter(entry => entry.score >= topScore * 0.97)
+      .sort((left, right) => left.concurrency - right.concurrency)
+
+    return nearTop[0]?.concurrency ?? scored[0].concurrency
+  }
+
   private async observeLocalConcurrencyBatch(
     snapshot: LocalBatchTuningSnapshot,
     completed: number,
@@ -1655,44 +1701,44 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           samples: 1
         }
 
-    const scoredLevels = Object.entries(record.scores)
-      .map(([level, value]) => ({
-        concurrency: Number(level),
-        score: value.mean
-      }))
-      .filter(entry => Number.isFinite(entry.concurrency))
+    const candidates = renderer.tuningCandidates
+    const best = this.getPreferredLocalConcurrency(record, renderer)
 
-    scoredLevels.sort((left, right) => right.score - left.score)
-
-    const top = scoredLevels[0]
-
-    if (top) {
-      const currentBest = record.scores[String(record.bestConcurrency)]
-      const improvement =
-        !currentBest || top.concurrency === record.bestConcurrency
-          ? Number.POSITIVE_INFINITY
-          : top.score / currentBest.mean - 1
-
-      if (top.concurrency === record.bestConcurrency || improvement >= 0.02 || !currentBest) {
-        record.bestConcurrency = top.concurrency
-      }
-    }
-
-    const best = Math.max(1, Math.min(renderer.maxPoolSize, record.bestConcurrency))
     record.bestConcurrency = best
 
-    const untestedNeighbors = [best + 1, best - 1].filter(
-      candidate =>
-        candidate >= 1 &&
-        candidate <= renderer.maxPoolSize &&
-        record.scores[String(candidate)] === undefined
+    const untested = candidates.find(
+      candidate => record.scores[String(candidate)] === undefined
     )
 
-    const nextConcurrency = untestedNeighbors[0] ?? best
+    if (untested !== undefined) {
+      renderer.setPoolSize(untested)
+      const testedCount = candidates.length - candidates.filter(
+        candidate => record.scores[String(candidate)] === undefined
+      ).length
+      this.localTuningStatus =
+        `calibrating ${untested}; provisional best ${best} (${testedCount}/${candidates.length})`
+    } else {
+      const scored = candidates
+        .map(concurrency => ({
+          concurrency,
+          score: record.scores[String(concurrency)]?.mean ?? 0,
+          samples: record.scores[String(concurrency)]?.samples ?? 0
+        }))
+        .sort((left, right) => right.score - left.score)
+      const topScore = scored[0]?.score ?? 0
+      const confirmation = scored
+        .filter(entry => entry.score >= topScore * 0.97 && entry.samples < 2)
+        .sort((left, right) => left.concurrency - right.concurrency)[0]
 
-    renderer.setPoolSize(nextConcurrency)
-    this.localTuningStatus =
-      nextConcurrency === best ? `settled at ${best}` : `testing ${nextConcurrency}; best ${best}`
+      if (confirmation) {
+        renderer.setPoolSize(confirmation.concurrency)
+        this.localTuningStatus =
+          `confirming ${confirmation.concurrency}; provisional best ${best}`
+      } else {
+        renderer.setPoolSize(best)
+        this.localTuningStatus = `settled at ${best}`
+      }
+    }
 
     this.pluginData.localRendererTuning[key] = record
 
