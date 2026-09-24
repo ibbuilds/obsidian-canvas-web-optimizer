@@ -34,6 +34,24 @@ Cached previews are stored locally in the plugin's data directory and do not mod
 
 If the cache is deleted, the original Canvas URLs remain intact and previews can be regenerated.
 
+## Local thumbnail renderer
+
+On desktop, Canvas Web Optimizer can use an installed Chromium-based browser such as Microsoft Edge, Google Chrome, Chromium, or Brave to generate preview screenshots outside Obsidian's Canvas renderer.
+
+The local renderer is designed to be automatic:
+
+- It starts only when uncached previews need to be generated.
+- It runs headless, without opening a visible browser window.
+- It uses a temporary isolated browser profile in the operating system's temporary directory.
+- It does not use or modify the user's normal browser profile, cookies, history, or signed-in sessions.
+- It closes automatically after the thumbnail queue becomes idle.
+- Its temporary profile is removed after shutdown.
+- If no supported local browser is available or rendering fails, the plugin falls back to the native Obsidian generation pipeline.
+
+This feature launches a browser executable installed outside the vault and loads the same URLs that are present in the Canvas. Thumbnail generation remains local: no third-party screenshot service, paid API, telemetry service, or remote thumbnail backend is used.
+
+The cached JPEG previews and metadata remain inside the plugin data directory and the original Canvas files are not modified.
+
 ## Goals
 
 Canvas Web Optimizer is being developed around a few principles:
@@ -118,9 +136,9 @@ pnpm run dev
 
 Generating a thumbnail requires the webpage to load at least once.
 
-This means a new Canvas containing many uncached web pages can still require significant resources during its initial thumbnail-generation pass.
+The local renderer can process several pages concurrently, but initial generation still uses CPU, memory, network bandwidth, and the installed browser. The plugin limits concurrency and shuts the browser down when the queue is idle rather than leaving a background browser running permanently.
 
-Reducing and controlling this initial load is one of the optimization areas planned for Canvas Web Optimizer.
+Sites that require an existing logged-in browser session may render differently because the thumbnail renderer intentionally uses an isolated temporary profile.
 
 ## Acknowledgements
 
