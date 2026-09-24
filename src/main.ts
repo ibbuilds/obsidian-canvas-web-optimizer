@@ -836,10 +836,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const concurrency = this.getGenerationConcurrency()
 
-    while (
-      this.activeGenerations.size < concurrency &&
-      this.generationQueue.length > 0
-    ) {
+    while (this.activeGenerations.size < concurrency && this.generationQueue.length > 0) {
       const job = this.dequeueNextGenerationJob()
 
       if (!job) break
@@ -910,12 +907,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const hasFocusedCanvas =
       [...this.activeGenerations.values()].some(session =>
         session.node.nodeEl.ownerDocument.hasFocus()
-      ) ||
-      this.generationQueue.some(job => job.node.nodeEl.ownerDocument.hasFocus())
+      ) || this.generationQueue.some(job => job.node.nodeEl.ownerDocument.hasFocus())
 
-    return hasFocusedCanvas
-      ? FOREGROUND_GENERATION_CONCURRENCY
-      : BACKGROUND_GENERATION_CONCURRENCY
+    return hasFocusedCanvas ? FOREGROUND_GENERATION_CONCURRENCY : BACKGROUND_GENERATION_CONCURRENCY
   }
 
   private getGenerationPriority(node: LinkNode): number {
@@ -1032,10 +1026,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       }
 
       this.activeGenerations.set(node.id, session)
-      this.peakGenerationWorkers = Math.max(
-        this.peakGenerationWorkers,
-        this.activeGenerations.size
-      )
+      this.peakGenerationWorkers = Math.max(this.peakGenerationWorkers, this.activeGenerations.size)
       this.requestNodeFrame(node, 'generation')
     })
   }
