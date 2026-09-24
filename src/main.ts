@@ -2386,7 +2386,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       .then(value => value === true)
       .catch(() => false)
 
-    return preferenceResult.status === 'fulfilled' && preferenceResult.value && browserPreferenceIsLight
+    return (
+      preferenceResult.status === 'fulfilled' && preferenceResult.value && browserPreferenceIsLight
+    )
   }
 
   private async applyGenerationLightTheme(frameEl: LinkNode['frameEl']) {
