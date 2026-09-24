@@ -21,7 +21,7 @@ const THUMBNAIL_MAX_LONG_EDGE = 768
 const THUMBNAIL_NODE_SCALE = 1.25
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
-const PREVIEW_LOAD_TIMEOUT_MS = 1000
+const PREVIEW_LOAD_TIMEOUT_MS = 500
 const INTERACTIVE_PAINT_SETTLE_MS = 50
 const GENERATION_PAINT_TIMEOUT_MS = 80
 const GENERATION_CAPTURE_RETRY_MS = 60
@@ -468,10 +468,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     try {
       const metadataPath = `${this.cacheDir}/${sourceNodeId}.metadata.json`
       const thumbnailPath = `${this.cacheDir}/${sourceNodeId}.thumbnail.jpg`
-      const [rawMetadata, thumbnail] = await Promise.all([
-        this.app.vault.adapter.read(metadataPath),
-        this.app.vault.adapter.readBinary(thumbnailPath)
-      ])
+      const rawMetadata = await this.app.vault.adapter.read(metadataPath)
       const sourceMetadata = JSON.parse(rawMetadata) as CacheMetadata
 
       if (
@@ -491,8 +488,22 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         capturedAt: sourceMetadata.capturedAt ?? Date.now()
       }
 
+      const destinationThumbnailPath = `${this.cacheDir}/${node.id}.thumbnail.jpg`
+
+      const copyThumbnail = async () => {
+        try {
+          await this.app.vault.adapter.copy(thumbnailPath, destinationThumbnailPath)
+        } catch {
+          if (await this.app.vault.adapter.exists(destinationThumbnailPath)) {
+            await this.app.vault.adapter.remove(destinationThumbnailPath)
+          }
+
+          await this.app.vault.adapter.copy(thumbnailPath, destinationThumbnailPath)
+        }
+      }
+
       await Promise.all([
-        this.app.vault.adapter.writeBinary(`${this.cacheDir}/${node.id}.thumbnail.jpg`, thumbnail),
+        copyThumbnail(),
         this.app.vault.adapter.write(
           `${this.cacheDir}/${node.id}.metadata.json`,
           JSON.stringify(metadata)
@@ -697,6 +708,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     preview.alt = 'Webpage thumbnail'
     preview.decoding = 'async'
+    preview.loading = force ? 'eager' : 'lazy'
     preview.draggable = false
     const resourcePath = this.app.vault.adapter.getResourcePath(
       `${this.cacheDir}/${node.id}.thumbnail.jpg`
