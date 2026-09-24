@@ -298,8 +298,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private localGenerationCount = 0
   private localFallbacks = 0
   private localTimeouts = 0
+  private appClosing = false
 
   async onload() {
+    this.registerDomEvent(window, 'beforeunload', () => {
+      this.appClosing = true
+    })
+
     this.addCommand({
       id: 'cleanup-unused-thumbnails',
       name: 'Cleanup unused thumbnails',
@@ -399,7 +404,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.localBrowserRenderer = null
     this.networkPreconnector = null
 
-    this.reloadActiveCanvasViews()
+    if (!this.appClosing) {
+      this.reloadActiveCanvasViews()
+    }
   }
 
   reloadActiveCanvasViews() {
