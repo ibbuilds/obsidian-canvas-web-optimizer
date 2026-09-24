@@ -757,6 +757,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return null
     }
 
+    node.contentEl.querySelectorAll<HTMLImageElement>('img.link-thumbnail').forEach(element => {
+      if (element.dataset.canvasWebOptimizerPreview !== node.id) {
+        element.remove()
+      }
+    })
+
     const preview = node.contentEl.doc.createElement('img')
 
     preview.classList.add('link-thumbnail')
