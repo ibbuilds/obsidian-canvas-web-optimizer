@@ -485,11 +485,7 @@ export default class LocalBrowserRenderer {
 
   readonly maxPoolSize = Math.max(
     1,
-    Math.min(
-      LOCAL_BROWSER_MAX_WORKERS,
-      this.cpuConcurrencyLimit,
-      this.memoryConcurrencyLimit
-    )
+    Math.min(LOCAL_BROWSER_MAX_WORKERS, this.cpuConcurrencyLimit, this.memoryConcurrencyLimit)
   )
 
   readonly heuristicPoolSize = Math.max(
