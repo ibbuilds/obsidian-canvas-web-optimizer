@@ -5,6 +5,8 @@
 }
 
 .canvas-node:hover .canvas-node-label,
+.canvas-node.is-selected .canvas-node-label,
+.canvas-node.is-focused .canvas-node-label,
 .canvas-node.canvas-web-active .canvas-node-label {
   opacity: 1;
 }
