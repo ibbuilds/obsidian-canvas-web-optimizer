@@ -9,6 +9,8 @@
 .canvas-node.is-focused .canvas-node-label,
 .canvas-node.canvas-web-active .canvas-node-label {
   opacity: 1;
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .canvas-web-has-active
