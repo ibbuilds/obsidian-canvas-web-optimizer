@@ -150,15 +150,16 @@ export default class NetworkPreconnector {
       this.warmStarted++
       scheduled++
 
-      void fetch.call(this.session, url, {
-        method: 'GET',
-        credentials: 'include',
-        cache: 'default',
-        redirect: 'follow',
-        headers: {
-          Accept: 'text/html,application/xhtml+xml'
-        }
-      })
+      void fetch
+        .call(this.session, url, {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'default',
+          redirect: 'follow',
+          headers: {
+            Accept: 'text/html,application/xhtml+xml'
+          }
+        })
         .then(async response => {
           if (!response.ok) {
             this.warmFailed++
