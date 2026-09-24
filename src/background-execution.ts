@@ -60,9 +60,7 @@ export default class BackgroundExecutionController {
     if (!target || target.isDestroyed?.()) {
       if (!this.warnedUnavailable) {
         this.warnedUnavailable = true
-        console.warn(
-          '[Canvas Web Optimizer] Unable to disable Electron background throttling.'
-        )
+        console.warn('[Canvas Web Optimizer] Unable to disable Electron background throttling.')
       }
 
       return NOOP_RELEASE
