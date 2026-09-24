@@ -688,10 +688,21 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
         if (
           event.button !== 0 ||
+          event.shiftKey ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.altKey ||
           !target ||
           !node.contentEl.contains(target) ||
-          !this.isNodeContentMounted(node)
+          !this.isNodeContentMounted(node) ||
+          this.activeInteractiveNode === node
         ) {
+          return
+        }
+
+        // The first click belongs to Canvas selection. Only a subsequent click
+        // on an already-selected card activates the live webpage.
+        if (!node.canvas?.selection?.has(node)) {
           return
         }
 
@@ -830,13 +841,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     preview.draggable = false
     preview.src = expectedSrc
 
-    preview.addEventListener(
-      'error',
-      () => {
-        this.handlePreviewError(node, preview)
-      },
-      { once: true }
-    )
+    preview.addEventListener('error', () => {
+      void this.handlePreviewError(node, preview)
+    })
 
     node.contentEl.append(preview)
     node._previewImageEl = preview
@@ -882,7 +889,36 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     return node._previewImageEl === preview && preview.isConnected
   }
 
-  private handlePreviewError(node: LinkNode, preview: HTMLImageElement) {
+  private async handlePreviewError(node: LinkNode, preview: HTMLImageElement) {
+    if (node._previewImageEl !== preview || !preview.isConnected) return
+
+    const retryCount = Number(preview.dataset.canvasWebOptimizerRetryCount ?? '0')
+
+    if (retryCount < 1) {
+      const [thumbnailExists, metadataExists] = await Promise.all([
+        this.app.vault.adapter.exists(`${this.cacheDir}/${node.id}.thumbnail.jpg`),
+        this.app.vault.adapter.exists(`${this.cacheDir}/${node.id}.metadata.json`)
+      ])
+
+      if (
+        thumbnailExists &&
+        metadataExists &&
+        node._previewImageEl === preview &&
+        preview.isConnected
+      ) {
+        preview.dataset.canvasWebOptimizerRetryCount = String(retryCount + 1)
+        await delay(50)
+
+        if (node._previewImageEl !== preview || !preview.isConnected) return
+
+        const resourceUrl = this.getPreviewResourceUrl(node)
+        const separator = resourceUrl.includes('?') ? '&' : '?'
+
+        preview.src = `${resourceUrl}${separator}reload=${Date.now()}`
+        return
+      }
+    }
+
     if (node._previewImageEl === preview) {
       preview.remove()
       node._previewImageEl = null
@@ -1889,24 +1925,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     void this.prepareNode(node)
   }
 
-  private shouldPinCachedNodeContent(node: LinkNode): boolean {
-    if (this.activeInteractiveNode === node) return false
-
-    return this.hasIndexedCache(node) && this.isNodeNearVisibleViewport(node)
-  }
-
-  private keepCachedNodeMounted(node: LinkNode) {
-    if (!node.nodeEl?.isConnected) return
-
-    if (!this.isNodeContentMounted(node)) {
-      node.mountContent()
-    }
-
-    if (this.isNodeContentMounted(node)) {
-      void this.prepareNode(node)
-    }
-  }
-
   private handleBreakpointUpdate(node: LinkNode) {
     const session = this.activeGeneration
     const isInteractive = this.activeInteractiveNode === node
@@ -2526,11 +2544,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       updateBreakpoint: (next: (...args: unknown[]) => unknown) =>
         function (...args: unknown[]) {
-          if (thisPlugin.shouldPinCachedNodeContent(this)) {
-            thisPlugin.keepCachedNodeMounted(this)
-            return
-          }
-
           const result = next.call(this, ...args)
 
           thisPlugin.handleBreakpointUpdate(this)
