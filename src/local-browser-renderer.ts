@@ -1,6 +1,14 @@
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { homedir, platform, tmpdir, totalmem } from 'node:os'
+import {
+  freemem,
+  homedir,
+  constants as osConstants,
+  platform,
+  setPriority,
+  tmpdir,
+  totalmem
+} from 'node:os'
 import { join } from 'node:path'
 
 const BROWSER_START_TIMEOUT_MS = 6000
@@ -526,7 +534,16 @@ export default class LocalBrowserRenderer {
   }
 
   get poolSize(): number {
-    return this.targetPoolSize
+    const freeMemoryGiB = freemem() / 1024 ** 3
+    const liveMemoryLimit = Math.max(
+      1,
+      Math.floor(
+        Math.max(0, freeMemoryGiB - LOCAL_BROWSER_MEMORY_RESERVE_GIB) /
+          LOCAL_BROWSER_MEMORY_PER_WORKER_GIB
+      )
+    )
+
+    return Math.max(1, Math.min(this.targetPoolSize, this.maxPoolSize, liveMemoryLimit))
   }
 
   get tuningKey(): string {
@@ -899,6 +916,14 @@ export default class LocalBrowserRenderer {
       windowsHide: true,
       stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
     })
+
+    if (child.pid) {
+      try {
+        setPriority(child.pid, osConstants.priority.PRIORITY_BELOW_NORMAL)
+      } catch {
+        // Best effort. The adaptive pool still bounds resource usage.
+      }
+    }
 
     try {
       const pipeWrite = child.stdio[3] as NodeJS.WritableStream | null
