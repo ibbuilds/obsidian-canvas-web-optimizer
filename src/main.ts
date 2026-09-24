@@ -388,7 +388,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.log('Plugin loaded')
   }
 
-  onunload() {
+  async onunload() {
     this.log('Unloading plugin')
 
     this.generationQueue = []
@@ -400,9 +400,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.removeInteractiveFrameImmediately()
     this.releaseBackgroundExecution()
     this.backgroundExecution.dispose()
-    this.localBrowserRenderer?.dispose()
+
+    const renderer = this.localBrowserRenderer
     this.localBrowserRenderer = null
     this.networkPreconnector = null
+
+    await renderer?.dispose()
 
     if (!this.appClosing) {
       this.reloadActiveCanvasViews()
