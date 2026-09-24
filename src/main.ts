@@ -1373,11 +1373,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
   }
 
-  private abortLocalGenerationForNode(
-    node: LinkNode,
-    outcome: GenerationOutcome,
-    requeue = false
-  ) {
+  private abortLocalGenerationForNode(node: LinkNode, outcome: GenerationOutcome, requeue = false) {
     const generation = this.localGenerations.get(node.id)
 
     if (!generation || generation.node !== node) return
@@ -2471,7 +2467,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
       `Network preconnect: ${
-        localRendererAvailable ? 'standby (local browser preferred)' : this.networkPreconnector?.active ? 'on' : 'off'
+        localRendererAvailable
+          ? 'standby (local browser preferred)'
+          : this.networkPreconnector?.active
+            ? 'on'
+            : 'off'
       } (${this.networkPreconnector?.count ?? 0})`,
       `HTTP warm cache: ${
         localRendererAvailable
