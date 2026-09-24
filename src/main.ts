@@ -1889,6 +1889,24 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     void this.prepareNode(node)
   }
 
+  private shouldPinCachedNodeContent(node: LinkNode): boolean {
+    if (this.activeInteractiveNode === node) return false
+
+    return this.hasIndexedCache(node) && this.isNodeNearVisibleViewport(node)
+  }
+
+  private keepCachedNodeMounted(node: LinkNode) {
+    if (!node.nodeEl?.isConnected) return
+
+    if (!this.isNodeContentMounted(node)) {
+      node.mountContent()
+    }
+
+    if (this.isNodeContentMounted(node)) {
+      void this.prepareNode(node)
+    }
+  }
+
   private handleBreakpointUpdate(node: LinkNode) {
     const session = this.activeGeneration
     const isInteractive = this.activeInteractiveNode === node
@@ -2508,6 +2526,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       updateBreakpoint: (next: (...args: unknown[]) => unknown) =>
         function (...args: unknown[]) {
+          if (thisPlugin.shouldPinCachedNodeContent(this)) {
+            thisPlugin.keepCachedNodeMounted(this)
+            return
+          }
+
           const result = next.call(this, ...args)
 
           thisPlugin.handleBreakpointUpdate(this)
