@@ -1082,8 +1082,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         }
       }
 
-      const preload =
-        this.generationPreload?.node === node ? this.generationPreload : null
+      const preload = this.generationPreload?.node === node ? this.generationPreload : null
 
       if (this.generationPreload && !preload) {
         this.cancelGenerationPreload(true)
@@ -1104,12 +1103,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
           const frameEl = preload.frameEl
 
-          if (
-            !ready ||
-            !frameEl ||
-            node.frameEl !== frameEl ||
-            !frameEl.isConnected
-          ) {
+          if (!ready || !frameEl || node.frameEl !== frameEl || !frameEl.isConnected) {
             session.finish('failure')
             return
           }
