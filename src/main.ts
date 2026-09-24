@@ -1062,7 +1062,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    this.ensureBackgroundExecution(this.generationQueue[0].node)
     this.generationQueueScheduled = true
 
     queueMicrotask(() => {
@@ -1099,6 +1098,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
             this.generationQueue.unshift(nativeFallbackJob)
             this.queuedGenerationIds.add(nativeFallbackJob.node.id)
           } else {
+            this.ensureBackgroundExecution(nativeFallbackJob.node)
             this.preconnectQueuedWork()
             this.warmQueuedWork()
             await this.generateQueuedThumbnail(nativeFallbackJob)
@@ -1131,6 +1131,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    this.ensureBackgroundExecution(job.node)
     this.warmQueuedWork()
 
     await this.generateQueuedThumbnail(job)
