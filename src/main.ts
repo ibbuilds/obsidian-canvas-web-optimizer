@@ -823,7 +823,31 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     this.queuedGenerationIds.add(node.id)
+    this.preemptGenerationForHigherPriority(node)
     this.scheduleThumbnailQueue()
+  }
+
+  private preemptGenerationForHigherPriority(node: LinkNode) {
+    if (this.activeGenerations.size < this.getGenerationConcurrency()) return
+
+    const newTier = Math.floor(this.getGenerationPriority(node) / 1000)
+    let worstSession: ActiveGeneration | null = null
+    let worstTier = newTier
+
+    for (const session of this.activeGenerations.values()) {
+      const tier = Math.floor(this.getGenerationPriority(session.node) / 1000)
+
+      if (tier > worstTier) {
+        worstTier = tier
+        worstSession = session
+      }
+    }
+
+    if (!worstSession) return
+
+    worstSession.requeue = true
+    this.removeNodeFrame(worstSession.node)
+    worstSession.finish('preempted')
   }
 
   private scheduleThumbnailQueue() {
