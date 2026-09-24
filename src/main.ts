@@ -681,6 +681,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     state.activationHandlerAttached = true
 
+    let pointerId: number | null = null
+    let pointerStartX = 0
+    let pointerStartY = 0
+    let pointerMoved = false
+    let selectedAtPointerDown = false
+
     node.nodeEl.addEventListener(
       'pointerdown',
       event => {
@@ -688,23 +694,60 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
         if (
           event.button !== 0 ||
-          event.shiftKey ||
-          event.ctrlKey ||
-          event.metaKey ||
-          event.altKey ||
           !target ||
           !node.contentEl.contains(target) ||
-          !this.isNodeContentMounted(node) ||
-          this.activeInteractiveNode === node
+          !this.isNodeContentMounted(node)
         ) {
+          pointerId = null
+          selectedAtPointerDown = false
           return
         }
 
-        // The first click belongs to Canvas selection. Only a subsequent click
-        // on an already-selected card activates the live webpage.
-        if (!node.canvas?.selection?.has(node)) {
-          return
+        pointerId = event.pointerId
+        pointerStartX = event.clientX
+        pointerStartY = event.clientY
+        pointerMoved = false
+        selectedAtPointerDown = Boolean(node.canvas?.selection?.has(node))
+      },
+      true
+    )
+
+    node.nodeEl.addEventListener(
+      'pointermove',
+      event => {
+        if (pointerId !== event.pointerId || pointerMoved) return
+
+        if (
+          Math.abs(event.clientX - pointerStartX) > 5 ||
+          Math.abs(event.clientY - pointerStartY) > 5
+        ) {
+          pointerMoved = true
         }
+      },
+      true
+    )
+
+    node.nodeEl.addEventListener(
+      'click',
+      event => {
+        const target = event.target as globalThis.Node | null
+        const shouldActivate =
+          selectedAtPointerDown &&
+          !pointerMoved &&
+          !event.shiftKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey &&
+          Boolean(target) &&
+          node.contentEl.contains(target) &&
+          this.isNodeContentMounted(node) &&
+          this.activeInteractiveNode !== node
+
+        pointerId = null
+        selectedAtPointerDown = false
+        pointerMoved = false
+
+        if (!shouldActivate) return
 
         event.preventDefault()
         event.stopImmediatePropagation()
