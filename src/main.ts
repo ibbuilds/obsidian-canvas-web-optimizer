@@ -1668,14 +1668,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.frameCreateCount > 0 ? Math.round(this.frameCreateTotalMs / this.frameCreateCount) : 0
     const averageDomReadyMs =
       this.domReadyCount > 0 ? Math.round(this.domReadyTotalMs / this.domReadyCount) : 0
-    const averageThemeMs =
-      this.themeCount > 0 ? Math.round(this.themeTotalMs / this.themeCount) : 0
+    const averageThemeMs = this.themeCount > 0 ? Math.round(this.themeTotalMs / this.themeCount) : 0
     const averagePaintReadyMs =
       this.paintReadyCount > 0 ? Math.round(this.paintReadyTotalMs / this.paintReadyCount) : 0
     const averageCapturePageMs =
-      this.capturePageCount > 0
-        ? Math.round(this.capturePageTotalMs / this.capturePageCount)
-        : 0
+      this.capturePageCount > 0 ? Math.round(this.capturePageTotalMs / this.capturePageCount) : 0
     const averageEncodeMs =
       this.encodeCount > 0 ? Math.round(this.encodeTotalMs / this.encodeCount) : 0
     const averageThumbnailWriteMs =
@@ -1687,9 +1684,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         ? Math.round(this.metadataWriteTotalMs / this.metadataWriteCount)
         : 0
     const averagePreviewReadyMs =
-      this.previewReadyCount > 0
-        ? Math.round(this.previewReadyTotalMs / this.previewReadyCount)
-        : 0
+      this.previewReadyCount > 0 ? Math.round(this.previewReadyTotalMs / this.previewReadyCount) : 0
 
     const diagnostics = [
       `Mounted web cards: ${mountedWebCards.size}`,
