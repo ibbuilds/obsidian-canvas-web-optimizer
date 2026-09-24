@@ -1248,10 +1248,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     })
   }
 
-  private startOffscreenGeneration(
-    job: GenerationJob,
-    renderer: OffscreenThumbnailRenderer
-  ) {
+  private startOffscreenGeneration(job: GenerationJob, renderer: OffscreenThumbnailRenderer) {
     const { node } = job
     const size = this.getOffscreenRenderSize(node)
     const task = renderer.render(node.url, size.width, size.height)
@@ -1299,10 +1296,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private isCurrentOffscreenGeneration(generation: OffscreenConcurrentGeneration): boolean {
-    return (
-      !generation.completed &&
-      this.offscreenGenerations.get(generation.node.id) === generation
-    )
+    return !generation.completed && this.offscreenGenerations.get(generation.node.id) === generation
   }
 
   private finishOffscreenGeneration(
@@ -2357,9 +2351,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.generationPreloadedCount = 0
     this.generationTotalMs = 0
     this.batchStartedAt =
-      this.activeGeneration ||
-      this.offscreenGenerations.size > 0 ||
-      this.generationQueue.length > 0
+      this.activeGeneration || this.offscreenGenerations.size > 0 || this.generationQueue.length > 0
         ? performance.now()
         : null
     this.batchCompleted = 0
