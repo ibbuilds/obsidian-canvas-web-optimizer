@@ -1493,8 +1493,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (!this.isCurrentLocalGeneration(generation)) return
 
     if (!previewReady || !this.getNodeState(node).cached) {
-      generation.requeue = true
-      this.finishLocalGeneration(generation, 'stale')
+      this.finishLocalGeneration(generation, 'fallback')
       return
     }
 
@@ -2454,6 +2453,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const localBrowserStatus = this.localBrowserRenderer
       ? `${this.localBrowserRenderer.browserName} / ${this.localBrowserRenderer.state}`
       : 'not initialized'
+    const localBrowserUnavailableReason =
+      this.localBrowserRenderer?.unavailableReason ?? 'none'
 
     const diagnostics = [
       `Mounted web cards: ${mountedWebCards.size}`,
@@ -2463,6 +2464,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Queued: ${this.generationQueue.length}`,
       `Generation engine: ${generationEngine}`,
       `Local browser: ${localBrowserStatus}`,
+      `Local browser unavailable reason: ${localBrowserUnavailableReason}`,
       `Local browser active tasks: ${this.localBrowserRenderer?.activeCount ?? 0}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
