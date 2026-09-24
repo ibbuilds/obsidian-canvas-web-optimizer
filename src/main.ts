@@ -26,6 +26,7 @@ const GENERATION_JOB_TIMEOUT_MS = 5000
 const GENERATION_MAX_ATTEMPTS = 3
 const GENERATION_RETRY_DELAY_MS = 150
 const PRECONNECT_LOOKAHEAD_ORIGINS = 6
+const HTTP_WARM_LOOKAHEAD_URLS = 2
 
 const GENERATION_LIGHT_THEME_CSS = `
   :root {
@@ -776,6 +777,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    this.warmQueuedWork()
+
     await this.generateQueuedThumbnail(job)
 
     if (!this.activeInteractiveNode) {
@@ -795,6 +798,20 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       .map(job => job.node.url)
 
     this.networkPreconnector.preconnect(urls, PRECONNECT_LOOKAHEAD_ORIGINS)
+  }
+
+  private warmQueuedWork() {
+    if (!this.networkPreconnector || this.generationQueue.length === 0) return
+
+    const urls = this.generationQueue
+      .slice()
+      .sort(
+        (left, right) =>
+          this.getGenerationPriority(left.node) - this.getGenerationPriority(right.node)
+      )
+      .map(job => job.node.url)
+
+    this.networkPreconnector.warm(urls, HTTP_WARM_LOOKAHEAD_URLS)
   }
 
   private dequeueNextGenerationJob(): GenerationJob | null {
@@ -1733,6 +1750,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
       `Network preconnect: ${this.networkPreconnector?.active ? 'on' : 'off'} (${this.networkPreconnector?.count ?? 0})`,
+      `HTTP warm cache: ${this.networkPreconnector?.fetchActive ? 'on' : 'off'} (${this.networkPreconnector?.warmCompletedCount ?? 0}/${this.networkPreconnector?.warmStartedCount ?? 0}, failed ${this.networkPreconnector?.warmFailedCount ?? 0})`,
       `Cache hits: ${this.cacheHits}`,
       `Cache misses: ${this.cacheMisses}`,
       `Generated: ${this.generationCompleted}`,
