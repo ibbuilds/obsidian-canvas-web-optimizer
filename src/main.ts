@@ -531,6 +531,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       state.metadata = metadata
       this.cacheHits++
 
+      if (metadata.url) {
+        this.urlCacheSources.set(normalizeCacheUrl(metadata.url), node.id)
+        this.scheduleUrlCacheIndexWrite()
+      }
+
       node.updateNodeLabel(metadata.title)
       this.applyPreparedNodeState(node, state)
     } catch (error) {
