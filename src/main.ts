@@ -65,7 +65,7 @@ type ThumbnailImage = {
   toJPEG(quality: number): ArrayBuffer
 }
 
-type FrameMode = 'generation' | 'interactive'
+type FrameMode = 'generation' | 'preload' | 'interactive'
 type GenerationOutcome = 'success' | 'failure' | 'timeout' | 'preempted' | 'stale' | 'unmounted'
 
 type CacheMetadata = {
@@ -96,8 +96,19 @@ type ActiveGeneration = {
   frameRequestedAt?: number
   frameCreatedAt?: number
   domReadyAt?: number
+  usedPreload?: boolean
   requeue: boolean
   finish: (outcome: GenerationOutcome) => void
+}
+
+type GenerationPreload = {
+  node: LinkNode
+  startedAt: number
+  frameEl: NonNullable<LinkNode['frameEl']> | null
+  readyPromise: Promise<boolean>
+  resolveReady: (ready: boolean) => void
+  settled: boolean
+  cleanup: () => void
 }
 
 type DidFailLoadEvent = Event & {
@@ -181,6 +192,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private generationQueue: GenerationJob[] = []
   private readonly queuedGenerationIds = new Set<string>()
   private activeGeneration: ActiveGeneration | null = null
+  private generationPreload: GenerationPreload | null = null
+  private generationPreloadDisabled = false
   private generationQueueScheduled = false
   private readonly backgroundExecution = new BackgroundExecutionController()
   private backgroundExecutionRelease: (() => void) | null = null
@@ -194,6 +207,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private generationFailed = 0
   private generationTimedOut = 0
   private generationPreemptions = 0
+  private generationPreloadsStarted = 0
+  private generationPreloadsReady = 0
+  private generationPreloadHits = 0
+  private generationPreloadFailures = 0
+  private generationPreloadReadyTotalMs = 0
   private generationTotalMs = 0
   private queueWaitTotalMs = 0
   private queueWaitCount = 0
@@ -277,6 +295,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.queuedGenerationIds.clear()
     this.requestedInteractiveNode = null
     this.abortActiveGeneration(false)
+    this.cancelGenerationPreload(true)
     this.removeInteractiveFrameImmediately()
     this.releaseBackgroundExecution()
     this.backgroundExecution.dispose()
@@ -814,6 +833,94 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.networkPreconnector.warm(urls, HTTP_WARM_LOOKAHEAD_URLS)
   }
 
+  private peekNextGenerationJob(): GenerationJob | null {
+    let bestJob: GenerationJob | null = null
+    let bestPriority = Number.POSITIVE_INFINITY
+
+    for (const job of this.generationQueue) {
+      const { node } = job
+
+      if (!node.nodeEl?.isConnected || this.getNodeState(node).cached) continue
+
+      const priority = this.getGenerationPriority(node)
+
+      if (priority <= bestPriority) {
+        bestPriority = priority
+        bestJob = job
+      }
+    }
+
+    return bestJob
+  }
+
+  private startNextGenerationPreload() {
+    if (
+      this.generationPreloadDisabled ||
+      this.generationPreload ||
+      !this.activeGeneration ||
+      this.activeInteractiveNode
+    ) {
+      return
+    }
+
+    const job = this.peekNextGenerationJob()
+
+    if (!job || !this.ensureNodeContentMounted(job.node)) return
+
+    let resolveReady: (ready: boolean) => void = () => {}
+    const readyPromise = new Promise<boolean>(resolve => {
+      resolveReady = resolve
+    })
+    const preload: GenerationPreload = {
+      node: job.node,
+      startedAt: performance.now(),
+      frameEl: null,
+      readyPromise,
+      resolveReady,
+      settled: false,
+      cleanup: () => {}
+    }
+
+    this.generationPreload = preload
+    this.generationPreloadsStarted++
+    this.requestNodeFrame(job.node, 'preload')
+  }
+
+  private settleGenerationPreload(preload: GenerationPreload, ready: boolean) {
+    if (preload.settled) return
+
+    preload.settled = true
+    preload.cleanup()
+
+    if (ready) {
+      this.generationPreloadsReady++
+      this.generationPreloadReadyTotalMs += performance.now() - preload.startedAt
+    } else {
+      this.generationPreloadFailures++
+      this.generationPreloadDisabled = true
+
+      if (this.generationPreload === preload) {
+        this.generationPreload = null
+      }
+    }
+
+    preload.resolveReady(ready)
+  }
+
+  private cancelGenerationPreload(removeFrame: boolean) {
+    const preload = this.generationPreload
+
+    if (!preload) return
+
+    this.generationPreload = null
+
+    if (removeFrame && preload.frameEl && preload.node.frameEl === preload.frameEl) {
+      this.removeNodeFrame(preload.node)
+    }
+
+    this.settleGenerationPreload(preload, false)
+  }
+
   private dequeueNextGenerationJob(): GenerationJob | null {
     let bestIndex = -1
     let bestPriority = Number.POSITIVE_INFINITY
@@ -938,6 +1045,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           this.generationPreemptions++
         }
 
+        if (session.usedPreload && (outcome === 'failure' || outcome === 'timeout')) {
+          this.generationPreloadDisabled = true
+          this.cancelGenerationPreload(true)
+        }
+
         const canRetry =
           !this.getNodeState(node).cached &&
           Boolean(node.nodeEl?.isConnected) &&
@@ -970,9 +1082,46 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         }
       }
 
+      const preload =
+        this.generationPreload?.node === node ? this.generationPreload : null
+
+      if (this.generationPreload && !preload) {
+        this.cancelGenerationPreload(true)
+      }
+
+      if (preload) {
+        this.generationPreload = null
+      }
+
       this.activeGeneration = session
-      session.frameRequestedAt = performance.now()
-      this.requestNodeFrame(node, 'generation')
+
+      if (preload) {
+        session.usedPreload = true
+        this.generationPreloadHits++
+
+        void preload.readyPromise.then(ready => {
+          if (this.activeGeneration !== session) return
+
+          const frameEl = preload.frameEl
+
+          if (
+            !ready ||
+            !frameEl ||
+            node.frameEl !== frameEl ||
+            !frameEl.isConnected
+          ) {
+            session.finish('failure')
+            return
+          }
+
+          void this.captureGeneratedFrame(node, frameEl)
+        })
+      } else {
+        session.frameRequestedAt = performance.now()
+        this.requestNodeFrame(node, 'generation')
+      }
+
+      this.startNextGenerationPreload()
     })
   }
 
@@ -1042,6 +1191,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     node._previewImageEl = null
     this.removePendingPlaceholder(node)
 
+    if (this.generationPreload?.node === node) {
+      this.cancelGenerationPreload(true)
+    }
+
     if (this.activeInteractiveNode === node) {
       this.removeNodeFrame(node)
       this.clearInteractiveState(node)
@@ -1061,14 +1214,17 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const session = this.activeGeneration
     const isInteractive = this.activeInteractiveNode === node
     const isGenerating = session?.node === node
+    const isPreloading = this.generationPreload?.node === node
 
-    if (!this.isNodeContentMounted(node) && (isInteractive || isGenerating)) {
+    if (!this.isNodeContentMounted(node) && (isInteractive || isGenerating || isPreloading)) {
       this.ensureNodeContentMounted(node)
     }
 
     if (this.isNodeContentMounted(node)) {
       if (isGenerating && node.frameEl?.tagName !== 'WEBVIEW') {
         this.requestNodeFrame(node, 'generation')
+      } else if (isPreloading && node.frameEl?.tagName !== 'WEBVIEW') {
+        this.requestNodeFrame(node, 'preload')
       } else if (isInteractive && node.frameEl?.tagName !== 'WEBVIEW') {
         this.requestNodeFrame(node, 'interactive')
       }
@@ -1080,6 +1236,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (isInteractive) {
       this.removeNodeFrame(node)
       this.clearInteractiveState(node)
+    }
+
+    if (isPreloading) {
+      this.cancelGenerationPreload(true)
     }
 
     if (isGenerating) {
@@ -1096,6 +1256,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (mode === 'generation') {
       this.finishActiveGeneration(node, 'failure')
+      return
+    }
+
+    if (mode === 'preload') {
+      const preload = this.generationPreload
+
+      if (preload?.node === node) {
+        this.settleGenerationPreload(preload, false)
+      }
+
       return
     }
 
@@ -1141,6 +1311,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           continue
         }
 
+        this.cancelGenerationPreload(true)
         this.abortActiveGeneration(true)
         this.releaseBackgroundExecution()
         this.removePendingPlaceholder(requestedNode)
@@ -1193,6 +1364,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.clearInteractiveState(interactiveNode)
     }
 
+    const preload = this.generationPreload
+
+    if (preload && !preload.node.nodeEl?.isConnected) {
+      this.cancelGenerationPreload(true)
+    }
+
     const generation = this.activeGeneration
 
     if (generation && !generation.node.nodeEl?.isConnected) {
@@ -1234,10 +1411,55 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (frameEl?.tagName !== 'WEBVIEW') {
       if (mode === 'generation') {
         this.finishActiveGeneration(node, 'failure')
+      } else if (mode === 'preload') {
+        const preload = this.generationPreload
+
+        if (preload?.node === node) {
+          this.settleGenerationPreload(preload, false)
+        }
       } else if (this.activeInteractiveNode === node) {
         this.ensurePreview(node, true)
         this.clearInteractiveState(node)
       }
+
+      return
+    }
+
+    if (mode === 'preload') {
+      const preload = this.generationPreload
+
+      if (!preload || preload.node !== node) {
+        this.removeNodeFrame(node)
+        return
+      }
+
+      preload.frameEl = frameEl
+
+      const onReady = () => {
+        if (node.frameEl !== frameEl || !frameEl.isConnected) {
+          this.settleGenerationPreload(preload, false)
+          return
+        }
+
+        this.settleGenerationPreload(preload, true)
+      }
+      const onFailed = (event: Event) => {
+        if (!isFatalLoadFailure(event as DidFailLoadEvent)) return
+
+        if (node.frameEl === frameEl) {
+          this.removeNodeFrame(node)
+        }
+
+        this.settleGenerationPreload(preload, false)
+      }
+
+      preload.cleanup = () => {
+        frameEl.removeEventListener('dom-ready', onReady)
+        frameEl.removeEventListener('did-fail-load', onFailed)
+      }
+
+      frameEl.addEventListener('dom-ready', onReady, { once: true })
+      frameEl.addEventListener('did-fail-load', onFailed)
 
       return
     }
@@ -1657,6 +1879,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.generationFailed = 0
     this.generationTimedOut = 0
     this.generationPreemptions = 0
+    this.generationPreloadsStarted = 0
+    this.generationPreloadsReady = 0
+    this.generationPreloadHits = 0
+    this.generationPreloadFailures = 0
+    this.generationPreloadReadyTotalMs = 0
     this.generationTotalMs = 0
     this.queueWaitTotalMs = 0
     this.queueWaitCount = 0
@@ -1717,6 +1944,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const averageCaptureMs =
       this.generationCompleted > 0 ? Math.round(this.captureTotalMs / this.generationCompleted) : 0
+    const averagePreloadReadyMs =
+      this.generationPreloadsReady > 0
+        ? Math.round(this.generationPreloadReadyTotalMs / this.generationPreloadsReady)
+        : 0
     const averageQueueWaitMs =
       this.queueWaitCount > 0 ? Math.round(this.queueWaitTotalMs / this.queueWaitCount) : 0
     const averageFrameCreateMs =
@@ -1757,6 +1988,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Generation failures: ${this.generationFailed}`,
       `Generation timeouts: ${this.generationTimedOut}`,
       `Generation preemptions: ${this.generationPreemptions}`,
+      `Generation preload: ${this.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
+      `Preloads started/ready/hit/failed: ${this.generationPreloadsStarted}/${this.generationPreloadsReady}/${this.generationPreloadHits}/${this.generationPreloadFailures}`,
+      `Average preload ready: ${averagePreloadReadyMs} ms`,
       `Average queue wait: ${averageQueueWaitMs} ms`,
       `Average frame create: ${averageFrameCreateMs} ms`,
       `Average DOM ready: ${averageDomReadyMs} ms`,
