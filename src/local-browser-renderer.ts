@@ -129,6 +129,28 @@ function findOnPath(command: string): string | null {
   }
 }
 
+function terminateProcessTree(child: ChildProcess) {
+  if (child.exitCode !== null) return
+
+  if (platform() === 'win32' && child.pid) {
+    try {
+      execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true
+      })
+      return
+    } catch {
+      // Fall through to the normal child-process termination.
+    }
+  }
+
+  try {
+    child.kill()
+  } catch {
+    // Best effort.
+  }
+}
+
 function detectBrowserCandidates(): BrowserCandidate[] {
   const candidates: BrowserCandidate[] = []
   const seen = new Set<string>()
@@ -958,12 +980,7 @@ export default class LocalBrowserRenderer {
 
       return runtime
     } catch (error) {
-      try {
-        child.kill()
-      } catch {
-        // Best effort.
-      }
-
+      terminateProcessTree(child)
       this.cleanupProfile(profileDir)
       throw error
     }
@@ -1016,11 +1033,7 @@ export default class LocalBrowserRenderer {
         ])
 
         if (runtime.process.exitCode === null) {
-          try {
-            runtime.process.kill()
-          } catch {
-            // Best effort.
-          }
+          terminateProcessTree(runtime.process)
         }
 
         this.cleanupProfile(runtime.profileDir)
