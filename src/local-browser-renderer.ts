@@ -537,6 +537,26 @@ export default class LocalBrowserRenderer {
     return `${this.logicalCpuCount} logical CPUs / ${this.totalMemoryGiB.toFixed(1)} GiB RAM`
   }
 
+  get tuningCandidates(): number[] {
+    const floor =
+      this.maxPoolSize <= 3 ? 1 : Math.max(1, Math.floor(this.maxPoolSize * 0.5))
+    const candidates = Array.from(
+      { length: this.maxPoolSize - floor + 1 },
+      (_, index) => floor + index
+    )
+
+    return candidates.sort((left, right) => {
+      const leftDistance = Math.abs(left - this.heuristicPoolSize)
+      const rightDistance = Math.abs(right - this.heuristicPoolSize)
+
+      if (leftDistance !== rightDistance) {
+        return leftDistance - rightDistance
+      }
+
+      return right - left
+    })
+  }
+
   get concurrencySummary(): string {
     return `${this.poolSize} active / ${this.maxPoolSize} hardware cap / ${this.heuristicPoolSize} heuristic`
   }
