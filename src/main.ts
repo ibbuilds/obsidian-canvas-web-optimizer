@@ -1,5 +1,4 @@
 import { around } from 'monkey-around'
-import BackgroundExecutionController from './background-execution'
 import {
   type Canvas,
   type CanvasLeaf,
@@ -9,6 +8,7 @@ import {
   Notice,
   Plugin
 } from 'obsidian'
+import BackgroundExecutionController from './background-execution'
 
 const CACHE_METADATA_VERSION = 1
 
@@ -50,7 +50,6 @@ const WEBVIEW_PAINT_READY_SCRIPT = `
     })
   })
 `
-
 
 type ThumbnailImage = {
   getSize(): { width: number; height: number }
