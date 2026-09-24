@@ -3,24 +3,23 @@ import {
   type Canvas,
   type CanvasLeaf,
   type CanvasNodeData,
-  debounce,
+  type LinkNode,
   type LinkNodeConstructor,
   Notice,
   Plugin
 } from 'obsidian'
+import BackgroundExecutionController from './background-execution'
 
-const THUMBNAIL_JPEG_QUALITY = 100
+const CACHE_METADATA_VERSION = 1
 
-const RESIZE_DEBOUNCE_MS = 500
+const THUMBNAIL_JPEG_QUALITY = 72
+const THUMBNAIL_MAX_LONG_EDGE = 768
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
-const WEBVIEW_PAINT_SETTLE_MS = 100
-
-const CAPTURE_MAX_WAIT_MS = 4000
-const IMAGE_DECODE_TIMEOUT_MS = 2500
-const ANIMATION_TIMEOUT_MS = 3000
-const MAX_FINITE_ANIMATION_MS = 3500
-const FINAL_SETTLE_MAX_MS = 750
+const PREVIEW_LOAD_TIMEOUT_MS = 500
+const INTERACTIVE_PAINT_SETTLE_MS = 50
+const GENERATION_PAINT_TIMEOUT_MS = 100
+const GENERATION_JOB_TIMEOUT_MS = 5000
 
 const LIGHT_THEME_CSS = `
   :root {
@@ -52,99 +51,86 @@ const WEBVIEW_PAINT_READY_SCRIPT = `
   })
 `
 
-const CAPTURE_READY_SCRIPT = `
+const GENERATION_READY_SCRIPT = `
   (() => {
-    const timeout = ms =>
-      new Promise(resolve => setTimeout(resolve, ms))
-
-    const waitForImages = async () => {
-      const images = [...document.images].filter(img => {
-        const rect = img.getBoundingClientRect()
-
-        return (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          !img.complete
-        )
-      })
-
-      await Promise.allSettled(
-        images.map(img =>
-          Promise.race([
-            img.decode?.() ?? Promise.resolve(),
-            timeout(${IMAGE_DECODE_TIMEOUT_MS})
-          ])
-        )
-      )
+    for (const media of document.querySelectorAll('video, audio')) {
+      media.muted = true
+      media.pause()
     }
 
-    const waitForAnimations = async () => {
-      const animations = document
-        .getAnimations()
-        .filter(animation => {
-          const timing = animation.effect?.getComputedTiming()
+    for (const animation of document.getAnimations()) {
+      const timing = animation.effect?.getComputedTiming()
 
-          return (
-            animation.playState !== 'finished' &&
-            Number.isFinite(timing?.endTime) &&
-            timing.endTime <= ${MAX_FINITE_ANIMATION_MS}
-          )
-        })
+      if (!Number.isFinite(timing?.endTime)) continue
 
-      await Promise.allSettled(
-        animations.map(animation =>
-          Promise.race([
-            animation.finished.catch(() => {}),
-            timeout(${ANIMATION_TIMEOUT_MS})
-          ])
-        )
-      )
-    }
-
-    const ready = async () => {
-      const started = performance.now()
-
-      await Promise.allSettled([
-        document.fonts?.ready ?? Promise.resolve(),
-        waitForImages(),
-        waitForAnimations()
-      ])
-
-      const elapsed = performance.now() - started
-
-      const remaining = Math.max(
-        0,
-        Math.min(
-          ${FINAL_SETTLE_MAX_MS},
-          ${CAPTURE_MAX_WAIT_MS} - elapsed
-        )
-      )
-
-      if (remaining > 0) {
-        await timeout(remaining)
+      try {
+        animation.finish()
+      } catch {
+        // Some animations cannot be finished programmatically.
       }
-
-      await new Promise(resolve =>
-        requestAnimationFrame(() =>
-          requestAnimationFrame(resolve)
-        )
-      )
     }
 
-    return Promise.race([
-      ready(),
-      timeout(${CAPTURE_MAX_WAIT_MS})
-    ])
+    return new Promise(resolve => {
+      requestAnimationFrame(resolve)
+    })
   })()
 `
 
+type ThumbnailImage = {
+  getSize(): { width: number; height: number }
+  isEmpty(): boolean
+  resize(options: { width: number; height: number; quality: 'good' }): ThumbnailImage
+  toJPEG(quality: number): ArrayBuffer
+}
+
+type FrameMode = 'generation' | 'interactive'
+type GenerationOutcome = 'success' | 'failure' | 'timeout' | 'preempted' | 'stale' | 'unmounted'
+
+type CacheMetadata = {
+  version?: number
+  url?: string
+  title: string
+  capturedAt?: number
+}
+
+type NodeState = {
+  evaluated: boolean
+  cached: boolean
+  metadata: CacheMetadata | null
+  preparation: Promise<void> | null
+  activationHandlerAttached: boolean
+}
+
+type GenerationJob = {
+  node: LinkNode
+}
+
+type ActiveGeneration = {
+  node: LinkNode
+  url: string
+  startedAt: number
+  requeue: boolean
+  finish: (outcome: GenerationOutcome) => void
+}
+
+type DidFailLoadEvent = Event & {
+  errorCode?: number
+  isMainFrame?: boolean
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
 function afterTransition(element: HTMLElement, callback: () => void) {
   let finished = false
+  let timeoutId = 0
 
   const finish = () => {
     if (finished) return
 
     finished = true
+    window.clearTimeout(timeoutId)
     callback()
   }
 
@@ -152,7 +138,42 @@ function afterTransition(element: HTMLElement, callback: () => void) {
     once: true
   })
 
-  window.setTimeout(finish, PREVIEW_TRANSITION_FALLBACK_MS)
+  timeoutId = window.setTimeout(finish, PREVIEW_TRANSITION_FALLBACK_MS)
+}
+
+function waitForImage(image: HTMLImageElement): Promise<boolean> {
+  if (image.complete) {
+    return Promise.resolve(image.naturalWidth > 0)
+  }
+
+  return new Promise(resolve => {
+    let settled = false
+
+    const finish = (loaded: boolean) => {
+      if (settled) return
+
+      settled = true
+      window.clearTimeout(timeoutId)
+      image.removeEventListener('load', onLoad)
+      image.removeEventListener('error', onError)
+      resolve(loaded)
+    }
+
+    const onLoad = () => finish(image.naturalWidth > 0)
+    const onError = () => finish(false)
+
+    const timeoutId = window.setTimeout(() => finish(false), PREVIEW_LOAD_TIMEOUT_MS)
+
+    image.addEventListener('load', onLoad, { once: true })
+    image.addEventListener('error', onError, { once: true })
+  })
+}
+
+function isFatalLoadFailure(event: DidFailLoadEvent): boolean {
+  if (event.isMainFrame === false) return false
+
+  // ERR_ABORTED is common during normal navigation/redirects.
+  return event.errorCode !== -3
 }
 
 export default class CanvasWebOptimizerPlugin extends Plugin {
@@ -162,9 +183,32 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   cacheHits = 0
   cacheMisses = 0
-  generatingThumbnails = 0
 
-  deactivateActiveWebview: (() => void) | null = null
+  private readonly thumbnailCacheIds = new Set<string>()
+  private readonly metadataCacheIds = new Set<string>()
+  private readonly metadataMemory = new Map<string, CacheMetadata>()
+  private readonly nodeStates = new WeakMap<LinkNode, NodeState>()
+  private readonly requestedFrameModes = new WeakMap<LinkNode, FrameMode>()
+  private readonly pendingPlaceholders = new WeakMap<LinkNode, HTMLElement>()
+
+  private generationQueue: GenerationJob[] = []
+  private readonly queuedGenerationIds = new Set<string>()
+  private activeGeneration: ActiveGeneration | null = null
+  private generationQueueScheduled = false
+  private readonly backgroundExecution = new BackgroundExecutionController()
+  private backgroundExecutionRelease: (() => void) | null = null
+
+  private activeInteractiveNode: LinkNode | null = null
+  private requestedInteractiveNode: LinkNode | null = null
+  private interactiveTransitionRunning = false
+
+  private generationCompleted = 0
+  private generationFailed = 0
+  private generationTimedOut = 0
+  private generationPreemptions = 0
+  private generationTotalMs = 0
+  private captureTotalMs = 0
+  private capturedThumbnailBytes = 0
 
   async onload() {
     this.addCommand({
@@ -186,6 +230,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     )
 
     await this.app.vault.adapter.mkdir(this.cacheDir)
+    await this.buildCacheIndex()
 
     this.app.workspace.onLayoutReady(() => {
       if (this.tryPatchLinkNode()) return
@@ -199,16 +244,28 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.registerEvent(evt)
     })
 
+    this.registerEvent(
+      this.app.workspace.on('layout-change', () => {
+        this.pruneDetachedActiveResources()
+        this.scheduleThumbnailQueue()
+      })
+    )
+
     this.log('Plugin loaded')
   }
 
   onunload() {
     this.log('Unloading plugin')
 
-    this.reloadActiveCanvasViews()
+    this.generationQueue = []
+    this.queuedGenerationIds.clear()
+    this.requestedInteractiveNode = null
+    this.abortActiveGeneration(false)
+    this.removeInteractiveFrameImmediately()
+    this.releaseBackgroundExecution()
+    this.backgroundExecution.dispose()
 
-    this.deactivateActiveWebview?.()
-    this.deactivateActiveWebview = null
+    this.reloadActiveCanvasViews()
   }
 
   reloadActiveCanvasViews() {
@@ -224,6 +281,1059 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     console.log(`[${this.name}]`, msg)
+  }
+
+  private async buildCacheIndex() {
+    const listing = await this.app.vault.adapter.list(this.cacheDir)
+
+    for (const path of listing.files) {
+      const thumbnailMatch = path.match(/([^/]+)\.thumbnail\.jpg$/)
+
+      if (thumbnailMatch) {
+        this.thumbnailCacheIds.add(thumbnailMatch[1])
+        continue
+      }
+
+      const metadataMatch = path.match(/([^/]+)\.metadata\.json$/)
+
+      if (metadataMatch) {
+        this.metadataCacheIds.add(metadataMatch[1])
+      }
+    }
+  }
+
+  private getNodeState(node: LinkNode): NodeState {
+    const existing = this.nodeStates.get(node)
+
+    if (existing) return existing
+
+    const state: NodeState = {
+      evaluated: false,
+      cached: false,
+      metadata: null,
+      preparation: null,
+      activationHandlerAttached: false
+    }
+
+    this.nodeStates.set(node, state)
+
+    return state
+  }
+
+  private isNodeContentMounted(node: LinkNode): boolean {
+    if (!node.nodeEl?.isConnected) return false
+
+    if (typeof node.isContentMounted === 'boolean') {
+      return node.isContentMounted
+    }
+
+    return Boolean(node.contentEl?.isConnected)
+  }
+
+  private ensureNodeContentMounted(node: LinkNode): boolean {
+    if (!node.nodeEl?.isConnected) return false
+
+    if (this.isNodeContentMounted(node)) return true
+
+    node.mountContent()
+
+    return this.isNodeContentMounted(node)
+  }
+
+  private prepareNode(node: LinkNode): Promise<void> {
+    const state = this.getNodeState(node)
+
+    if (state.evaluated) {
+      this.applyPreparedNodeState(node, state)
+      return Promise.resolve()
+    }
+
+    const cacheFilesExist =
+      this.thumbnailCacheIds.has(node.id) && this.metadataCacheIds.has(node.id)
+
+    if (!cacheFilesExist) {
+      this.markNodeCacheMiss(node, state)
+      return Promise.resolve()
+    }
+
+    if (!this.isNodeContentMounted(node)) {
+      return Promise.resolve()
+    }
+
+    if (state.preparation) return state.preparation
+
+    state.preparation = this.evaluateNodeCache(node, state).finally(() => {
+      state.preparation = null
+    })
+
+    return state.preparation
+  }
+
+  private async evaluateNodeCache(node: LinkNode, state: NodeState) {
+    try {
+      let metadata = this.metadataMemory.get(node.id)
+
+      if (!metadata) {
+        const raw = await this.app.vault.adapter.read(`${this.cacheDir}/${node.id}.metadata.json`)
+        metadata = JSON.parse(raw) as CacheMetadata
+        this.metadataMemory.set(node.id, metadata)
+      }
+
+      if (typeof metadata?.title !== 'string') {
+        this.markNodeCacheMiss(node, state)
+        return
+      }
+
+      if (metadata.url && metadata.url !== node.url) {
+        this.markNodeCacheMiss(node, state)
+        return
+      }
+
+      state.evaluated = true
+      state.cached = true
+      state.metadata = metadata
+      this.cacheHits++
+
+      node.updateNodeLabel(metadata.title)
+      this.applyPreparedNodeState(node, state)
+    } catch (error) {
+      this.log(error, true)
+      this.markNodeCacheMiss(node, state)
+    }
+  }
+
+  private markNodeCacheMiss(node: LinkNode, state: NodeState) {
+    state.evaluated = true
+    state.cached = false
+    state.metadata = null
+
+    this.thumbnailCacheIds.delete(node.id)
+    this.metadataCacheIds.delete(node.id)
+    this.metadataMemory.delete(node.id)
+    this.cacheMisses++
+
+    this.applyPreparedNodeState(node, state)
+  }
+
+  private applyPreparedNodeState(node: LinkNode, state: NodeState) {
+    if (state.cached) {
+      this.removePendingPlaceholder(node)
+
+      if (this.isNodeContentMounted(node)) {
+        this.ensurePreview(node)
+      }
+
+      return
+    }
+
+    this.ensurePendingPlaceholder(node)
+    this.enqueueThumbnailGeneration(node)
+  }
+
+  private onNodeMounted(node: LinkNode) {
+    void this.prepareNode(node)
+  }
+
+  private attachActivationHandler(node: LinkNode) {
+    const state = this.getNodeState(node)
+
+    if (state.activationHandlerAttached) return
+
+    state.activationHandlerAttached = true
+
+    node.nodeEl.addEventListener(
+      'pointerdown',
+      event => {
+        const target = event.target as globalThis.Node | null
+
+        if (
+          event.button !== 0 ||
+          !target ||
+          !node.contentEl.contains(target) ||
+          !this.isNodeContentMounted(node)
+        ) {
+          return
+        }
+
+        event.preventDefault()
+        event.stopImmediatePropagation()
+
+        this.requestInteractiveActivation(node)
+      },
+      true
+    )
+  }
+
+  private ensurePendingPlaceholder(node: LinkNode) {
+    if (!this.isNodeContentMounted(node)) return
+
+    const current = this.pendingPlaceholders.get(node)
+
+    if (current?.isConnected) return
+
+    current?.remove()
+
+    const placeholder = node.contentEl.doc.createElement('div')
+    const hostname = node.contentEl.doc.createElement('div')
+    const status = node.contentEl.doc.createElement('div')
+
+    placeholder.classList.add('canvas-web-pending-preview')
+    hostname.classList.add('canvas-web-pending-host')
+    status.classList.add('canvas-web-pending-status')
+
+    try {
+      hostname.textContent = new URL(node.url).hostname.replace(/^www\./, '')
+    } catch {
+      hostname.textContent = node.url
+    }
+
+    status.textContent = 'Loading preview'
+
+    placeholder.append(hostname, status)
+    node.contentEl.append(placeholder)
+    this.pendingPlaceholders.set(node, placeholder)
+  }
+
+  private removePendingPlaceholder(node: LinkNode) {
+    const placeholder = this.pendingPlaceholders.get(node)
+
+    if (placeholder?.isConnected) {
+      placeholder.remove()
+    }
+
+    this.pendingPlaceholders.delete(node)
+  }
+
+  private ensurePreview(
+    node: LinkNode,
+    force = false,
+    enterHidden = false
+  ): HTMLImageElement | null {
+    this.removePendingPlaceholder(node)
+
+    const current = node._previewImageEl
+
+    if (current?.isConnected) {
+      if (force) {
+        current.classList.remove('link-thumbnail-exit')
+      }
+
+      current.classList.toggle('link-thumbnail-enter', enterHidden)
+      return current
+    }
+
+    if (!this.isNodeContentMounted(node)) return null
+
+    if (!force && this.activeInteractiveNode === node && node.frameEl?.isConnected) {
+      return null
+    }
+
+    current?.remove()
+
+    const preview = node.contentEl.doc.createElement('img')
+
+    preview.classList.add('link-thumbnail')
+
+    if (enterHidden) {
+      preview.classList.add('link-thumbnail-enter')
+    }
+
+    preview.alt = 'Webpage thumbnail'
+    preview.decoding = 'async'
+    preview.draggable = false
+    const resourcePath = this.app.vault.adapter.getResourcePath(
+      `${this.cacheDir}/${node.id}.thumbnail.jpg`
+    )
+    const cacheVersion = this.getNodeState(node).metadata?.capturedAt
+
+    if (cacheVersion) {
+      const separator = resourcePath.includes('?') ? '&' : '?'
+      preview.src = `${resourcePath}${separator}v=${cacheVersion}`
+    } else {
+      preview.src = resourcePath
+    }
+
+    preview.addEventListener(
+      'error',
+      () => {
+        this.handlePreviewError(node, preview)
+      },
+      { once: true }
+    )
+
+    node.contentEl.append(preview)
+    node._previewImageEl = preview
+
+    return preview
+  }
+
+  private async showPreviewOverFrame(node: LinkNode, animate = true): Promise<boolean> {
+    const preview = this.ensurePreview(node, true, animate)
+
+    if (!preview) return false
+
+    if (!animate && !node.nodeEl.ownerDocument.hasFocus()) {
+      preview.classList.remove('link-thumbnail-enter', 'link-thumbnail-exit')
+      return true
+    }
+
+    const loaded = await waitForImage(preview)
+
+    if (!loaded || node._previewImageEl !== preview || !preview.isConnected) {
+      return false
+    }
+
+    if (!animate) {
+      preview.classList.remove('link-thumbnail-enter', 'link-thumbnail-exit')
+      return true
+    }
+
+    await new Promise<void>(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    })
+
+    if (node._previewImageEl !== preview || !preview.isConnected) {
+      return false
+    }
+
+    preview.classList.remove('link-thumbnail-enter')
+
+    await new Promise<void>(resolve => {
+      afterTransition(preview, resolve)
+    })
+
+    return node._previewImageEl === preview && preview.isConnected
+  }
+
+  private handlePreviewError(node: LinkNode, preview: HTMLImageElement) {
+    if (node._previewImageEl === preview) {
+      preview.remove()
+      node._previewImageEl = null
+    }
+
+    const state = this.getNodeState(node)
+    state.evaluated = true
+    state.cached = false
+    state.metadata = null
+
+    this.thumbnailCacheIds.delete(node.id)
+    this.metadataCacheIds.delete(node.id)
+    this.metadataMemory.delete(node.id)
+    this.ensurePendingPlaceholder(node)
+
+    if (this.activeGeneration?.node === node) {
+      this.activeGeneration.requeue = true
+      return
+    }
+
+    if (this.isNodeContentMounted(node)) {
+      this.enqueueThumbnailGeneration(node)
+    }
+  }
+
+  private enqueueThumbnailGeneration(node: LinkNode, front = false) {
+    const state = this.getNodeState(node)
+
+    if (state.cached || !node.nodeEl?.isConnected) return
+
+    if (this.activeGeneration?.node.id === node.id || this.queuedGenerationIds.has(node.id)) {
+      return
+    }
+
+    const job: GenerationJob = { node }
+
+    if (front) {
+      this.generationQueue.unshift(job)
+    } else {
+      this.generationQueue.push(job)
+    }
+
+    this.queuedGenerationIds.add(node.id)
+    this.scheduleThumbnailQueue()
+  }
+
+  private scheduleThumbnailQueue() {
+    this.pruneDetachedActiveResources()
+
+    if (
+      this.activeGeneration ||
+      this.activeInteractiveNode ||
+      this.generationQueueScheduled ||
+      this.generationQueue.length === 0
+    ) {
+      this.releaseBackgroundExecutionIfIdle()
+      return
+    }
+
+    this.ensureBackgroundExecution(this.generationQueue[0].node)
+    this.generationQueueScheduled = true
+
+    queueMicrotask(() => {
+      this.generationQueueScheduled = false
+      void this.processThumbnailQueue()
+    })
+  }
+
+  private async processThumbnailQueue() {
+    if (this.activeGeneration || this.activeInteractiveNode) return
+
+    const job = this.dequeueNextGenerationJob()
+
+    if (!job) {
+      this.releaseBackgroundExecutionIfIdle()
+      return
+    }
+
+    if (!this.ensureNodeContentMounted(job.node)) {
+      this.generationQueue.unshift(job)
+      this.queuedGenerationIds.add(job.node.id)
+      return
+    }
+
+    await this.generateQueuedThumbnail(job)
+
+    if (!this.activeInteractiveNode) {
+      this.scheduleThumbnailQueue()
+    }
+  }
+
+  private dequeueNextGenerationJob(): GenerationJob | null {
+    let bestIndex = -1
+    let bestPriority = Number.POSITIVE_INFINITY
+
+    for (let index = this.generationQueue.length - 1; index >= 0; index--) {
+      const job = this.generationQueue[index]
+      const { node } = job
+
+      if (!node.nodeEl?.isConnected) {
+        this.generationQueue.splice(index, 1)
+        this.queuedGenerationIds.delete(node.id)
+        continue
+      }
+
+      const state = this.getNodeState(node)
+
+      if (state.cached) {
+        this.generationQueue.splice(index, 1)
+        this.queuedGenerationIds.delete(node.id)
+        continue
+      }
+
+      const priority = this.getGenerationPriority(node)
+
+      if (priority <= bestPriority) {
+        bestPriority = priority
+        bestIndex = index
+      }
+    }
+
+    if (bestIndex < 0) return null
+
+    const [job] = this.generationQueue.splice(bestIndex, 1)
+    this.queuedGenerationIds.delete(job.node.id)
+
+    return job
+  }
+
+  private getGenerationPriority(node: LinkNode): number {
+    const viewport = node.canvas?.getViewportBBox?.()
+
+    if (
+      !viewport ||
+      typeof node.x !== 'number' ||
+      typeof node.y !== 'number' ||
+      typeof node.width !== 'number' ||
+      typeof node.height !== 'number'
+    ) {
+      return 1
+    }
+
+    const nodeMinX = node.x
+    const nodeMinY = node.y
+    const nodeMaxX = node.x + node.width
+    const nodeMaxY = node.y + node.height
+
+    const intersects = (minX: number, minY: number, maxX: number, maxY: number) =>
+      nodeMaxX >= minX && nodeMinX <= maxX && nodeMaxY >= minY && nodeMinY <= maxY
+
+    const viewportWidth = Math.max(1, viewport.maxX - viewport.minX)
+    const viewportHeight = Math.max(1, viewport.maxY - viewport.minY)
+    const viewportCenterX = viewport.minX + viewportWidth / 2
+    const viewportCenterY = viewport.minY + viewportHeight / 2
+    const nodeCenterX = nodeMinX + node.width / 2
+    const nodeCenterY = nodeMinY + node.height / 2
+    const normalizedDistance = Math.min(
+      999,
+      Math.hypot(
+        (nodeCenterX - viewportCenterX) / viewportWidth,
+        (nodeCenterY - viewportCenterY) / viewportHeight
+      )
+    )
+
+    if (intersects(viewport.minX, viewport.minY, viewport.maxX, viewport.maxY)) {
+      return normalizedDistance
+    }
+
+    if (
+      intersects(
+        viewport.minX - viewportWidth,
+        viewport.minY - viewportHeight,
+        viewport.maxX + viewportWidth,
+        viewport.maxY + viewportHeight
+      )
+    ) {
+      return 1000 + normalizedDistance
+    }
+
+    return 2000 + normalizedDistance
+  }
+
+  private generateQueuedThumbnail(job: GenerationJob): Promise<void> {
+    const { node } = job
+
+    return new Promise(resolve => {
+      let completed = false
+
+      const session: ActiveGeneration = {
+        node,
+        url: node.url,
+        startedAt: performance.now(),
+        requeue: false,
+        finish: () => {}
+      }
+
+      const timeoutId = window.setTimeout(() => {
+        this.log(`Thumbnail generation timed out for ${session.url}`, true)
+
+        this.removeNodeFrame(node)
+        session.finish('timeout')
+      }, GENERATION_JOB_TIMEOUT_MS)
+
+      session.finish = outcome => {
+        if (completed) return
+
+        completed = true
+        window.clearTimeout(timeoutId)
+
+        if (this.activeGeneration === session) {
+          this.activeGeneration = null
+        }
+
+        if (outcome === 'success') {
+          this.generationCompleted++
+          this.generationTotalMs += performance.now() - session.startedAt
+        } else if (outcome === 'timeout') {
+          this.generationTimedOut++
+        } else if (outcome === 'failure') {
+          this.generationFailed++
+        } else if (outcome === 'preempted') {
+          this.generationPreemptions++
+        }
+
+        const shouldRequeue =
+          (session.requeue || outcome === 'stale') &&
+          !this.getNodeState(node).cached &&
+          Boolean(node.nodeEl?.isConnected)
+
+        resolve()
+
+        if (shouldRequeue) {
+          this.enqueueThumbnailGeneration(node, true)
+        } else {
+          this.releaseBackgroundExecutionIfIdle()
+        }
+      }
+
+      this.activeGeneration = session
+      this.requestNodeFrame(node, 'generation')
+    })
+  }
+
+  private ensureBackgroundExecution(node: LinkNode) {
+    if (this.backgroundExecutionRelease) return
+
+    this.backgroundExecutionRelease = this.backgroundExecution.acquire(
+      node.nodeEl.ownerDocument.defaultView
+    )
+  }
+
+  private releaseBackgroundExecution() {
+    this.backgroundExecutionRelease?.()
+    this.backgroundExecutionRelease = null
+  }
+
+  private releaseBackgroundExecutionIfIdle() {
+    if (this.activeGeneration || this.generationQueue.length > 0) return
+
+    this.releaseBackgroundExecution()
+  }
+
+  private finishActiveGeneration(node: LinkNode, outcome: GenerationOutcome) {
+    const session = this.activeGeneration
+
+    if (!session || session.node !== node) return
+
+    session.finish(outcome)
+  }
+
+  private abortActiveGeneration(requeue: boolean) {
+    const session = this.activeGeneration
+
+    if (!session) return
+
+    session.requeue = requeue
+    this.removeNodeFrame(session.node)
+    session.finish('preempted')
+  }
+
+  private removeQueuedGeneration(node: LinkNode) {
+    if (!this.queuedGenerationIds.delete(node.id)) return
+
+    const index = this.generationQueue.findIndex(job => job.node === node)
+
+    if (index >= 0) {
+      this.generationQueue.splice(index, 1)
+    }
+  }
+
+  private handleNodeUrlChanged(node: LinkNode) {
+    const state = this.getNodeState(node)
+
+    state.evaluated = false
+    state.cached = false
+    state.metadata = null
+    state.preparation = null
+
+    this.removeQueuedGeneration(node)
+
+    const preview = node._previewImageEl
+
+    if (preview?.isConnected) {
+      preview.remove()
+    }
+
+    node._previewImageEl = null
+    this.removePendingPlaceholder(node)
+
+    if (this.activeInteractiveNode === node) {
+      this.removeNodeFrame(node)
+      this.clearInteractiveState(node)
+    }
+
+    const session = this.activeGeneration
+
+    if (session?.node === node) {
+      this.removeNodeFrame(node)
+      session.finish('stale')
+    }
+
+    void this.prepareNode(node)
+  }
+
+  private handleBreakpointUpdate(node: LinkNode) {
+    const session = this.activeGeneration
+    const isInteractive = this.activeInteractiveNode === node
+    const isGenerating = session?.node === node
+
+    if (!this.isNodeContentMounted(node) && (isInteractive || isGenerating)) {
+      this.ensureNodeContentMounted(node)
+    }
+
+    if (this.isNodeContentMounted(node)) {
+      if (isGenerating && node.frameEl?.tagName !== 'WEBVIEW') {
+        this.requestNodeFrame(node, 'generation')
+      } else if (isInteractive && node.frameEl?.tagName !== 'WEBVIEW') {
+        this.requestNodeFrame(node, 'interactive')
+      }
+
+      this.onNodeMounted(node)
+      return
+    }
+
+    if (isInteractive) {
+      this.removeNodeFrame(node)
+      this.clearInteractiveState(node)
+    }
+
+    if (isGenerating) {
+      this.removeNodeFrame(node)
+      session.finish('unmounted')
+    }
+  }
+
+  private requestNodeFrame(node: LinkNode, mode: FrameMode) {
+    this.requestedFrameModes.set(node, mode)
+    node.recreateFrame()
+
+    if (node.frameEl?.tagName === 'WEBVIEW') return
+
+    if (mode === 'generation') {
+      this.finishActiveGeneration(node, 'failure')
+      return
+    }
+
+    if (this.activeInteractiveNode === node) {
+      this.clearInteractiveState(node)
+    }
+  }
+
+  private requestInteractiveActivation(node: LinkNode) {
+    this.requestedInteractiveNode = node
+
+    if (this.interactiveTransitionRunning) return
+
+    void this.processInteractiveActivationRequests()
+  }
+
+  private async processInteractiveActivationRequests() {
+    if (this.interactiveTransitionRunning) return
+
+    this.interactiveTransitionRunning = true
+
+    try {
+      while (this.requestedInteractiveNode) {
+        const requestedNode = this.requestedInteractiveNode
+        this.requestedInteractiveNode = null
+
+        if (
+          !this.isNodeContentMounted(requestedNode) ||
+          this.activeInteractiveNode === requestedNode
+        ) {
+          continue
+        }
+
+        if (this.activeInteractiveNode) {
+          await this.deactivateInteractive(this.activeInteractiveNode)
+        }
+
+        if (this.requestedInteractiveNode) {
+          continue
+        }
+
+        if (!this.isNodeContentMounted(requestedNode)) {
+          continue
+        }
+
+        this.abortActiveGeneration(true)
+        this.releaseBackgroundExecution()
+        this.removePendingPlaceholder(requestedNode)
+
+        this.activeInteractiveNode = requestedNode
+        this.setInteractiveClasses(requestedNode, true)
+        this.requestNodeFrame(requestedNode, 'interactive')
+      }
+    } finally {
+      this.interactiveTransitionRunning = false
+
+      if (this.requestedInteractiveNode) {
+        void this.processInteractiveActivationRequests()
+      }
+    }
+  }
+
+  private async deactivateInteractive(node: LinkNode) {
+    if (this.activeInteractiveNode !== node) return
+
+    const state = this.getNodeState(node)
+
+    if (state.cached && node.frameEl?.isConnected) {
+      await this.showPreviewOverFrame(node)
+    }
+
+    this.removeNodeFrame(node)
+    this.clearInteractiveState(node)
+
+    if (!state.cached && this.isNodeContentMounted(node)) {
+      this.ensurePendingPlaceholder(node)
+      this.enqueueThumbnailGeneration(node, true)
+    }
+  }
+
+  private removeInteractiveFrameImmediately() {
+    const node = this.activeInteractiveNode
+
+    if (!node) return
+
+    this.removeNodeFrame(node)
+    this.clearInteractiveState(node)
+  }
+
+  private pruneDetachedActiveResources() {
+    const interactiveNode = this.activeInteractiveNode
+
+    if (interactiveNode && !interactiveNode.nodeEl?.isConnected) {
+      this.removeNodeFrame(interactiveNode)
+      this.clearInteractiveState(interactiveNode)
+    }
+
+    const generation = this.activeGeneration
+
+    if (generation && !generation.node.nodeEl?.isConnected) {
+      this.removeNodeFrame(generation.node)
+      generation.finish('unmounted')
+    }
+  }
+
+  private clearInteractiveState(node: LinkNode) {
+    if (this.activeInteractiveNode !== node) return
+
+    this.setInteractiveClasses(node, false)
+    this.activeInteractiveNode = null
+    this.scheduleThumbnailQueue()
+  }
+
+  private setInteractiveClasses(node: LinkNode, active: boolean) {
+    const root = node.canvas?.wrapperEl ?? node.nodeEl.ownerDocument.body
+
+    node.nodeEl.classList.toggle('canvas-web-active', active)
+    root.classList.toggle('canvas-web-has-active', active)
+  }
+
+  private removeNodeFrame(node: LinkNode) {
+    const frameEl = node.frameEl
+
+    if (frameEl?.isConnected) {
+      frameEl.remove()
+    }
+
+    if (node.frameEl === frameEl) {
+      node.frameEl = null
+    }
+  }
+
+  private configureFrame(node: LinkNode, mode: FrameMode) {
+    const frameEl = node.frameEl
+
+    if (frameEl?.tagName !== 'WEBVIEW') {
+      if (mode === 'generation') {
+        this.finishActiveGeneration(node, 'failure')
+      } else if (this.activeInteractiveNode === node) {
+        this.ensurePreview(node, true)
+        this.clearInteractiveState(node)
+      }
+
+      return
+    }
+
+    const onFrameFailed = (event: Event) => {
+      if (!isFatalLoadFailure(event as DidFailLoadEvent)) return
+
+      this.removeNodeFrame(node)
+
+      if (mode === 'generation') {
+        this.finishActiveGeneration(node, 'failure')
+      } else if (this.activeInteractiveNode === node) {
+        this.ensurePreview(node, true)
+        this.clearInteractiveState(node)
+      }
+    }
+
+    frameEl.addEventListener('did-fail-load', onFrameFailed)
+
+    if (mode === 'generation') {
+      frameEl.setAudioMuted?.(true)
+
+      frameEl.addEventListener(
+        'dom-ready',
+        () => {
+          void this.captureGeneratedFrame(node, frameEl)
+        },
+        { once: true }
+      )
+
+      return
+    }
+
+    frameEl.addEventListener(
+      'dom-ready',
+      () => {
+        void this.revealInteractiveFrame(node, frameEl)
+      },
+      { once: true }
+    )
+  }
+
+  private async applyLightTheme(frameEl: LinkNode['frameEl']) {
+    if (!frameEl?.isConnected) return
+
+    await Promise.allSettled([
+      frameEl.insertCSS(LIGHT_THEME_CSS),
+      frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
+    ])
+  }
+
+  private async revealInteractiveFrame(node: LinkNode, frameEl: NonNullable<LinkNode['frameEl']>) {
+    await this.applyLightTheme(frameEl)
+
+    try {
+      await frameEl.executeJavaScript(WEBVIEW_PAINT_READY_SCRIPT)
+    } catch {
+      // Best effort.
+    }
+
+    await delay(INTERACTIVE_PAINT_SETTLE_MS)
+
+    if (this.activeInteractiveNode !== node || node.frameEl !== frameEl || !frameEl.isConnected) {
+      return
+    }
+
+    const preview = node._previewImageEl
+
+    if (!preview?.isConnected) return
+
+    preview.classList.add('link-thumbnail-exit')
+
+    afterTransition(preview, () => {
+      if (node._previewImageEl !== preview) return
+
+      preview.remove()
+      node._previewImageEl = null
+    })
+  }
+
+  private async captureGeneratedFrame(node: LinkNode, frameEl: NonNullable<LinkNode['frameEl']>) {
+    const session = this.activeGeneration
+
+    if (session?.node !== node || node.frameEl !== frameEl) return
+
+    await this.applyLightTheme(frameEl)
+
+    try {
+      await Promise.race([
+        frameEl.executeJavaScript(GENERATION_READY_SCRIPT),
+        delay(GENERATION_PAINT_TIMEOUT_MS)
+      ])
+    } catch {
+      // Best effort.
+    }
+
+    if (this.activeGeneration !== session) return
+
+    if (node.frameEl !== frameEl || !frameEl.isConnected) {
+      session.finish('failure')
+      return
+    }
+
+    if (node.url !== session.url) {
+      this.removeNodeFrame(node)
+      session.finish('stale')
+      return
+    }
+
+    const title = frameEl.getTitle()
+    const saved = await node._saveThumbnail()
+
+    if (!saved) {
+      if (this.activeGeneration === session) {
+        this.removeNodeFrame(node)
+        session.finish('failure')
+      }
+      return
+    }
+
+    if (this.activeGeneration !== session) return
+
+    if (node.frameEl !== frameEl || !frameEl.isConnected) {
+      session.finish('failure')
+      return
+    }
+
+    if (node.url !== session.url) {
+      this.removeNodeFrame(node)
+      session.finish('stale')
+      return
+    }
+
+    const metadata: CacheMetadata = {
+      version: CACHE_METADATA_VERSION,
+      url: session.url,
+      title,
+      capturedAt: Date.now()
+    }
+
+    try {
+      await this.app.vault.adapter.write(
+        `${this.cacheDir}/${node.id}.metadata.json`,
+        JSON.stringify(metadata)
+      )
+    } catch (error) {
+      this.log(error, true)
+      this.removeNodeFrame(node)
+      session.finish('failure')
+      return
+    }
+
+    const state = this.getNodeState(node)
+
+    state.evaluated = true
+    state.cached = true
+    state.metadata = metadata
+
+    this.thumbnailCacheIds.add(node.id)
+    this.metadataCacheIds.add(node.id)
+    this.metadataMemory.set(node.id, metadata)
+
+    node.updateNodeLabel(title)
+
+    const previewReady = await this.showPreviewOverFrame(node, false)
+
+    if (this.activeGeneration !== session) return
+
+    if (!previewReady || !this.getNodeState(node).cached) {
+      session.requeue = true
+      this.removeNodeFrame(node)
+      session.finish('failure')
+      return
+    }
+
+    this.removeNodeFrame(node)
+    this.log(`Cached link ${node.url}`)
+    session.finish('success')
+  }
+
+  private optimizeThumbnail(image: ThumbnailImage): ThumbnailImage {
+    const size = image.getSize()
+    const longEdge = Math.max(size.width, size.height)
+
+    if (longEdge <= THUMBNAIL_MAX_LONG_EDGE) return image
+
+    const scale = THUMBNAIL_MAX_LONG_EDGE / longEdge
+
+    return image.resize({
+      width: Math.max(1, Math.round(size.width * scale)),
+      height: Math.max(1, Math.round(size.height * scale)),
+      quality: 'good'
+    })
+  }
+
+  private async saveThumbnail(node: LinkNode): Promise<boolean> {
+    const frameEl = node.frameEl
+
+    if (!frameEl?.isConnected) return false
+
+    const startedAt = performance.now()
+
+    try {
+      const image = await frameEl.capturePage()
+      frameEl.stop?.()
+
+      if (node.frameEl !== frameEl || !frameEl.isConnected || image.isEmpty()) {
+        return false
+      }
+
+      const optimized = this.optimizeThumbnail(image)
+      const jpeg = optimized.toJPEG(THUMBNAIL_JPEG_QUALITY)
+
+      await this.app.vault.adapter.writeBinary(`${this.cacheDir}/${node.id}.thumbnail.jpg`, jpeg)
+
+      this.captureTotalMs += performance.now() - startedAt
+      this.capturedThumbnailBytes += jpeg.byteLength
+
+      return true
+    } catch (error) {
+      this.log(error, true)
+      return false
+    }
   }
 
   tryPatchLinkNode(): boolean {
@@ -246,30 +1356,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const uninstaller = around(linkNodeConstructor.prototype, {
       _saveThumbnail: () =>
         async function () {
-          const frameEl = this.frameEl
-
-          if (!frameEl?.isConnected) return
-
-          thisPlugin.generatingThumbnails++
-
-          try {
-            thisPlugin.log(`Saving thumbnail for ${this.url}`)
-
-            const img = await frameEl.capturePage()
-
-            if (this.frameEl !== frameEl || !frameEl.isConnected || img.isEmpty()) {
-              return
-            }
-
-            await this.app.vault.adapter.writeBinary(
-              this._getThumbnailPath(),
-              img.toJPEG(THUMBNAIL_JPEG_QUALITY)
-            )
-          } catch (error) {
-            thisPlugin.log(error, true)
-          } finally {
-            thisPlugin.generatingThumbnails--
-          }
+          return thisPlugin.saveThumbnail(this)
         },
 
       _getThumbnailPath: () =>
@@ -282,177 +1369,52 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           return `${thisPlugin.cacheDir}/${this.id}.metadata.json`
         },
 
-      updateBreakpoint: () =>
-        function () {
-          this.mountContent()
+      mountContent: (next: (...args: unknown[]) => unknown) =>
+        function (...args: unknown[]) {
+          const result = next.call(this, ...args)
+
+          if (!this._initializing) {
+            thisPlugin.onNodeMounted(this)
+          }
+
+          return result
+        },
+
+      updateBreakpoint: (next: (...args: unknown[]) => unknown) =>
+        function (...args: unknown[]) {
+          const result = next.call(this, ...args)
+
+          thisPlugin.handleBreakpointUpdate(this)
+
+          return result
+        },
+
+      setData: (next: (...args: unknown[]) => unknown) =>
+        function (...args: unknown[]) {
+          const previousUrl = this.url
+          const result = next.call(this, ...args)
+
+          if (previousUrl && previousUrl !== this.url) {
+            thisPlugin.handleNodeUrlChanged(this)
+          }
+
+          return result
         },
 
       initialize: (next: (...args: unknown[]) => unknown) =>
         function (...args: unknown[]) {
           this._initializing = true
 
-          const result = next.call(this, ...args)
+          let result: unknown
 
-          this._initializing = false
+          try {
+            result = next.call(this, ...args)
+          } finally {
+            this._initializing = false
+          }
 
-          const saveThumbnail = debounce(() => this._saveThumbnail(), RESIZE_DEBOUNCE_MS)
-
-          const resizeObserver = new MutationObserver(mutationList => {
-            for (const mutation of mutationList) {
-              if (mutation.type !== 'attributes' || mutation.attributeName !== 'style') {
-                continue
-              }
-
-              const target = mutation.target as HTMLElement
-
-              const newWidth = target.style.width
-              const newHeight = target.style.height
-
-              const oldValue = mutation.oldValue || ''
-
-              const oldWidthMatch = oldValue.match(/width:\s*([^;]+)(;|$)/)
-
-              const oldHeightMatch = oldValue.match(/height:\s*([^;]+)(;|$)/)
-
-              const oldWidth = oldWidthMatch ? oldWidthMatch[1].trim() : ''
-
-              const oldHeight = oldHeightMatch ? oldHeightMatch[1].trim() : ''
-
-              if (!oldWidth || !oldHeight || !newWidth || !newHeight) {
-                return
-              }
-
-              if (newWidth === oldWidth && newHeight === oldHeight) {
-                return
-              }
-
-              saveThumbnail()
-            }
-          })
-
-          resizeObserver.observe(this.nodeEl, {
-            attributes: true,
-            attributeOldValue: true,
-            attributeFilter: ['style']
-          })
-
-          ;(async () => {
-            const revealWebview = () => {
-              thisPlugin.deactivateActiveWebview?.()
-
-              this._previewImageEl?.classList.remove('link-thumbnail-enter', 'link-thumbnail-exit')
-
-              this.recreateFrame()
-
-              thisPlugin.deactivateActiveWebview = () => {
-                const frameEl = this.frameEl
-
-                if (!frameEl) return
-
-                const preview = this.contentEl.doc.createElement('img')
-
-                preview.classList.add('link-thumbnail', 'link-thumbnail-enter')
-
-                preview.alt = 'Webpage thumbnail'
-
-                preview.src = thisPlugin.app.vault.adapter.getResourcePath(this._getThumbnailPath())
-
-                this.contentEl.append(preview)
-
-                this._previewImageEl = preview
-
-                const finish = () => {
-                  if (this._previewImageEl !== preview || !preview.isConnected) {
-                    return
-                  }
-
-                  requestAnimationFrame(() => {
-                    requestAnimationFrame(() => {
-                      if (this._previewImageEl !== preview) {
-                        return
-                      }
-
-                      preview.classList.remove('link-thumbnail-enter')
-
-                      afterTransition(preview, () => {
-                        if (this.frameEl === frameEl) {
-                          frameEl.remove()
-                          this.frameEl = null
-                        }
-                      })
-                    })
-                  })
-                }
-
-                if (preview.complete) {
-                  finish()
-                  return
-                }
-
-                preview.addEventListener('load', finish, { once: true })
-
-                preview.addEventListener(
-                  'error',
-                  () => {
-                    preview.remove()
-
-                    if (this._previewImageEl === preview) {
-                      this._previewImageEl = null
-                    }
-                  },
-                  { once: true }
-                )
-              }
-            }
-
-            const activateFromThumbnail = (event: PointerEvent) => {
-              if (event.button !== 0 || !this._previewImageEl) {
-                return
-              }
-
-              event.preventDefault()
-              event.stopImmediatePropagation()
-
-              revealWebview()
-            }
-
-            this.nodeEl.addEventListener('pointerdown', activateFromThumbnail, true)
-
-            const [thumbnailExists, metadataExists] = await Promise.all([
-              thisPlugin.app.vault.exists(this._getThumbnailPath()),
-              thisPlugin.app.vault.exists(this._getMetadataPath())
-            ])
-
-            if (!thumbnailExists || !metadataExists) {
-              thisPlugin.cacheMisses++
-
-              this.recreateFrame()
-
-              return
-            }
-
-            thisPlugin.cacheHits++
-
-            const metadataRaw = await thisPlugin.app.vault.adapter.read(this._getMetadataPath())
-
-            const metadata = JSON.parse(metadataRaw)
-
-            this.updateNodeLabel(metadata.title)
-
-            this._previewImageEl = this.contentEl.doc.createElement('img')
-
-            this.contentEl.append(this._previewImageEl)
-
-            this._previewImageEl.classList.add('link-thumbnail')
-
-            this._previewImageEl.alt = 'Webpage thumbnail'
-
-            this._previewImageEl.src = thisPlugin.app.vault.adapter.getResourcePath(
-              this._getThumbnailPath()
-            )
-
-            this._previewImageEl.addEventListener('error', revealWebview)
-          })()
+          thisPlugin.attachActivationHandler(this)
+          void thisPlugin.prepareNode(this)
 
           return result
         },
@@ -461,86 +1423,18 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         function (...args: unknown[]) {
           if (this._initializing) return null
 
+          const mode = thisPlugin.requestedFrameModes.get(this)
+
+          if (!mode) {
+            thisPlugin.onNodeMounted(this)
+            return null
+          }
+
+          thisPlugin.requestedFrameModes.delete(this)
+
           const result = next.call(this, ...args)
 
-          if (this.frameEl?.tagName !== 'WEBVIEW') {
-            return result
-          }
-
-          const frameEl = this.frameEl
-
-          const applyLightTheme = async () => {
-            if (!frameEl.isConnected) return
-
-            try {
-              await frameEl.insertCSS(LIGHT_THEME_CSS)
-
-              await frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
-            } catch {
-              // Best effort.
-            }
-          }
-
-          frameEl.addEventListener('dom-ready', applyLightTheme)
-
-          const onFrameLoaded = async () => {
-            frameEl.removeEventListener('did-finish-load', onFrameLoaded)
-
-            if (this.frameEl !== frameEl || !frameEl.isConnected) {
-              return
-            }
-
-            try {
-              await frameEl.executeJavaScript(WEBVIEW_PAINT_READY_SCRIPT)
-
-              await frameEl.capturePage()
-            } catch {
-              // Best effort.
-            }
-
-            await sleep(WEBVIEW_PAINT_SETTLE_MS)
-
-            if (this.frameEl !== frameEl || !frameEl.isConnected) {
-              return
-            }
-
-            const preview = this._previewImageEl
-
-            if (preview?.isConnected) {
-              preview.classList.add('link-thumbnail-exit')
-
-              afterTransition(preview, () => {
-                if (this._previewImageEl === preview) {
-                  preview.remove()
-
-                  this._previewImageEl = null
-                }
-              })
-            }
-
-            try {
-              await frameEl.executeJavaScript(CAPTURE_READY_SCRIPT)
-            } catch {
-              // Best effort.
-            }
-
-            if (this.frameEl !== frameEl || !frameEl.isConnected) {
-              return
-            }
-
-            await this.app.vault.adapter.write(
-              this._getMetadataPath(),
-              JSON.stringify({
-                title: frameEl.getTitle()
-              })
-            )
-
-            await this._saveThumbnail()
-
-            thisPlugin.log(`Cached link ${this.url}`)
-          }
-
-          frameEl.addEventListener('did-finish-load', onFrameLoaded)
+          thisPlugin.configureFrame(this, mode)
 
           return result
         }
@@ -549,7 +1443,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.register(uninstaller)
 
     thisPlugin.log('Canvas patched successfully')
-
     thisPlugin.app.workspace.trigger(`${thisPlugin.manifest.id}:patched-canvas`)
 
     return true
@@ -580,7 +1473,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const dummyLinkNode = canvasInstance.createLinkNode.call(dummyCanvasInstance, dummyNodeParams)
 
-    return dummyLinkNode.constructor
+    return dummyLinkNode.constructor as unknown as LinkNodeConstructor
   }
 
   showDiagnostics() {
@@ -588,23 +1481,51 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     let cachedPreviews = 0
     let liveWebviews = 0
+    const mountedWebCards = new Set<Element>()
 
     for (const leaf of canvasLeaves) {
-      cachedPreviews += leaf.view.containerEl.querySelectorAll('.link-thumbnail').length
+      const previews = leaf.view.containerEl.querySelectorAll('.link-thumbnail')
+      const webviews = leaf.view.containerEl.querySelectorAll('webview')
 
-      liveWebviews += leaf.view.containerEl.querySelectorAll('webview').length
+      cachedPreviews += previews.length
+      liveWebviews += webviews.length
+
+      previews.forEach(element => {
+        const node = element.closest('.canvas-node')
+        if (node) mountedWebCards.add(node)
+      })
+
+      webviews.forEach(element => {
+        const node = element.closest('.canvas-node')
+        if (node) mountedWebCards.add(node)
+      })
     }
 
-    const webCards = cachedPreviews + liveWebviews
+    const averageGenerationMs =
+      this.generationCompleted > 0
+        ? Math.round(this.generationTotalMs / this.generationCompleted)
+        : 0
+
+    const averageCaptureMs =
+      this.generationCompleted > 0 ? Math.round(this.captureTotalMs / this.generationCompleted) : 0
 
     const diagnostics = [
-      `Web cards: ${webCards}`,
+      `Mounted web cards: ${mountedWebCards.size}`,
       `Cached previews: ${cachedPreviews}`,
       `Live webviews: ${liveWebviews}`,
-      `Generating thumbnails: ${this.generatingThumbnails}`,
-      'Queued: 0',
+      `Generating thumbnails: ${this.activeGeneration ? 1 : 0}`,
+      `Queued: ${this.generationQueue.length}`,
+      `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
+      `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
       `Cache hits: ${this.cacheHits}`,
-      `Cache misses: ${this.cacheMisses}`
+      `Cache misses: ${this.cacheMisses}`,
+      `Generated: ${this.generationCompleted}`,
+      `Generation failures: ${this.generationFailed}`,
+      `Generation timeouts: ${this.generationTimedOut}`,
+      `Generation preemptions: ${this.generationPreemptions}`,
+      `Average generation: ${averageGenerationMs} ms`,
+      `Average capture: ${averageCaptureMs} ms`,
+      `Thumbnail bytes written: ${this.capturedThumbnailBytes}`
     ].join('\n')
 
     this.log(diagnostics)
@@ -615,23 +1536,21 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   async cleanupThumbnails() {
     const thumbnails = await this.app.vault.adapter.list(this.cacheDir)
 
-    const thumbnailFiles = thumbnails.files.filter(file => file.endsWith('.thumbnail.jpg'))
+    const cachedNodeIds = new Set<string>()
 
-    const nodeIds = thumbnailFiles
-      .map(file => {
-        const match = file.match(/([^/]+)\.thumbnail\.jpg$/)
+    for (const file of thumbnails.files) {
+      const match = file.match(/([^/]+)\.(?:thumbnail\.jpg|metadata\.json)$/)
 
-        return match ? match[1] : undefined
-      })
-      .filter((nodeId): nodeId is string => nodeId !== undefined)
+      if (match) {
+        cachedNodeIds.add(match[1])
+      }
+    }
 
     const canvasFiles = this.app.vault.getFiles().filter(file => file.path.endsWith('.canvas'))
-
     const usedNodeIds = new Set<string>()
 
     for (const canvasFile of canvasFiles) {
       const content = await this.app.vault.read(canvasFile)
-
       const nodes = this.extractNodeIdsFromCanvas(content)
 
       nodes.forEach(nodeId => {
@@ -639,13 +1558,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       })
     }
 
-    const unusedNodeIds = nodeIds.filter(nodeId => !usedNodeIds.has(nodeId))
+    const unusedNodeIds = [...cachedNodeIds].filter(nodeId => !usedNodeIds.has(nodeId))
 
     for (const nodeId of unusedNodeIds) {
       this.log(`Removing cache for missing node ${nodeId}`)
 
       const thumbnailFile = `${this.cacheDir}/${nodeId}.thumbnail.jpg`
-
       const metadataFile = `${this.cacheDir}/${nodeId}.metadata.json`
 
       const removeFile = async (path: string) => {
@@ -656,6 +1574,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       await removeFile(thumbnailFile)
       await removeFile(metadataFile)
+
+      this.thumbnailCacheIds.delete(nodeId)
+      this.metadataCacheIds.delete(nodeId)
+      this.metadataMemory.delete(nodeId)
     }
 
     new Notice(`${unusedNodeIds.length} Unused thumbnails cleaned up!`)
