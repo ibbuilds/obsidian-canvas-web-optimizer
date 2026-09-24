@@ -28,6 +28,7 @@
   .canvas-node:not(.canvas-web-active):hover
   .canvas-node-label {
   opacity: 0;
+  pointer-events: none;
 }
 
 .link-thumbnail {
