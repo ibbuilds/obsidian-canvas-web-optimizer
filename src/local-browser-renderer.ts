@@ -538,8 +538,7 @@ export default class LocalBrowserRenderer {
   }
 
   get tuningCandidates(): number[] {
-    const floor =
-      this.maxPoolSize <= 3 ? 1 : Math.max(1, Math.floor(this.maxPoolSize * 0.5))
+    const floor = this.maxPoolSize <= 3 ? 1 : Math.max(1, Math.floor(this.maxPoolSize * 0.5))
     const candidates = Array.from(
       { length: this.maxPoolSize - floor + 1 },
       (_, index) => floor + index
