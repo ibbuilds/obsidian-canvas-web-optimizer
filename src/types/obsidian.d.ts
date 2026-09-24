@@ -26,6 +26,7 @@ declare module 'obsidian' {
 
   interface Canvas {
     wrapperEl: HTMLElement
+    selection?: Set<unknown>
     initialize(...args: unknown[]): unknown
     recreateFrame(...args: unknown[]): unknown
     createLinkNode(...args: unknown[]): LinkNode
