@@ -492,10 +492,12 @@ export default class LocalBrowserRenderer {
     )
   )
 
-  readonly poolSize = Math.max(
+  readonly heuristicPoolSize = Math.max(
     1,
     Math.min(this.maxPoolSize, Math.ceil(this.logicalCpuCount * 0.625))
   )
+
+  private targetPoolSize = this.heuristicPoolSize
 
   get available(): boolean {
     return !this.disposed && this.disabledReason === null && this.candidates.length > 0
@@ -527,12 +529,24 @@ export default class LocalBrowserRenderer {
     return this.activeTasks
   }
 
+  get poolSize(): number {
+    return this.targetPoolSize
+  }
+
+  get tuningKey(): string {
+    return `${platform()}|${this.logicalCpuCount}cpu|${Math.round(this.totalMemoryGiB)}gib`
+  }
+
   get hardwareSummary(): string {
     return `${this.logicalCpuCount} logical CPUs / ${this.totalMemoryGiB.toFixed(1)} GiB RAM`
   }
 
   get concurrencySummary(): string {
-    return `${this.poolSize} active / ${this.maxPoolSize} hardware cap`
+    return `${this.poolSize} active / ${this.maxPoolSize} hardware cap / ${this.heuristicPoolSize} heuristic`
+  }
+
+  setPoolSize(value: number) {
+    this.targetPoolSize = Math.max(1, Math.min(this.maxPoolSize, Math.round(value)))
   }
 
   get launchCount(): number {
