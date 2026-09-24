@@ -310,14 +310,28 @@ function openExternalUrl(url: string): Promise<void> {
       }
     }
 
-    if (!electron.shell?.openExternal) {
-      return Promise.reject(new Error('Electron shell is unavailable'))
+    if (electron.shell?.openExternal) {
+      return electron.shell.openExternal(url)
+    }
+  } catch {
+    // Fall through to @electron/remote.
+  }
+
+  try {
+    const remote = runtimeRequire('@electron/remote') as {
+      shell?: {
+        openExternal(target: string): Promise<void>
+      }
     }
 
-    return electron.shell.openExternal(url)
-  } catch (error) {
-    return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    if (remote.shell?.openExternal) {
+      return remote.shell.openExternal(url)
+    }
+  } catch {
+    // Report one stable error below.
   }
+
+  return Promise.reject(new Error('Electron shell is unavailable'))
 }
 
 function afterTransition(element: HTMLElement, callback: () => void) {
