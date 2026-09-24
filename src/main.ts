@@ -1661,6 +1661,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const session = this.activeGeneration
     const isInteractive = this.activeInteractiveNode === node
     const isGenerating = session?.node === node
+    const isOffscreenGenerating = isGenerating && this.offscreenActiveTask !== null
     const isPreloading = this.generationPreload?.node === node
     const isOffscreenPreloading = this.offscreenPreload?.node === node
 
@@ -1669,7 +1670,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     if (this.isNodeContentMounted(node)) {
-      if (isGenerating && node.frameEl?.tagName !== 'WEBVIEW') {
+      if (isGenerating && !isOffscreenGenerating && node.frameEl?.tagName !== 'WEBVIEW') {
         this.requestNodeFrame(node, 'generation')
       } else if (isPreloading && node.frameEl?.tagName !== 'WEBVIEW') {
         this.requestNodeFrame(node, 'preload')
@@ -2497,6 +2498,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const generationEngine = offscreenAvailable
       ? `offscreen paint (${this.offscreenRenderer?.poolSize ?? 0} workers)`
       : 'native webview'
+    const offscreenStatus = offscreenAvailable
+      ? 'ready'
+      : `unavailable (${this.offscreenRenderer?.unavailableReason ?? 'not initialized'})`
 
     const diagnostics = [
       `Mounted web cards: ${mountedWebCards.size}`,
@@ -2505,6 +2509,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Generating thumbnails: ${this.activeGeneration ? 1 : 0}`,
       `Queued: ${this.generationQueue.length}`,
       `Generation engine: ${generationEngine}`,
+      `Offscreen renderer: ${offscreenStatus}`,
       `Offscreen renderers active: ${this.offscreenRenderer?.activeCount ?? 0}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
