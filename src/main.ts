@@ -1381,7 +1381,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const job = this.peekNextGenerationJob()
 
-    if (!job || !job.node.nodeEl?.isConnected) return
+    if (!job?.node.nodeEl?.isConnected) return
 
     const size = this.getOffscreenRenderSize(job.node)
     const preload: OffscreenGenerationPreload = {
