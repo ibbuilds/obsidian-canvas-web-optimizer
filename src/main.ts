@@ -1989,6 +1989,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const isPreloading = this.generationPreload?.node === node
     const shouldRestoreCachedPreview =
       this.hasIndexedCache(node) && this.isNodeNearVisibleViewport(node)
+    const interactiveStillSelected =
+      node.canvas?.selection === undefined || node.canvas.selection.has(node)
+
+    if (isInteractive && !interactiveStillSelected) {
+      void this.deactivateInteractive(node)
+      return
+    }
 
     if (
       !this.isNodeContentMounted(node) &&
