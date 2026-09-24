@@ -785,7 +785,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       },
       true
     )
-
   }
 
   private ensurePendingPlaceholder(node: LinkNode) {
