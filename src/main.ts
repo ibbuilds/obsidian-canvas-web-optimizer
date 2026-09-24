@@ -876,25 +876,30 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private handleBreakpointUpdate(node: LinkNode) {
     const session = this.activeGeneration
+    const isInteractive = this.activeInteractiveNode === node
+    const isGenerating = session?.node === node
 
-    if (
-      !this.isNodeContentMounted(node) &&
-      (this.activeInteractiveNode === node || session?.node === node)
-    ) {
+    if (!this.isNodeContentMounted(node) && (isInteractive || isGenerating)) {
       this.ensureNodeContentMounted(node)
     }
 
     if (this.isNodeContentMounted(node)) {
+      if (isGenerating && node.frameEl?.tagName !== 'WEBVIEW') {
+        this.requestNodeFrame(node, 'generation')
+      } else if (isInteractive && node.frameEl?.tagName !== 'WEBVIEW') {
+        this.requestNodeFrame(node, 'interactive')
+      }
+
       this.onNodeMounted(node)
       return
     }
 
-    if (this.activeInteractiveNode === node) {
+    if (isInteractive) {
       this.removeNodeFrame(node)
       this.clearInteractiveState(node)
     }
 
-    if (session?.node === node) {
+    if (isGenerating) {
       this.removeNodeFrame(node)
       session.finish('unmounted')
     }
