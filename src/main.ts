@@ -12,8 +12,8 @@ import {
 
 const CACHE_METADATA_VERSION = 1
 
-const THUMBNAIL_JPEG_QUALITY = 82
-const THUMBNAIL_MAX_LONG_EDGE = 1024
+const THUMBNAIL_JPEG_QUALITY = 76
+const THUMBNAIL_MAX_LONG_EDGE = 896
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
 const PREVIEW_LOAD_TIMEOUT_MS = 1000
@@ -165,6 +165,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly metadataMemory = new Map<string, CacheMetadata>()
   private readonly nodeStates = new WeakMap<LinkNode, NodeState>()
   private readonly requestedFrameModes = new WeakMap<LinkNode, FrameMode>()
+  private readonly pendingPlaceholders = new WeakMap<LinkNode, HTMLElement>()
 
   private generationQueue: GenerationJob[] = []
   private readonly queuedGenerationIds = new Set<string>()
@@ -392,6 +393,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private applyPreparedNodeState(node: LinkNode, state: NodeState) {
     if (state.cached) {
+      this.removePendingPlaceholder(node)
+
       if (this.isNodeContentMounted(node)) {
         this.ensurePreview(node)
       }
@@ -399,6 +402,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    this.ensurePendingPlaceholder(node)
     this.enqueueThumbnailGeneration(node)
   }
 
@@ -436,11 +440,53 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     )
   }
 
+  private ensurePendingPlaceholder(node: LinkNode) {
+    if (!this.isNodeContentMounted(node)) return
+
+    const current = this.pendingPlaceholders.get(node)
+
+    if (current?.isConnected) return
+
+    current?.remove()
+
+    const placeholder = node.contentEl.doc.createElement('div')
+    const hostname = node.contentEl.doc.createElement('div')
+    const status = node.contentEl.doc.createElement('div')
+
+    placeholder.classList.add('canvas-web-pending-preview')
+    hostname.classList.add('canvas-web-pending-host')
+    status.classList.add('canvas-web-pending-status')
+
+    try {
+      hostname.textContent = new URL(node.url).hostname.replace(/^www\./, '')
+    } catch {
+      hostname.textContent = node.url
+    }
+
+    status.textContent = 'Loading preview'
+
+    placeholder.append(hostname, status)
+    node.contentEl.append(placeholder)
+    this.pendingPlaceholders.set(node, placeholder)
+  }
+
+  private removePendingPlaceholder(node: LinkNode) {
+    const placeholder = this.pendingPlaceholders.get(node)
+
+    if (placeholder?.isConnected) {
+      placeholder.remove()
+    }
+
+    this.pendingPlaceholders.delete(node)
+  }
+
   private ensurePreview(
     node: LinkNode,
     force = false,
     enterHidden = false
   ): HTMLImageElement | null {
+    this.removePendingPlaceholder(node)
+
     const current = node._previewImageEl
 
     if (current?.isConnected) {
@@ -549,6 +595,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.thumbnailCacheIds.delete(node.id)
     this.metadataCacheIds.delete(node.id)
     this.metadataMemory.delete(node.id)
+    this.ensurePendingPlaceholder(node)
 
     if (this.activeGeneration?.node === node) {
       this.activeGeneration.requeue = true
@@ -831,6 +878,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     node._previewImageEl = null
+    this.removePendingPlaceholder(node)
 
     if (this.activeInteractiveNode === node) {
       this.removeNodeFrame(node)
@@ -933,6 +981,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
         this.abortActiveGeneration(true)
         this.releaseBackgroundExecution()
+        this.removePendingPlaceholder(requestedNode)
 
         this.activeInteractiveNode = requestedNode
         this.setInteractiveClasses(requestedNode, true)
@@ -960,6 +1009,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.clearInteractiveState(node)
 
     if (!state.cached && this.isNodeContentMounted(node)) {
+      this.ensurePendingPlaceholder(node)
       this.enqueueThumbnailGeneration(node, true)
     }
   }
