@@ -546,16 +546,17 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return false
     }
 
-    const viewport = viewportRect && viewportRect.width > 0 && viewportRect.height > 0
-      ? viewportRect
-      : {
-          left: 0,
-          top: 0,
-          right: node.nodeEl.ownerDocument.defaultView?.innerWidth ?? 0,
-          bottom: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0,
-          width: node.nodeEl.ownerDocument.defaultView?.innerWidth ?? 0,
-          height: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0
-        }
+    const viewport =
+      viewportRect && viewportRect.width > 0 && viewportRect.height > 0
+        ? viewportRect
+        : {
+            left: 0,
+            top: 0,
+            right: node.nodeEl.ownerDocument.defaultView?.innerWidth ?? 0,
+            bottom: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0,
+            width: node.nodeEl.ownerDocument.defaultView?.innerWidth ?? 0,
+            height: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0
+          }
 
     const marginX = viewport.width
     const marginY = viewport.height
