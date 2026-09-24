@@ -20,6 +20,7 @@ const PREVIEW_LOAD_TIMEOUT_MS = 1000
 const INTERACTIVE_PAINT_SETTLE_MS = 50
 const GENERATION_PAINT_TIMEOUT_MS = 120
 const GENERATION_JOB_TIMEOUT_MS = 5000
+const MAX_GENERATION_CONCURRENCY = 2
 
 const LIGHT_THEME_CSS = `
   :root {
@@ -168,7 +169,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private generationQueue: GenerationJob[] = []
   private readonly queuedGenerationIds = new Set<string>()
-  private activeGeneration: ActiveGeneration | null = null
+  private readonly activeGenerations = new Map<string, ActiveGeneration>()
   private generationQueueScheduled = false
   private readonly backgroundExecution = new BackgroundExecutionController()
   private backgroundExecutionRelease: (() => void) | null = null
@@ -235,7 +236,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.generationQueue = []
     this.queuedGenerationIds.clear()
     this.requestedInteractiveNode = null
-    this.abortActiveGeneration(false)
+    this.abortActiveGenerations(false)
     this.removeInteractiveFrameImmediately()
     this.releaseBackgroundExecution()
     this.backgroundExecution.dispose()
@@ -596,8 +597,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.metadataMemory.delete(node.id)
     this.ensurePendingPlaceholder(node)
 
-    if (this.activeGeneration?.node === node) {
-      this.activeGeneration.requeue = true
+    const activeGeneration = this.activeGenerations.get(node.id)
+
+    if (activeGeneration) {
+      activeGeneration.requeue = true
       return
     }
 
@@ -611,7 +614,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (state.cached || !node.nodeEl?.isConnected) return
 
-    if (this.activeGeneration?.node.id === node.id || this.queuedGenerationIds.has(node.id)) {
+    if (this.activeGenerations.has(node.id) || this.queuedGenerationIds.has(node.id)) {
       return
     }
 
@@ -631,10 +634,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.pruneDetachedActiveResources()
 
     if (
-      this.activeGeneration ||
       this.activeInteractiveNode ||
       this.generationQueueScheduled ||
-      this.generationQueue.length === 0
+      this.generationQueue.length === 0 ||
+      this.activeGenerations.size >= MAX_GENERATION_CONCURRENCY
     ) {
       this.releaseBackgroundExecutionIfIdle()
       return
@@ -645,31 +648,31 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     queueMicrotask(() => {
       this.generationQueueScheduled = false
-      void this.processThumbnailQueue()
+      this.processThumbnailQueue()
     })
   }
 
-  private async processThumbnailQueue() {
-    if (this.activeGeneration || this.activeInteractiveNode) return
+  private processThumbnailQueue() {
+    if (this.activeInteractiveNode) return
 
-    const job = this.dequeueNextGenerationJob()
+    while (
+      this.activeGenerations.size < MAX_GENERATION_CONCURRENCY &&
+      this.generationQueue.length > 0
+    ) {
+      const job = this.dequeueNextGenerationJob()
 
-    if (!job) {
-      this.releaseBackgroundExecutionIfIdle()
-      return
+      if (!job) break
+
+      if (!this.ensureNodeContentMounted(job.node)) {
+        this.generationQueue.push(job)
+        this.queuedGenerationIds.add(job.node.id)
+        break
+      }
+
+      void this.generateQueuedThumbnail(job)
     }
 
-    if (!this.ensureNodeContentMounted(job.node)) {
-      this.generationQueue.unshift(job)
-      this.queuedGenerationIds.add(job.node.id)
-      return
-    }
-
-    await this.generateQueuedThumbnail(job)
-
-    if (!this.activeInteractiveNode) {
-      this.scheduleThumbnailQueue()
-    }
+    this.releaseBackgroundExecutionIfIdle()
   }
 
   private dequeueNextGenerationJob(): GenerationJob | null {
@@ -779,8 +782,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         completed = true
         window.clearTimeout(timeoutId)
 
-        if (this.activeGeneration === session) {
-          this.activeGeneration = null
+        if (this.activeGenerations.get(node.id) === session) {
+          this.activeGenerations.delete(node.id)
         }
 
         if (outcome === 'success') {
@@ -803,12 +806,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
         if (shouldRequeue) {
           this.enqueueThumbnailGeneration(node, true)
+        }
+
+        if (!this.activeInteractiveNode) {
+          this.scheduleThumbnailQueue()
         } else {
           this.releaseBackgroundExecutionIfIdle()
         }
       }
 
-      this.activeGeneration = session
+      this.activeGenerations.set(node.id, session)
       this.requestNodeFrame(node, 'generation')
     })
   }
@@ -827,27 +834,27 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private releaseBackgroundExecutionIfIdle() {
-    if (this.activeGeneration || this.generationQueue.length > 0) return
+    if (this.activeGenerations.size > 0 || this.generationQueue.length > 0) return
 
     this.releaseBackgroundExecution()
   }
 
   private finishActiveGeneration(node: LinkNode, outcome: GenerationOutcome) {
-    const session = this.activeGeneration
+    const session = this.activeGenerations.get(node.id)
 
     if (!session || session.node !== node) return
 
     session.finish(outcome)
   }
 
-  private abortActiveGeneration(requeue: boolean) {
-    const session = this.activeGeneration
+  private abortActiveGenerations(requeue: boolean) {
+    const sessions = [...this.activeGenerations.values()]
 
-    if (!session) return
-
-    session.requeue = requeue
-    this.removeNodeFrame(session.node)
-    session.finish('preempted')
+    for (const session of sessions) {
+      session.requeue = requeue
+      this.removeNodeFrame(session.node)
+      session.finish('preempted')
+    }
   }
 
   private removeQueuedGeneration(node: LinkNode) {
@@ -884,7 +891,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.clearInteractiveState(node)
     }
 
-    const session = this.activeGeneration
+    const session = this.activeGenerations.get(node.id)
 
     if (session?.node === node) {
       this.removeNodeFrame(node)
@@ -895,7 +902,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handleBreakpointUpdate(node: LinkNode) {
-    const session = this.activeGeneration
+    const session = this.activeGenerations.get(node.id)
     const isInteractive = this.activeInteractiveNode === node
     const isGenerating = session?.node === node
 
@@ -978,7 +985,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           continue
         }
 
-        this.abortActiveGeneration(true)
+        this.abortActiveGenerations(true)
         this.releaseBackgroundExecution()
         this.removePendingPlaceholder(requestedNode)
 
@@ -1030,9 +1037,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.clearInteractiveState(interactiveNode)
     }
 
-    const generation = this.activeGeneration
+    for (const generation of [...this.activeGenerations.values()]) {
+      if (generation.node.nodeEl?.isConnected) continue
 
-    if (generation && !generation.node.nodeEl?.isConnected) {
       this.removeNodeFrame(generation.node)
       generation.finish('unmounted')
     }
@@ -1154,7 +1161,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private async captureGeneratedFrame(node: LinkNode, frameEl: NonNullable<LinkNode['frameEl']>) {
-    const session = this.activeGeneration
+    const session = this.activeGenerations.get(node.id)
 
     if (session?.node !== node || node.frameEl !== frameEl) return
 
@@ -1169,7 +1176,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       // Best effort.
     }
 
-    if (this.activeGeneration !== session) return
+    if (this.activeGenerations.get(node.id) !== session) return
 
     if (node.frameEl !== frameEl || !frameEl.isConnected) {
       session.finish('failure')
@@ -1186,14 +1193,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const saved = await node._saveThumbnail()
 
     if (!saved) {
-      if (this.activeGeneration === session) {
+      if (this.activeGenerations.get(node.id) === session) {
         this.removeNodeFrame(node)
         session.finish('failure')
       }
       return
     }
 
-    if (this.activeGeneration !== session) return
+    if (this.activeGenerations.get(node.id) !== session) return
 
     if (node.frameEl !== frameEl || !frameEl.isConnected) {
       session.finish('failure')
@@ -1239,7 +1246,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const previewReady = await this.showPreviewOverFrame(node, false)
 
-    if (this.activeGeneration !== session) return
+    if (this.activeGenerations.get(node.id) !== session) return
 
     if (!previewReady || !this.getNodeState(node).cached) {
       session.requeue = true
@@ -1474,7 +1481,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Mounted web cards: ${mountedWebCards.size}`,
       `Cached previews: ${cachedPreviews}`,
       `Live webviews: ${liveWebviews}`,
-      `Generating thumbnails: ${this.activeGeneration ? 1 : 0}`,
+      `Generating thumbnails: ${this.activeGenerations.size}/${MAX_GENERATION_CONCURRENCY}`,
       `Queued: ${this.generationQueue.length}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
