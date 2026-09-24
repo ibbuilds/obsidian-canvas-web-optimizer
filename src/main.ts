@@ -25,15 +25,9 @@ const GENERATION_JOB_TIMEOUT_MS = 5000
 const GENERATION_MAX_ATTEMPTS = 3
 const GENERATION_RETRY_DELAY_MS = 150
 
-const LIGHT_THEME_CSS = `
-  :root {
-    color-scheme: light !important;
-  }
-`
-
 const LIGHT_THEME_SCRIPT = `
   (() => {
-    document.documentElement.style.colorScheme = 'light'
+    document.documentElement.style.setProperty('color-scheme', 'light', 'important')
 
     let meta = document.querySelector('meta[name="color-scheme"]')
 
@@ -1252,10 +1246,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private async applyLightTheme(frameEl: LinkNode['frameEl']) {
     if (!frameEl?.isConnected) return
 
-    await Promise.allSettled([
-      frameEl.insertCSS(LIGHT_THEME_CSS),
-      frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)
-    ])
+    await Promise.allSettled([frameEl.executeJavaScript(LIGHT_THEME_SCRIPT)])
   }
 
   private async revealInteractiveFrame(node: LinkNode, frameEl: NonNullable<LinkNode['frameEl']>) {
