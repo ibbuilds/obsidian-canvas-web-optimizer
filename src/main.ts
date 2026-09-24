@@ -107,6 +107,7 @@ type GenerationPreload = {
   startedAt: number
   frameEl: NonNullable<LinkNode['frameEl']> | null
   prepared: boolean
+  readyAt?: number
   readyPromise: Promise<boolean>
   resolveReady: (ready: boolean) => void
   settled: boolean
@@ -214,7 +215,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private generationPreloadHits = 0
   private generationPreloadFailures = 0
   private generationPreloadReadyTotalMs = 0
+  private preloadPromotionWaitTotalMs = 0
+  private preloadPromotionWaitCount = 0
+  private preloadImmediateHits = 0
+  private preloadPendingHits = 0
+  private generationColdTotalMs = 0
+  private generationColdCount = 0
+  private generationPreloadedTotalMs = 0
+  private generationPreloadedCount = 0
   private generationTotalMs = 0
+  private batchStartedAt: number | null = null
+  private batchCompleted = 0
+  private lastBatchDurationMs = 0
+  private lastBatchCompleted = 0
   private queueWaitTotalMs = 0
   private queueWaitCount = 0
   private frameCreateTotalMs = 0
@@ -742,6 +755,15 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    if (
+      this.batchStartedAt === null &&
+      !this.activeGeneration &&
+      this.generationQueue.length === 0
+    ) {
+      this.batchStartedAt = performance.now()
+      this.batchCompleted = 0
+    }
+
     const job: GenerationJob = {
       node,
       attempt,
@@ -901,8 +923,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     preload.cleanup()
 
     if (ready) {
+      preload.readyAt = performance.now()
       this.generationPreloadsReady++
-      this.generationPreloadReadyTotalMs += performance.now() - preload.startedAt
+      this.generationPreloadReadyTotalMs += preload.readyAt - preload.startedAt
     } else {
       if (runtimeFailure) {
         this.generationPreloadFailures++
@@ -1045,8 +1068,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         }
 
         if (outcome === 'success') {
+          const generationDuration = performance.now() - session.startedAt
+
           this.generationCompleted++
-          this.generationTotalMs += performance.now() - session.startedAt
+          this.batchCompleted++
+          this.generationTotalMs += generationDuration
+
+          if (session.usedPreload) {
+            this.generationPreloadedTotalMs += generationDuration
+            this.generationPreloadedCount++
+          } else {
+            this.generationColdTotalMs += generationDuration
+            this.generationColdCount++
+          }
         } else if (outcome === 'timeout') {
           this.generationTimedOut++
         } else if (outcome === 'failure') {
@@ -1108,7 +1142,17 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         session.usedPreload = true
         this.generationPreloadHits++
 
+        const promotionWaitStartedAt = performance.now()
+
+        if (preload.readyAt !== undefined) {
+          this.preloadImmediateHits++
+        } else {
+          this.preloadPendingHits++
+        }
+
         void preload.readyPromise.then(ready => {
+          this.preloadPromotionWaitTotalMs += performance.now() - promotionWaitStartedAt
+          this.preloadPromotionWaitCount++
           if (this.activeGeneration !== session) return
 
           const frameEl = preload.frameEl
@@ -1145,6 +1189,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private releaseBackgroundExecutionIfIdle() {
     if (this.activeGeneration || this.generationQueue.length > 0) return
+
+    if (this.batchStartedAt !== null) {
+      this.lastBatchDurationMs = performance.now() - this.batchStartedAt
+      this.lastBatchCompleted = this.batchCompleted
+      this.batchStartedAt = null
+      this.batchCompleted = 0
+    }
 
     this.releaseBackgroundExecution()
   }
@@ -1918,7 +1969,20 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.generationPreloadHits = 0
     this.generationPreloadFailures = 0
     this.generationPreloadReadyTotalMs = 0
+    this.preloadPromotionWaitTotalMs = 0
+    this.preloadPromotionWaitCount = 0
+    this.preloadImmediateHits = 0
+    this.preloadPendingHits = 0
+    this.generationColdTotalMs = 0
+    this.generationColdCount = 0
+    this.generationPreloadedTotalMs = 0
+    this.generationPreloadedCount = 0
     this.generationTotalMs = 0
+    this.batchStartedAt =
+      this.activeGeneration || this.generationQueue.length > 0 ? performance.now() : null
+    this.batchCompleted = 0
+    this.lastBatchDurationMs = 0
+    this.lastBatchCompleted = 0
     this.queueWaitTotalMs = 0
     this.queueWaitCount = 0
     this.frameCreateTotalMs = 0
@@ -1982,6 +2046,21 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.generationPreloadsReady > 0
         ? Math.round(this.generationPreloadReadyTotalMs / this.generationPreloadsReady)
         : 0
+    const averagePromotionWaitMs =
+      this.preloadPromotionWaitCount > 0
+        ? Math.round(this.preloadPromotionWaitTotalMs / this.preloadPromotionWaitCount)
+        : 0
+    const averageColdGenerationMs =
+      this.generationColdCount > 0
+        ? Math.round(this.generationColdTotalMs / this.generationColdCount)
+        : 0
+    const averagePreloadedGenerationMs =
+      this.generationPreloadedCount > 0
+        ? Math.round(this.generationPreloadedTotalMs / this.generationPreloadedCount)
+        : 0
+    const lastBatchSeconds = this.lastBatchDurationMs / 1000
+    const lastBatchThroughput =
+      lastBatchSeconds > 0 ? this.lastBatchCompleted / lastBatchSeconds : 0
     const averageQueueWaitMs =
       this.queueWaitCount > 0 ? Math.round(this.queueWaitTotalMs / this.queueWaitCount) : 0
     const averageFrameCreateMs =
@@ -2024,7 +2103,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Generation preemptions: ${this.generationPreemptions}`,
       `Generation preload: ${this.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
       `Preloads started/ready/hit/failed: ${this.generationPreloadsStarted}/${this.generationPreloadsReady}/${this.generationPreloadHits}/${this.generationPreloadFailures}`,
+      `Preload immediate/pending hits: ${this.preloadImmediateHits}/${this.preloadPendingHits}`,
       `Average preload ready: ${averagePreloadReadyMs} ms`,
+      `Average preload promotion wait: ${averagePromotionWaitMs} ms`,
+      `Average cold generation: ${averageColdGenerationMs} ms`,
+      `Average preloaded generation: ${averagePreloadedGenerationMs} ms`,
+      `Last batch: ${this.lastBatchCompleted} cards / ${Math.round(this.lastBatchDurationMs)} ms`,
+      `Last batch throughput: ${lastBatchThroughput.toFixed(2)} cards/s`,
       `Average queue wait: ${averageQueueWaitMs} ms`,
       `Average frame create: ${averageFrameCreateMs} ms`,
       `Average DOM ready: ${averageDomReadyMs} ms`,
