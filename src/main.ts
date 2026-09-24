@@ -11,6 +11,9 @@ import {
 import BackgroundExecutionController from './background-execution'
 
 const CACHE_METADATA_VERSION = 1
+const URL_CACHE_INDEX_VERSION = 1
+const URL_CACHE_INDEX_FILENAME = 'url-index.json'
+const URL_CACHE_INDEX_WRITE_DELAY_MS = 250
 
 const THUMBNAIL_JPEG_QUALITY = 76
 const THUMBNAIL_MAX_LONG_EDGE = 896
@@ -67,6 +70,11 @@ type CacheMetadata = {
   url?: string
   title: string
   capturedAt?: number
+}
+
+type UrlCacheIndex = {
+  version: number
+  entries: Record<string, string>
 }
 
 type NodeState = {
@@ -152,6 +160,14 @@ function isFatalLoadFailure(event: DidFailLoadEvent): boolean {
   return event.errorCode !== -3
 }
 
+function normalizeCacheUrl(url: string): string {
+  try {
+    return new URL(url).href
+  } catch {
+    return url
+  }
+}
+
 export default class CanvasWebOptimizerPlugin extends Plugin {
   name = 'Canvas Web Optimizer'
 
@@ -163,6 +179,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly thumbnailCacheIds = new Set<string>()
   private readonly metadataCacheIds = new Set<string>()
   private readonly metadataMemory = new Map<string, CacheMetadata>()
+  private readonly urlCacheSources = new Map<string, string>()
+  private urlCacheIndexWriteTimer = 0
+  private urlCacheIndexDirty = false
   private readonly nodeStates = new WeakMap<LinkNode, NodeState>()
   private readonly requestedFrameModes = new WeakMap<LinkNode, FrameMode>()
   private readonly pendingPlaceholders = new WeakMap<LinkNode, HTMLElement>()
@@ -241,6 +260,15 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.releaseBackgroundExecution()
     this.backgroundExecution.dispose()
 
+    if (this.urlCacheIndexWriteTimer !== 0) {
+      window.clearTimeout(this.urlCacheIndexWriteTimer)
+      this.urlCacheIndexWriteTimer = 0
+    }
+
+    if (this.urlCacheIndexDirty) {
+      void this.persistUrlCacheIndex()
+    }
+
     this.reloadActiveCanvasViews()
   }
 
@@ -261,6 +289,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private async buildCacheIndex() {
     const listing = await this.app.vault.adapter.list(this.cacheDir)
+    const urlIndexPath = `${this.cacheDir}/${URL_CACHE_INDEX_FILENAME}`
 
     for (const path of listing.files) {
       const thumbnailMatch = path.match(/([^/]+)\.thumbnail\.jpg$/)
@@ -275,6 +304,58 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       if (metadataMatch) {
         this.metadataCacheIds.add(metadataMatch[1])
       }
+    }
+
+    if (!listing.files.includes(urlIndexPath)) return
+
+    try {
+      const raw = await this.app.vault.adapter.read(urlIndexPath)
+      const index = JSON.parse(raw) as UrlCacheIndex
+
+      if (index.version !== URL_CACHE_INDEX_VERSION || !index.entries) return
+
+      for (const [url, nodeId] of Object.entries(index.entries)) {
+        if (
+          this.thumbnailCacheIds.has(nodeId) &&
+          this.metadataCacheIds.has(nodeId)
+        ) {
+          this.urlCacheSources.set(url, nodeId)
+        }
+      }
+    } catch (error) {
+      this.log(error, true)
+    }
+  }
+
+  private scheduleUrlCacheIndexWrite() {
+    this.urlCacheIndexDirty = true
+
+    if (this.urlCacheIndexWriteTimer !== 0) return
+
+    this.urlCacheIndexWriteTimer = window.setTimeout(() => {
+      this.urlCacheIndexWriteTimer = 0
+      void this.persistUrlCacheIndex()
+    }, URL_CACHE_INDEX_WRITE_DELAY_MS)
+  }
+
+  private async persistUrlCacheIndex() {
+    if (!this.urlCacheIndexDirty) return
+
+    this.urlCacheIndexDirty = false
+
+    const index: UrlCacheIndex = {
+      version: URL_CACHE_INDEX_VERSION,
+      entries: Object.fromEntries(this.urlCacheSources)
+    }
+
+    try {
+      await this.app.vault.adapter.write(
+        `${this.cacheDir}/${URL_CACHE_INDEX_FILENAME}`,
+        JSON.stringify(index)
+      )
+    } catch (error) {
+      this.urlCacheIndexDirty = true
+      this.log(error, true)
     }
   }
 
@@ -328,8 +409,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.thumbnailCacheIds.has(node.id) && this.metadataCacheIds.has(node.id)
 
     if (!cacheFilesExist) {
-      this.markNodeCacheMiss(node, state)
-      return Promise.resolve()
+      if (state.preparation) return state.preparation
+
+      state.preparation = this.tryReuseUrlCache(node, state).finally(() => {
+        state.preparation = null
+      })
+
+      return state.preparation
     }
 
     if (!this.isNodeContentMounted(node)) {
@@ -343,6 +429,79 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     })
 
     return state.preparation
+  }
+
+  private async tryReuseUrlCache(node: LinkNode, state: NodeState) {
+    const normalizedUrl = normalizeCacheUrl(node.url)
+    const sourceNodeId = this.urlCacheSources.get(normalizedUrl)
+
+    if (
+      !sourceNodeId ||
+      sourceNodeId === node.id ||
+      !this.thumbnailCacheIds.has(sourceNodeId) ||
+      !this.metadataCacheIds.has(sourceNodeId)
+    ) {
+      this.markNodeCacheMiss(node, state)
+      return
+    }
+
+    try {
+      const metadataPath = `${this.cacheDir}/${sourceNodeId}.metadata.json`
+      const thumbnailPath = `${this.cacheDir}/${sourceNodeId}.thumbnail.jpg`
+      const [rawMetadata, thumbnail] = await Promise.all([
+        this.app.vault.adapter.read(metadataPath),
+        this.app.vault.adapter.readBinary(thumbnailPath)
+      ])
+      const sourceMetadata = JSON.parse(rawMetadata) as CacheMetadata
+
+      if (
+        typeof sourceMetadata.title !== 'string' ||
+        (sourceMetadata.url &&
+          normalizeCacheUrl(sourceMetadata.url) !== normalizedUrl)
+      ) {
+        this.urlCacheSources.delete(normalizedUrl)
+        this.scheduleUrlCacheIndexWrite()
+        this.markNodeCacheMiss(node, state)
+        return
+      }
+
+      const metadata: CacheMetadata = {
+        version: CACHE_METADATA_VERSION,
+        url: node.url,
+        title: sourceMetadata.title,
+        capturedAt: sourceMetadata.capturedAt ?? Date.now()
+      }
+
+      await Promise.all([
+        this.app.vault.adapter.writeBinary(
+          `${this.cacheDir}/${node.id}.thumbnail.jpg`,
+          thumbnail
+        ),
+        this.app.vault.adapter.write(
+          `${this.cacheDir}/${node.id}.metadata.json`,
+          JSON.stringify(metadata)
+        )
+      ])
+
+      state.evaluated = true
+      state.cached = true
+      state.metadata = metadata
+
+      this.thumbnailCacheIds.add(node.id)
+      this.metadataCacheIds.add(node.id)
+      this.metadataMemory.set(node.id, metadata)
+      this.urlCacheSources.set(normalizedUrl, node.id)
+      this.scheduleUrlCacheIndexWrite()
+      this.cacheHits++
+
+      node.updateNodeLabel(metadata.title)
+      this.applyPreparedNodeState(node, state)
+    } catch (error) {
+      this.log(error, true)
+      this.urlCacheSources.delete(normalizedUrl)
+      this.scheduleUrlCacheIndexWrite()
+      this.markNodeCacheMiss(node, state)
+    }
   }
 
   private async evaluateNodeCache(node: LinkNode, state: NodeState) {
@@ -1241,6 +1400,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.thumbnailCacheIds.add(node.id)
     this.metadataCacheIds.add(node.id)
     this.metadataMemory.set(node.id, metadata)
+    this.urlCacheSources.set(normalizeCacheUrl(session.url), node.id)
+    this.scheduleUrlCacheIndexWrite()
 
     node.updateNodeLabel(title)
 
@@ -1546,6 +1707,18 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.thumbnailCacheIds.delete(nodeId)
       this.metadataCacheIds.delete(nodeId)
       this.metadataMemory.delete(nodeId)
+    }
+
+    if (unusedNodeIds.length > 0) {
+      const unused = new Set(unusedNodeIds)
+
+      for (const [url, sourceNodeId] of this.urlCacheSources) {
+        if (unused.has(sourceNodeId)) {
+          this.urlCacheSources.delete(url)
+        }
+      }
+
+      this.scheduleUrlCacheIndexWrite()
     }
 
     new Notice(`${unusedNodeIds.length} Unused thumbnails cleaned up!`)
