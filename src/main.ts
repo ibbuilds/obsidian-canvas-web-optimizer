@@ -982,6 +982,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.thumbnailCacheIds.delete(node.id)
     this.metadataCacheIds.delete(node.id)
     this.metadataMemory.delete(node.id)
+
+    await Promise.allSettled([
+      this.app.vault.adapter.remove(`${this.cacheDir}/${node.id}.thumbnail.jpg`),
+      this.app.vault.adapter.remove(`${this.cacheDir}/${node.id}.metadata.json`)
+    ])
+
     this.ensurePendingPlaceholder(node)
 
     if (this.activeGeneration?.node === node) {
