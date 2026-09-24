@@ -61,10 +61,24 @@ const WEBVIEW_PAINT_READY_SCRIPT = `
   })
 `
 
-const GENERATION_PAINT_READY_SCRIPT = `
-  new Promise(resolve => {
-    requestAnimationFrame(resolve)
-  })
+const GENERATION_READY_SCRIPT = `
+  (() => {
+    document.documentElement.style.colorScheme = 'light'
+
+    let meta = document.querySelector('meta[name="color-scheme"]')
+
+    if (!meta) {
+      meta = document.createElement('meta')
+      meta.setAttribute('name', 'color-scheme')
+      document.head?.appendChild(meta)
+    }
+
+    meta.setAttribute('content', 'light')
+
+    return new Promise(resolve => {
+      requestAnimationFrame(resolve)
+    })
+  })()
 `
 
 type ThumbnailImage = {
@@ -1452,16 +1466,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (session?.node !== node || node.frameEl !== frameEl) return
 
-    await this.applyLightTheme(frameEl)
-
-    try {
-      await Promise.race([
-        frameEl.executeJavaScript(GENERATION_PAINT_READY_SCRIPT),
+    await Promise.allSettled([
+      frameEl.insertCSS(LIGHT_THEME_CSS),
+      Promise.race([
+        frameEl.executeJavaScript(GENERATION_READY_SCRIPT),
         delay(GENERATION_PAINT_TIMEOUT_MS)
       ])
-    } catch {
-      // Best effort.
-    }
+    ])
 
     if (this.activeGenerations.get(node.id) !== session) return
 
