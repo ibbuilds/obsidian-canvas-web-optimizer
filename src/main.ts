@@ -9,6 +9,7 @@ import {
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
+import CaptureWorkerPool from './capture-worker-pool'
 
 const CACHE_METADATA_VERSION = 1
 const URL_CACHE_INDEX_VERSION = 1
@@ -150,6 +151,11 @@ type DidFailLoadEvent = Event & {
   isMainFrame?: boolean
 }
 
+type FrameListeners = {
+  failed: EventListener
+  ready: EventListener
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => window.setTimeout(resolve, ms))
 }
@@ -233,6 +239,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly nodeStates = new WeakMap<LinkNode, NodeState>()
   private readonly requestedFrameModes = new WeakMap<LinkNode, FrameMode>()
   private readonly pendingPlaceholders = new WeakMap<LinkNode, HTMLElement>()
+  private readonly captureWorkerPool = new CaptureWorkerPool()
+  private readonly reusedCaptureFrames = new WeakSet<HTMLElement>()
+  private readonly frameListeners = new WeakMap<HTMLElement, FrameListeners>()
+  private captureWorkersCreated = 0
+  private captureWorkersReused = 0
 
   private generationQueue: GenerationJob[] = []
   private readonly queuedGenerationIds = new Set<string>()
@@ -315,6 +326,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.removeInteractiveFrameImmediately()
     this.releaseBackgroundExecution()
     this.backgroundExecution.dispose()
+    this.captureWorkerPool.dispose()
 
     if (this.urlCacheIndexWriteTimer !== 0) {
       window.clearTimeout(this.urlCacheIndexWriteTimer)
@@ -1365,11 +1377,68 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     root.classList.toggle('canvas-web-has-active', active)
   }
 
+  private clearFrameListeners(frameEl: NonNullable<LinkNode['frameEl']>) {
+    const listeners = this.frameListeners.get(frameEl)
+
+    if (!listeners) return
+
+    frameEl.removeEventListener('did-fail-load', listeners.failed)
+    frameEl.removeEventListener('dom-ready', listeners.ready)
+    this.frameListeners.delete(frameEl)
+  }
+
+  private checkoutCaptureWorker(node: LinkNode): NonNullable<LinkNode['frameEl']> | null {
+    const frameEl = this.captureWorkerPool.checkout(node.contentEl.doc) as
+      | NonNullable<LinkNode['frameEl']>
+      | null
+
+    if (!frameEl) return null
+
+    node.contentEl.append(frameEl)
+    node.frameEl = frameEl
+    this.reusedCaptureFrames.add(frameEl)
+    this.captureWorkersReused++
+
+    return frameEl
+  }
+
+  private releaseGenerationFrame(node: LinkNode) {
+    const frameEl = node.frameEl
+
+    if (!frameEl) return
+
+    this.clearFrameListeners(frameEl)
+
+    if (this.captureWorkerPool.isManaged(frameEl)) {
+      const parked = this.captureWorkerPool.park(frameEl)
+
+      if (node.frameEl === frameEl) {
+        node.frameEl = null
+      }
+
+      if (parked) return
+    }
+
+    if (frameEl.isConnected) {
+      frameEl.remove()
+    }
+
+    if (node.frameEl === frameEl) {
+      node.frameEl = null
+    }
+  }
+
   private removeNodeFrame(node: LinkNode) {
     const frameEl = node.frameEl
 
-    if (frameEl?.isConnected) {
-      frameEl.remove()
+    if (frameEl) {
+      this.clearFrameListeners(frameEl)
+
+      if (this.captureWorkerPool.isManaged(frameEl)) {
+        this.captureWorkerPool.destroy(frameEl)
+      } else if (frameEl.isConnected) {
+        frameEl.remove()
+      }
     }
 
     if (node.frameEl === frameEl) {
@@ -1734,6 +1803,15 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           }
 
           thisPlugin.requestedFrameModes.delete(this)
+
+          if (mode === 'generation') {
+            const reusedFrame = thisPlugin.checkoutCaptureWorker(this)
+
+            if (reusedFrame) {
+              thisPlugin.configureFrame(this, mode)
+              return reusedFrame
+            }
+          }
 
           const result = next.call(this, ...args)
 
