@@ -527,6 +527,67 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     return this.isNodeContentMounted(node)
   }
 
+  private hasIndexedCache(node: LinkNode): boolean {
+    return this.thumbnailCacheIds.has(node.id) && this.metadataCacheIds.has(node.id)
+  }
+
+  private isNodeNearVisibleViewport(node: LinkNode): boolean {
+    if (!node.nodeEl?.isConnected) return false
+
+    const rect = node.nodeEl.getBoundingClientRect()
+    const viewportRect = node.canvas?.wrapperEl?.getBoundingClientRect()
+
+    if (
+      rect.width <= 0 ||
+      rect.height <= 0 ||
+      !Number.isFinite(rect.left) ||
+      !Number.isFinite(rect.top)
+    ) {
+      return false
+    }
+
+    const viewport =
+      viewportRect && viewportRect.width > 0 && viewportRect.height > 0
+        ? viewportRect
+        : {
+            left: 0,
+            top: 0,
+            right: node.nodeEl.ownerDocument.defaultView?.innerWidth ?? 0,
+            bottom: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0,
+            width: node.nodeEl.ownerDocument.defaultView?.innerWidth ?? 0,
+            height: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0
+          }
+
+    return (
+      rect.right >= viewport.left &&
+      rect.left <= viewport.right &&
+      rect.bottom >= viewport.top &&
+      rect.top <= viewport.bottom
+    )
+  }
+
+  private rehydrateCachedNode(node: LinkNode, attempt = 0) {
+    if (!this.hasIndexedCache(node) || attempt > 6) return
+
+    if (!node.nodeEl?.isConnected) {
+      window.setTimeout(() => this.rehydrateCachedNode(node, attempt + 1), 50)
+      return
+    }
+
+    if (!this.isNodeNearVisibleViewport(node)) return
+
+    if (!this.isNodeContentMounted(node)) {
+      node.mountContent()
+
+      if (!this.isNodeContentMounted(node)) {
+        window.setTimeout(() => this.rehydrateCachedNode(node, attempt + 1), 50)
+        return
+      }
+    }
+
+    void this.prepareNode(node)
+  }
+
   private prepareNode(node: LinkNode): Promise<void> {
     const state = this.getNodeState(node)
 
@@ -535,8 +596,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return Promise.resolve()
     }
 
-    const cacheFilesExist =
-      this.thumbnailCacheIds.has(node.id) && this.metadataCacheIds.has(node.id)
+    const cacheFilesExist = this.hasIndexedCache(node)
 
     if (!cacheFilesExist) {
       this.markNodeCacheMiss(node, state)
@@ -2456,6 +2516,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
           thisPlugin.attachActivationHandler(this)
           void thisPlugin.prepareNode(this)
+
+          queueMicrotask(() => {
+            thisPlugin.rehydrateCachedNode(this)
+          })
 
           return result
         },
