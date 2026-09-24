@@ -9,6 +9,7 @@ import {
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
+import NetworkPreconnector from './network-preconnector'
 
 const CACHE_METADATA_VERSION = 2
 const CACHE_SCHEMA_VERSION = 2
@@ -24,6 +25,7 @@ const GENERATION_PAINT_TIMEOUT_MS = 120
 const GENERATION_JOB_TIMEOUT_MS = 5000
 const GENERATION_MAX_ATTEMPTS = 3
 const GENERATION_RETRY_DELAY_MS = 150
+const PRECONNECT_LOOKAHEAD_ORIGINS = 6
 
 const GENERATION_LIGHT_THEME_CSS = `
   :root {
@@ -181,6 +183,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private generationQueueScheduled = false
   private readonly backgroundExecution = new BackgroundExecutionController()
   private backgroundExecutionRelease: (() => void) | null = null
+  private networkPreconnector: NetworkPreconnector | null = null
 
   private activeInteractiveNode: LinkNode | null = null
   private requestedInteractiveNode: LinkNode | null = null
@@ -242,6 +245,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     await this.app.vault.adapter.mkdir(this.cacheDir)
     await this.ensureCacheSchema()
     await this.buildCacheIndex()
+    this.networkPreconnector = new NetworkPreconnector(this.getWebviewPartition())
 
     this.app.workspace.onLayoutReady(() => {
       if (this.tryPatchLinkNode()) return
@@ -275,6 +279,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.removeInteractiveFrameImmediately()
     this.releaseBackgroundExecution()
     this.backgroundExecution.dispose()
+    this.networkPreconnector = null
 
     this.reloadActiveCanvasViews()
   }
@@ -283,6 +288,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.app.workspace.getLeavesOfType('canvas').forEach(leaf => {
       leaf.rebuildView()
     })
+  }
+
+  private getWebviewPartition(): string | null {
+    const app = this.app as typeof this.app & {
+      appId?: string
+      getWebviewPartition?: () => string
+    }
+    const partition = app.getWebviewPartition?.()
+
+    if (partition) return partition
+    if (app.appId) return `persist:vault-${app.appId}`
+
+    return null
   }
 
   log(msg: unknown, debug = false) {
@@ -743,6 +761,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private async processThumbnailQueue() {
     if (this.activeGeneration || this.activeInteractiveNode) return
 
+    this.preconnectQueuedWork()
+
     const job = this.dequeueNextGenerationJob()
 
     if (!job) {
@@ -761,6 +781,20 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (!this.activeInteractiveNode) {
       this.scheduleThumbnailQueue()
     }
+  }
+
+  private preconnectQueuedWork() {
+    if (!this.networkPreconnector || this.generationQueue.length === 0) return
+
+    const urls = this.generationQueue
+      .slice()
+      .sort(
+        (left, right) =>
+          this.getGenerationPriority(left.node) - this.getGenerationPriority(right.node)
+      )
+      .map(job => job.node.url)
+
+    this.networkPreconnector.preconnect(urls, PRECONNECT_LOOKAHEAD_ORIGINS)
   }
 
   private dequeueNextGenerationJob(): GenerationJob | null {
@@ -1629,6 +1663,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.previewReadyTotalMs = 0
     this.previewReadyCount = 0
     this.capturedThumbnailBytes = 0
+    this.networkPreconnector?.resetMetrics()
 
     new Notice('Canvas Web Optimizer diagnostics reset')
   }
@@ -1697,6 +1732,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Queued: ${this.generationQueue.length}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
+      `Network preconnect: ${this.networkPreconnector?.active ? 'on' : 'off'} (${this.networkPreconnector?.count ?? 0})`,
       `Cache hits: ${this.cacheHits}`,
       `Cache misses: ${this.cacheMisses}`,
       `Generated: ${this.generationCompleted}`,
