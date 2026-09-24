@@ -87,7 +87,6 @@ type ElectronRemoteLike = {
   }
 }
 
-
 type FrameMode = 'generation' | 'preload' | 'interactive'
 type GenerationOutcome = 'success' | 'failure' | 'timeout' | 'preempted' | 'stale' | 'unmounted'
 
@@ -206,7 +205,6 @@ function resolveGuestWebContents(
     return null
   }
 }
-
 
 function afterTransition(element: HTMLElement, callback: () => void) {
   let finished = false
