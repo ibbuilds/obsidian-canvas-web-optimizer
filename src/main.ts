@@ -2468,8 +2468,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const localBrowserStatus = this.localBrowserRenderer
       ? `${this.localBrowserRenderer.browserName} / ${this.localBrowserRenderer.state}`
       : 'not initialized'
-    const localBrowserUnavailableReason =
-      this.localBrowserRenderer?.unavailableReason ?? 'none'
+    const localBrowserUnavailableReason = this.localBrowserRenderer?.unavailableReason ?? 'none'
 
     const diagnostics = [
       `Mounted web cards: ${mountedWebCards.size}`,
