@@ -1625,6 +1625,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (this.activeGenerations.get(node.id) !== session) return
 
     if (node.frameEl !== frameEl || !frameEl.isConnected) {
+      this.releaseGenerationFrame(node)
       session.finish('failure')
       return
     }
