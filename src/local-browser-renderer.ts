@@ -1,5 +1,5 @@
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { homedir, platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -68,7 +68,6 @@ type BrowserRuntime = {
   connection: CdpConnection
   profileDir: string
   candidate: BrowserCandidate
-  port: number
 }
 
 export type LocalBrowserRenderResult = {
@@ -244,111 +243,25 @@ function detectBrowserCandidates(): BrowserCandidate[] {
 }
 
 class CdpConnection {
-  private readonly socket: WebSocket
   private nextId = 1
   private readonly pending = new Map<number, PendingCall>()
   private readonly eventWaiters = new Set<EventWaiter>()
+  private incomingBuffer = ''
   private closed = false
 
-  private constructor(socket: WebSocket) {
-    this.socket = socket
-
-    socket.addEventListener('message', event => {
-      if (typeof event.data !== 'string') return
-
-      let message: CdpMessage
-
-      try {
-        message = JSON.parse(event.data) as CdpMessage
-      } catch {
-        return
-      }
-
-      if (typeof message.id === 'number') {
-        const pending = this.pending.get(message.id)
-
-        if (!pending) return
-
-        this.pending.delete(message.id)
-        window.clearTimeout(pending.timeoutId)
-
-        if (message.error) {
-          pending.reject(
-            new Error(
-              `CDP command failed (${message.error.code ?? 'unknown'}): ${
-                message.error.message ?? 'unknown error'
-              }`
-            )
-          )
-        } else {
-          pending.resolve(message.result)
-        }
-
-        return
-      }
-
-      if (!message.method) return
-
-      for (const waiter of [...this.eventWaiters]) {
-        if (waiter.method !== message.method) continue
-        if (waiter.sessionId !== undefined && waiter.sessionId !== message.sessionId) continue
-
-        this.eventWaiters.delete(waiter)
-        window.clearTimeout(waiter.timeoutId)
-        waiter.resolve(message.params)
-      }
-    })
-
-    socket.addEventListener('close', () => {
-      this.rejectAll(new Error('Local browser DevTools connection closed'))
-    })
-
-    socket.addEventListener('error', () => {
-      this.rejectAll(new Error('Local browser DevTools connection failed'))
-    })
-  }
-
-  static connect(url: string): Promise<CdpConnection> {
-    return new Promise((resolve, reject) => {
-      const socket = new WebSocket(url)
-      let settled = false
-
-      const timeoutId = window.setTimeout(() => {
-        if (settled) return
-
-        settled = true
-        socket.close()
-        reject(new Error('Timed out connecting to local browser DevTools'))
-      }, CDP_COMMAND_TIMEOUT_MS)
-
-      socket.addEventListener(
-        'open',
-        () => {
-          if (settled) return
-
-          settled = true
-          window.clearTimeout(timeoutId)
-          resolve(new CdpConnection(socket))
-        },
-        { once: true }
-      )
-
-      socket.addEventListener(
-        'error',
-        () => {
-          if (settled) return
-
-          settled = true
-          window.clearTimeout(timeoutId)
-          reject(new Error('Unable to connect to local browser DevTools'))
-        },
-        { once: true }
-      )
-    })
+  constructor(
+    private readonly outgoing: NodeJS.WritableStream,
+    private readonly incoming: NodeJS.ReadableStream
+  ) {
+    incoming.on('data', this.onData)
+    incoming.on('end', this.onClosed)
+    incoming.on('close', this.onClosed)
+    incoming.on('error', this.onClosed)
+    outgoing.on('error', this.onClosed)
   }
 
   get isOpen(): boolean {
-    return !this.closed && this.socket.readyState === WebSocket.OPEN
+    return !this.closed
   }
 
   send<T>(
@@ -358,7 +271,7 @@ class CdpConnection {
     timeoutMs = CDP_COMMAND_TIMEOUT_MS
   ): Promise<T> {
     if (!this.isOpen) {
-      return Promise.reject(new Error('Local browser DevTools connection is not open'))
+      return Promise.reject(new Error('Local browser DevTools pipe is not open'))
     }
 
     const id = this.nextId++
@@ -391,7 +304,7 @@ class CdpConnection {
       }
 
       try {
-        this.socket.send(JSON.stringify(message))
+        this.outgoing.write(`${JSON.stringify(message)}\x00`)
       } catch (error) {
         this.pending.delete(id)
         window.clearTimeout(timeoutId)
@@ -406,7 +319,7 @@ class CdpConnection {
     timeoutMs = CDP_COMMAND_TIMEOUT_MS
   ): Promise<T> {
     if (!this.isOpen) {
-      return Promise.reject(new Error('Local browser DevTools connection is not open'))
+      return Promise.reject(new Error('Local browser DevTools pipe is not open'))
     }
 
     return new Promise<T>((resolve, reject) => {
@@ -431,21 +344,94 @@ class CdpConnection {
     if (this.closed) return
 
     this.closed = true
+    this.detach()
+    this.rejectAll(new Error('Local browser DevTools pipe closed'))
+  }
 
-    try {
-      this.socket.close()
-    } catch {
-      // Best effort.
+  private readonly onData = (chunk: unknown) => {
+    if (this.closed) return
+
+    this.incomingBuffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+
+    let separatorIndex = this.incomingBuffer.indexOf('\x00')
+
+    while (separatorIndex >= 0) {
+      const rawMessage = this.incomingBuffer.slice(0, separatorIndex)
+      this.incomingBuffer = this.incomingBuffer.slice(separatorIndex + 1)
+
+      if (rawMessage) {
+        this.handleMessage(rawMessage)
+      }
+
+      separatorIndex = this.incomingBuffer.indexOf('\x00')
     }
 
-    this.rejectAll(new Error('Local browser DevTools connection closed'))
+    if (this.incomingBuffer.length > 4_000_000) {
+      this.close()
+    }
+  }
+
+  private readonly onClosed = () => {
+    if (this.closed) return
+
+    this.closed = true
+    this.detach()
+    this.rejectAll(new Error('Local browser DevTools pipe closed'))
+  }
+
+  private handleMessage(rawMessage: string) {
+    let message: CdpMessage
+
+    try {
+      message = JSON.parse(rawMessage) as CdpMessage
+    } catch {
+      return
+    }
+
+    if (typeof message.id === 'number') {
+      const pending = this.pending.get(message.id)
+
+      if (!pending) return
+
+      this.pending.delete(message.id)
+      window.clearTimeout(pending.timeoutId)
+
+      if (message.error) {
+        pending.reject(
+          new Error(
+            `CDP command failed (${message.error.code ?? 'unknown'}): ${
+              message.error.message ?? 'unknown error'
+            }`
+          )
+        )
+      } else {
+        pending.resolve(message.result)
+      }
+
+      return
+    }
+
+    if (!message.method) return
+
+    for (const waiter of [...this.eventWaiters]) {
+      if (waiter.method !== message.method) continue
+      if (waiter.sessionId !== undefined && waiter.sessionId !== message.sessionId) continue
+
+      this.eventWaiters.delete(waiter)
+      window.clearTimeout(waiter.timeoutId)
+      waiter.resolve(message.params)
+    }
+  }
+
+  private detach() {
+    this.incoming.removeListener('data', this.onData)
+    this.incoming.removeListener('end', this.onClosed)
+    this.incoming.removeListener('close', this.onClosed)
+    this.incoming.removeListener('error', this.onClosed)
+    this.outgoing.removeListener('error', this.onClosed)
   }
 
   private rejectAll(error: Error) {
-    if (this.closed && this.pending.size === 0 && this.eventWaiters.size === 0) return
-
-    this.closed = true
-
     for (const pending of this.pending.values()) {
       window.clearTimeout(pending.timeoutId)
       pending.reject(error)
@@ -460,104 +446,6 @@ class CdpConnection {
 
     this.eventWaiters.clear()
   }
-}
-
-function parseDevToolsEndpoint(
-  output: string,
-  profileDir: string
-): { port: number; websocketUrl: string } | null {
-  const match = output.match(/DevTools listening on (ws:\/\/[^\s]+)/)
-
-  if (match?.[1]) {
-    try {
-      const url = new URL(match[1])
-
-      return {
-        port: Number(url.port),
-        websocketUrl: match[1]
-      }
-    } catch {
-      // Fall through to DevToolsActivePort.
-    }
-  }
-
-  const activePortPath = join(profileDir, 'DevToolsActivePort')
-
-  if (!existsSync(activePortPath)) return null
-
-  try {
-    const [portLine, browserPath] = readFileSync(activePortPath, 'utf8').trim().split(/\r?\n/)
-    const port = Number(portLine)
-
-    if (!Number.isFinite(port) || !browserPath) return null
-
-    return {
-      port,
-      websocketUrl: `ws://127.0.0.1:${port}${browserPath}`
-    }
-  } catch {
-    return null
-  }
-}
-
-function waitForDevToolsEndpoint(
-  child: ChildProcess,
-  profileDir: string
-): Promise<{ port: number; websocketUrl: string }> {
-  return new Promise((resolve, reject) => {
-    let settled = false
-    let output = ''
-    let pollTimer = 0
-
-    const finish = (error: Error | null, endpoint?: { port: number; websocketUrl: string }) => {
-      if (settled) return
-
-      settled = true
-      window.clearInterval(pollTimer)
-      window.clearTimeout(timeoutId)
-      child.stdout?.removeListener('data', onData)
-      child.stderr?.removeListener('data', onData)
-      child.removeListener('exit', onExit)
-
-      if (error) {
-        reject(error)
-      } else if (endpoint) {
-        resolve(endpoint)
-      }
-    }
-
-    const inspect = () => {
-      const endpoint = parseDevToolsEndpoint(output, profileDir)
-
-      if (endpoint) {
-        finish(null, endpoint)
-      }
-    }
-
-    const onData = (chunk: unknown) => {
-      output += String(chunk)
-
-      if (output.length > 32_768) {
-        output = output.slice(-16_384)
-      }
-
-      inspect()
-    }
-
-    const onExit = (code: number | null) => {
-      finish(new Error(`Local browser exited during startup (code ${code ?? 'unknown'})`))
-    }
-
-    child.stdout?.on('data', onData)
-    child.stderr?.on('data', onData)
-    child.once('exit', onExit)
-
-    pollTimer = window.setInterval(inspect, 25)
-
-    const timeoutId = window.setTimeout(() => {
-      finish(new Error('Timed out starting local headless browser'))
-    }, BROWSER_START_TIMEOUT_MS)
-  })
 }
 
 export default class LocalBrowserRenderer {
@@ -930,7 +818,7 @@ export default class LocalBrowserRenderer {
     const profileDir = mkdtempSync(join(tmpdir(), 'canvas-web-optimizer-'))
     const args = [
       '--headless',
-      '--remote-debugging-port=0',
+      '--remote-debugging-pipe',
       `--user-data-dir=${profileDir}`,
       '--no-first-run',
       '--no-default-browser-check',
@@ -946,21 +834,26 @@ export default class LocalBrowserRenderer {
 
     const child = spawn(candidate.executablePath, args, {
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe']
     })
 
     try {
-      const endpoint = await waitForDevToolsEndpoint(child, profileDir)
-      const connection = await CdpConnection.connect(endpoint.websocketUrl)
+      const pipeWrite = child.stdio[3] as NodeJS.WritableStream | null
+      const pipeRead = child.stdio[4] as NodeJS.ReadableStream | null
 
-      await connection.send('Browser.getVersion')
+      if (!pipeWrite || !pipeRead) {
+        throw new Error('Local browser did not expose DevTools pipes')
+      }
+
+      const connection = new CdpConnection(pipeWrite, pipeRead)
+
+      await connection.send('Browser.getVersion', {}, undefined, BROWSER_START_TIMEOUT_MS)
 
       const runtime: BrowserRuntime = {
         process: child,
         connection,
         profileDir,
-        candidate,
-        port: endpoint.port
+        candidate
       }
 
       child.once('exit', () => {
