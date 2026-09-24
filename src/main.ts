@@ -893,7 +893,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (!worstSession) return
 
     worstSession.requeue = true
-    this.removeNodeFrame(worstSession.node)
+    this.releaseGenerationFrame(worstSession.node)
     worstSession.finish('preempted')
   }
 
@@ -1073,7 +1073,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       const timeoutId = window.setTimeout(() => {
         this.log(`Thumbnail generation timed out for ${session.url}`, true)
 
-        this.removeNodeFrame(node)
+        this.releaseGenerationFrame(node)
         session.finish('timeout')
       }, timeoutMs)
 
@@ -1155,7 +1155,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     for (const session of sessions) {
       session.requeue = requeue
-      this.removeNodeFrame(session.node)
+      this.releaseGenerationFrame(session.node)
       session.finish('preempted')
     }
   }
@@ -1197,7 +1197,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const session = this.activeGenerations.get(node.id)
 
     if (session?.node === node) {
-      this.removeNodeFrame(node)
+      this.releaseGenerationFrame(node)
       session.finish('stale')
     }
 
@@ -1244,7 +1244,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     if (isGenerating) {
-      this.removeNodeFrame(node)
+      this.releaseGenerationFrame(node)
       session.finish('unmounted')
     }
   }
@@ -1357,7 +1357,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     for (const generation of [...this.activeGenerations.values()]) {
       if (generation.node.nodeEl?.isConnected) continue
 
-      this.removeNodeFrame(generation.node)
+      this.releaseGenerationFrame(generation.node)
       generation.finish('unmounted')
     }
   }
@@ -1400,6 +1400,29 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.captureWorkersReused++
 
     return frameEl
+  }
+
+  private navigateCaptureWorker(node: LinkNode, frameEl: NonNullable<LinkNode['frameEl']>) {
+    try {
+      const navigation = frameEl.loadURL?.(node.url)
+
+      if (navigation) {
+        void navigation.catch(error => {
+          this.log(error, true)
+
+          if (node.frameEl === frameEl && this.activeGenerations.has(node.id)) {
+            this.releaseGenerationFrame(node)
+            this.finishActiveGeneration(node, 'failure')
+          }
+        })
+      } else {
+        frameEl.setAttribute('src', node.url)
+      }
+    } catch (error) {
+      this.log(error, true)
+      this.releaseGenerationFrame(node)
+      this.finishActiveGeneration(node, 'failure')
+    }
   }
 
   private releaseGenerationFrame(node: LinkNode) {
@@ -1460,50 +1483,67 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    const onFrameFailed = (event: Event) => {
+    this.clearFrameListeners(frameEl)
+
+    const onFrameFailed: EventListener = event => {
       if (!isFatalLoadFailure(event as DidFailLoadEvent)) return
 
-      this.removeNodeFrame(node)
-
       if (mode === 'generation') {
+        this.releaseGenerationFrame(node)
         this.finishActiveGeneration(node, 'failure')
       } else if (this.activeInteractiveNode === node) {
+        this.removeNodeFrame(node)
         this.ensurePreview(node, true)
         this.clearInteractiveState(node)
       }
     }
 
-    frameEl.addEventListener('did-fail-load', onFrameFailed)
-
     if (mode === 'generation') {
       frameEl.setAudioMuted?.(true)
 
-      frameEl.addEventListener(
-        'dom-ready',
-        () => {
-          const session = this.activeGenerations.get(node.id)
+      const reused = this.reusedCaptureFrames.delete(frameEl)
 
-          if (session?.node === node && session.domReadyAt === undefined) {
-            session.domReadyAt = performance.now()
-            this.generationDomReadyTotalMs += session.domReadyAt - session.startedAt
-            this.generationDomReadyCount++
-          }
+      if (!this.captureWorkerPool.isManaged(frameEl)) {
+        this.captureWorkerPool.register(frameEl, node.contentEl.doc)
+        this.captureWorkersCreated++
+      }
 
-          void this.captureGeneratedFrame(node, frameEl)
-        },
-        { once: true }
-      )
+      const onReady: EventListener = () => {
+        const session = this.activeGenerations.get(node.id)
+
+        if (session?.node === node && session.domReadyAt === undefined) {
+          session.domReadyAt = performance.now()
+          this.generationDomReadyTotalMs += session.domReadyAt - session.startedAt
+          this.generationDomReadyCount++
+        }
+
+        void this.captureGeneratedFrame(node, frameEl)
+      }
+
+      this.frameListeners.set(frameEl, {
+        failed: onFrameFailed,
+        ready: onReady
+      })
+      frameEl.addEventListener('did-fail-load', onFrameFailed)
+      frameEl.addEventListener('dom-ready', onReady, { once: true })
+
+      if (reused) {
+        this.navigateCaptureWorker(node, frameEl)
+      }
 
       return
     }
 
-    frameEl.addEventListener(
-      'dom-ready',
-      () => {
-        void this.revealInteractiveFrame(node, frameEl)
-      },
-      { once: true }
-    )
+    const onReady: EventListener = () => {
+      void this.revealInteractiveFrame(node, frameEl)
+    }
+
+    this.frameListeners.set(frameEl, {
+      failed: onFrameFailed,
+      ready: onReady
+    })
+    frameEl.addEventListener('did-fail-load', onFrameFailed)
+    frameEl.addEventListener('dom-ready', onReady, { once: true })
   }
 
   private async applyLightTheme(frameEl: LinkNode['frameEl']) {
@@ -1565,7 +1605,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     if (node.url !== session.url) {
-      this.removeNodeFrame(node)
+      this.releaseGenerationFrame(node)
       session.finish('stale')
       return
     }
@@ -1575,7 +1615,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (!saved) {
       if (this.activeGenerations.get(node.id) === session) {
-        this.removeNodeFrame(node)
+        this.releaseGenerationFrame(node)
         session.finish('failure')
       }
       return
@@ -1608,7 +1648,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       )
     } catch (error) {
       this.log(error, true)
-      this.removeNodeFrame(node)
+      this.releaseGenerationFrame(node)
       session.finish('failure')
       return
     }
@@ -1633,12 +1673,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (!previewReady || !this.getNodeState(node).cached) {
       session.requeue = true
-      this.removeNodeFrame(node)
+      this.releaseGenerationFrame(node)
       session.finish('failure')
       return
     }
 
-    this.removeNodeFrame(node)
+    this.releaseGenerationFrame(node)
     this.log(`Cached link ${node.url}`)
     session.finish('success')
   }
