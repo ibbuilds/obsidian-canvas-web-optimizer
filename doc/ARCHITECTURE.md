@@ -24,6 +24,7 @@ These behaviors are compatibility contracts. Refactors must not change them unle
 ```text
 main.ts
 ├── cache/preview-cache.ts
+├── canvas/node-runtime.ts
 ├── diagnostics/metrics.ts
 ├── diagnostics/report.ts
 ├── generation/coordinator.ts
@@ -55,6 +56,18 @@ Lower-level modules do not import the plugin class. This keeps state ownership o
 - composing diagnostics
 
 It should not accumulate storage/indexing, browser-discovery, CDP transport, queue implementation, or interaction transition state.
+
+## Canvas node runtime
+
+`CanvasNodeRuntime` owns ephemeral per-link-node state that must stay synchronized across Obsidian lifecycle callbacks:
+
+- cached/evaluated state
+- in-flight cache preparation
+- activation-handler registration
+- requested frame mode
+- pending placeholder identity
+
+The registry uses weak references so removed Canvas nodes do not become long-lived plugin state.
 
 ## Preview cache
 
@@ -144,8 +157,9 @@ Current automated coverage includes:
 - navigation failure filtering
 - adaptive memory/CPU decisions
 - tuning candidates and preferred concurrency
-- viewport priority buckets
-- preview cache lifecycle and cleanup
+- viewport priority buckets and render-size geometry
+- per-node runtime state and frame-mode consumption
+- preview cache lifecycle, validation, and cleanup
 - dynamic generation queue behavior, large-batch compaction, and keyed removal
 - generation coordinator scheduling
 - interactive activation transitions
@@ -168,4 +182,4 @@ After structural cleanup is merged, scale/stress validation can target 25, 50, 1
 
 ## Future ownership boundaries
 
-If `main.ts` continues to grow, the next safe extraction is native-generation orchestration. It should be moved only after enough integration coverage exists for Obsidian frame creation and preview transition behavior. Avoid moving DOM lifecycle code merely to reduce line count; subsystem invariants are more important than file size.
+The cleanup deliberately stops before extracting DOM-heavy preview/frame orchestration. If `main.ts` grows again, the next safe extraction is native-generation orchestration. It should be moved only after enough integration coverage exists for Obsidian frame creation and preview transition behavior. Avoid moving DOM lifecycle code merely to reduce line count; subsystem invariants are more important than file size.
