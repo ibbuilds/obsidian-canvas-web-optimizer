@@ -13,7 +13,8 @@ try {
       'tests/interactive-activation.test.ts',
       'tests/generation-coordinator.test.ts',
       'tests/concurrency-tuner.test.ts',
-      'tests/link-node-patcher.test.ts'
+      'tests/link-node-patcher.test.ts',
+      'tests/diagnostics-report.test.ts'
     ],
     bundle: true,
     platform: 'node',
@@ -34,7 +35,8 @@ try {
       `${outdir}/interactive-activation.test.mjs`,
       `${outdir}/generation-coordinator.test.mjs`,
       `${outdir}/concurrency-tuner.test.mjs`,
-      `${outdir}/link-node-patcher.test.mjs`
+      `${outdir}/link-node-patcher.test.mjs`,
+      `${outdir}/diagnostics-report.test.mjs`
     ],
     {
       stdio: 'inherit'
