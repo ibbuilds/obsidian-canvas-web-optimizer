@@ -19,11 +19,13 @@ import {
 import DiagnosticsMetrics from './diagnostics/metrics'
 import GenerationCoordinator from './generation/coordinator'
 import InteractiveActivationController from './interactive/activation-controller'
+import { forceGuestLightPreference } from './interactive/webview-light'
 import LocalBrowserRenderer, {
   type LocalBrowserRenderResult,
   type LocalBrowserRenderTask
 } from './local-browser-renderer'
 import NetworkPreconnector from './network-preconnector'
+import { openExternalUrl } from './platform/electron-runtime'
 import { GENERATION_LIGHT_THEME_CSS, LIGHT_THEME_SCRIPT } from './web-theme'
 
 const THUMBNAIL_JPEG_QUALITY = 76
@@ -53,26 +55,6 @@ type ThumbnailImage = {
   isEmpty(): boolean
   resize(options: { width: number; height: number; quality: 'good' }): ThumbnailImage
   toJPEG(quality: number): ArrayBuffer
-}
-
-type ElectronDebuggerLike = {
-  attach(protocolVersion?: string): void
-  isAttached(): boolean
-  sendCommand(method: string, params?: Record<string, unknown>): Promise<unknown>
-}
-
-type ElectronGuestWebContentsLike = {
-  debugger: ElectronDebuggerLike
-  isDestroyed?(): boolean
-}
-
-type ElectronWebContentsModuleLike = {
-  fromId(id: number): ElectronGuestWebContentsLike | undefined
-}
-
-type ElectronRemoteLike = {
-  require?: (specifier: string) => unknown
-  webContents?: ElectronWebContentsModuleLike
 }
 
 type FrameMode = 'generation' | 'preload' | 'interactive'
@@ -158,90 +140,6 @@ type DidFailLoadEvent = Event & {
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => window.setTimeout(resolve, ms))
-}
-
-function getRuntimeRequire(): ((specifier: string) => unknown) | null {
-  const runtimeGlobal = globalThis as typeof globalThis & {
-    require?: (specifier: string) => unknown
-  }
-
-  return typeof runtimeGlobal.require === 'function' ? runtimeGlobal.require : null
-}
-
-function resolveGuestWebContents(
-  frameEl: LinkNode['frameEl']
-): ElectronGuestWebContentsLike | null {
-  const id = frameEl?.getWebContentsId?.()
-
-  if (typeof id !== 'number') return null
-
-  const runtimeRequire = getRuntimeRequire()
-
-  if (!runtimeRequire) return null
-
-  try {
-    const remote = runtimeRequire('@electron/remote') as ElectronRemoteLike
-    const direct = remote.webContents?.fromId(id)
-
-    if (direct) return direct
-
-    const remoteElectron = remote.require?.('electron') as
-      | { webContents?: ElectronWebContentsModuleLike }
-      | undefined
-    const throughRemoteRequire = remoteElectron?.webContents?.fromId(id)
-
-    if (throughRemoteRequire) return throughRemoteRequire
-  } catch {
-    // Try the renderer Electron export as a last resort below.
-  }
-
-  try {
-    const electron = runtimeRequire('electron') as {
-      webContents?: ElectronWebContentsModuleLike
-    }
-
-    return electron.webContents?.fromId(id) ?? null
-  } catch {
-    return null
-  }
-}
-
-function openExternalUrl(url: string): Promise<void> {
-  const runtimeRequire = getRuntimeRequire()
-
-  if (!runtimeRequire) {
-    return Promise.reject(new Error('Electron runtime is unavailable'))
-  }
-
-  try {
-    const remote = runtimeRequire('@electron/remote') as {
-      shell?: {
-        openExternal(target: string): Promise<void>
-      }
-    }
-
-    if (remote.shell?.openExternal) {
-      return remote.shell.openExternal(url)
-    }
-  } catch {
-    // Fall through to the renderer Electron export.
-  }
-
-  try {
-    const electron = runtimeRequire('electron') as {
-      shell?: {
-        openExternal(target: string): Promise<void>
-      }
-    }
-
-    if (electron.shell?.openExternal) {
-      return electron.shell.openExternal(url)
-    }
-  } catch {
-    // Report one stable error below.
-  }
-
-  return Promise.reject(new Error('Electron shell is unavailable'))
 }
 
 function afterTransition(element: HTMLElement, callback: () => void) {
@@ -2088,60 +1986,17 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     frameEl: LinkNode['frameEl'],
     trackInteractive = false
   ): Promise<boolean> {
-    if (!frameEl?.isConnected) {
-      if (trackInteractive) {
-        this.interactiveLightPreferenceStatus = 'frame unavailable'
-      }
+    const result = await forceGuestLightPreference(frameEl)
 
-      return false
+    if (trackInteractive) {
+      this.interactiveLightPreferenceStatus = result.status
     }
 
-    const guest = resolveGuestWebContents(frameEl)
-
-    if (!guest || guest.isDestroyed?.()) {
-      if (trackInteractive) {
-        this.interactiveLightPreferenceStatus = 'guest WebContents unavailable'
-      }
-
-      return false
+    if (result.error) {
+      this.log(`Unable to force light color preference for webview: ${result.error.message}`, true)
     }
 
-    try {
-      if (!guest.debugger.isAttached()) {
-        try {
-          guest.debugger.attach('1.3')
-        } catch {
-          guest.debugger.attach()
-        }
-      }
-
-      await guest.debugger.sendCommand('Emulation.setEmulatedMedia', {
-        media: 'screen',
-        features: [{ name: 'prefers-color-scheme', value: 'light' }]
-      })
-
-      await Promise.allSettled([
-        guest.debugger.sendCommand('Emulation.setAutoDarkModeOverride', {
-          enabled: false
-        }),
-        guest.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
-          source: LIGHT_THEME_SCRIPT
-        })
-      ])
-
-      if (trackInteractive) {
-        this.interactiveLightPreferenceStatus = 'CDP applied'
-      }
-
-      return true
-    } catch (error) {
-      if (trackInteractive) {
-        this.interactiveLightPreferenceStatus = `CDP failed: ${String(error)}`
-      }
-
-      this.log(`Unable to force light color preference for webview: ${String(error)}`, true)
-      return false
-    }
+    return result.applied
   }
 
   private async applyLightTheme(frameEl: LinkNode['frameEl']): Promise<boolean> {
