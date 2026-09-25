@@ -1,6 +1,6 @@
 import type { LinkNode } from 'obsidian'
-import type { ConcurrencyCounters } from './concurrency-tuner'
 import type { LocalBrowserRenderTask } from '../local-browser-renderer'
+import type { ConcurrencyCounters } from './concurrency-tuner'
 
 export type GenerationOutcome =
   | 'success'
