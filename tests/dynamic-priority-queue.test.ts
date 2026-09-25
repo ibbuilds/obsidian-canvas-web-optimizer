@@ -67,3 +67,33 @@ test('invalid jobs are discarded and predicates select the right lane', () => {
   assert.equal(queue.dequeue(job => !job.native)?.id, 'local')
   assert.equal(queue.length, 0)
 })
+
+
+test('queue handles large batches without duplicate keys or stale tombstones', () => {
+  const queue = createQueue()
+
+  for (let index = 0; index < 1000; index++) {
+    queue.enqueue({
+      id: `job-${index}`,
+      priority: index % 3,
+      valid: true,
+      native: index % 2 === 0
+    })
+  }
+
+  for (let index = 0; index < 250; index++) {
+    assert.ok(queue.remove(`job-${index * 2}`))
+  }
+
+  assert.equal(queue.length, 750)
+  assert.equal(queue.values().length, 750)
+
+  let dequeued = 0
+
+  while (queue.dequeue()) {
+    dequeued++
+  }
+
+  assert.equal(dequeued, 750)
+  assert.equal(queue.length, 0)
+})
