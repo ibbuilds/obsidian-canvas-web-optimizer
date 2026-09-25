@@ -201,9 +201,7 @@ export default class LocalBrowserRenderer {
   }
 
   get averagePaintReadyMs(): number {
-    return this.paintReadyCount > 0
-      ? Math.round(this.paintReadyTotalMs / this.paintReadyCount)
-      : 0
+    return this.paintReadyCount > 0 ? Math.round(this.paintReadyTotalMs / this.paintReadyCount) : 0
   }
 
   get averageScreenshotMs(): number {
