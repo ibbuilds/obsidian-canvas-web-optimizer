@@ -7,8 +7,8 @@ import {
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
-import { installLinkNodePatches, type FrameMode } from './canvas/link-node-patcher'
 import PreviewCache, { CACHE_METADATA_VERSION, type CacheMetadata } from './cache/preview-cache'
+import { type FrameMode, installLinkNodePatches } from './canvas/link-node-patcher'
 import {
   classifyViewportProximity,
   extractCanvasNodeIds,
