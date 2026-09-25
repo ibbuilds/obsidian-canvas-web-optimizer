@@ -17,6 +17,7 @@ import {
   type RectBounds
 } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
+import DynamicPriorityQueue from './generation/dynamic-priority-queue'
 import LocalBrowserRenderer, {
   type LocalBrowserRenderResult,
   type LocalBrowserRenderTask
@@ -299,8 +300,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly requestedFrameModes = new WeakMap<LinkNode, FrameMode>()
   private readonly pendingPlaceholders = new WeakMap<LinkNode, HTMLElement>()
 
-  private generationQueue: GenerationJob[] = []
-  private readonly queuedGenerationIds = new Set<string>()
+  private readonly generationQueue = new DynamicPriorityQueue<GenerationJob>(
+    job => job.node.id,
+    job => this.getGenerationPriority(job.node),
+    job => Boolean(job.node.nodeEl?.isConnected) && !this.getNodeState(job.node).cached
+  )
   private activeGeneration: ActiveGeneration | null = null
   private generationPreload: GenerationPreload | null = null
   private generationPreloadDisabled = false
@@ -410,8 +414,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   onunload() {
     this.log('Unloading plugin')
 
-    this.generationQueue = []
-    this.queuedGenerationIds.clear()
+    this.generationQueue.clear()
     this.requestedInteractiveNode = null
     this.abortActiveGeneration(false)
     this.cancelGenerationPreload(true)
@@ -901,7 +904,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (
       this.activeGeneration?.node.id === node.id ||
       this.localGenerations.has(node.id) ||
-      this.queuedGenerationIds.has(node.id)
+      this.generationQueue.has(node.id)
     ) {
       return
     }
@@ -934,13 +937,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       forceNative
     }
 
-    if (front) {
-      this.generationQueue.unshift(job)
-    } else {
-      this.generationQueue.push(job)
-    }
-
-    this.queuedGenerationIds.add(node.id)
+    this.generationQueue.enqueue(job, front)
     this.scheduleThumbnailQueue()
   }
 
@@ -956,7 +953,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    this.ensureBackgroundExecution(this.generationQueue[0].node)
+    const nextJob = this.generationQueue.peek()
+
+    if (!nextJob) {
+      this.releaseBackgroundExecutionIfIdle()
+      return
+    }
+
+    this.ensureBackgroundExecution(nextJob.node)
     this.generationQueueScheduled = true
 
     queueMicrotask(() => {
@@ -981,8 +985,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         if (!localJob) break
 
         if (!this.ensureNodeContentMounted(localJob.node)) {
-          this.generationQueue.unshift(localJob)
-          this.queuedGenerationIds.add(localJob.node.id)
+          this.generationQueue.enqueue(localJob, true)
           break
         }
 
@@ -994,8 +997,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
         if (nativeFallbackJob) {
           if (!this.ensureNodeContentMounted(nativeFallbackJob.node)) {
-            this.generationQueue.unshift(nativeFallbackJob)
-            this.queuedGenerationIds.add(nativeFallbackJob.node.id)
+            this.generationQueue.enqueue(nativeFallbackJob, true)
           } else {
             this.preconnectQueuedWork()
             this.warmQueuedWork()
@@ -1024,8 +1026,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     if (!this.ensureNodeContentMounted(job.node)) {
-      this.generationQueue.unshift(job)
-      this.queuedGenerationIds.add(job.node.id)
+      this.generationQueue.enqueue(job, true)
       return
     }
 
@@ -1041,13 +1042,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private preconnectQueuedWork() {
     if (!this.networkPreconnector || this.generationQueue.length === 0) return
 
-    const urls = this.generationQueue
-      .slice()
-      .sort(
-        (left, right) =>
-          this.getGenerationPriority(left.node) - this.getGenerationPriority(right.node)
-      )
-      .map(job => job.node.url)
+    const urls = this.generationQueue.values().map(job => job.node.url)
 
     this.networkPreconnector.preconnect(urls, PRECONNECT_LOOKAHEAD_ORIGINS)
   }
@@ -1055,36 +1050,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private warmQueuedWork() {
     if (!this.networkPreconnector || this.generationQueue.length === 0) return
 
-    const urls = this.generationQueue
-      .slice()
-      .sort(
-        (left, right) =>
-          this.getGenerationPriority(left.node) - this.getGenerationPriority(right.node)
-      )
-      .map(job => job.node.url)
+    const urls = this.generationQueue.values().map(job => job.node.url)
 
     this.networkPreconnector.warm(urls, HTTP_WARM_LOOKAHEAD_URLS)
   }
 
   private peekNextGenerationJob(): GenerationJob | null {
-    let bestJob: GenerationJob | null = null
-    let bestPriority = Number.POSITIVE_INFINITY
-
-    for (let index = this.generationQueue.length - 1; index >= 0; index--) {
-      const job = this.generationQueue[index]
-      const { node } = job
-
-      if (!node.nodeEl?.isConnected || this.getNodeState(node).cached) continue
-
-      const priority = this.getGenerationPriority(node)
-
-      if (priority <= bestPriority) {
-        bestPriority = priority
-        bestJob = job
-      }
-    }
-
-    return bestJob
+    return this.generationQueue.peek()
   }
 
   private startNextGenerationPreload() {
@@ -1167,42 +1139,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private dequeueNextGenerationJob(
     predicate: (job: GenerationJob) => boolean = () => true
   ): GenerationJob | null {
-    let bestIndex = -1
-    let bestPriority = Number.POSITIVE_INFINITY
+    const job = this.generationQueue.dequeue(predicate)
 
-    for (let index = this.generationQueue.length - 1; index >= 0; index--) {
-      const job = this.generationQueue[index]
+    if (!job) return null
 
-      if (!predicate(job)) continue
-
-      const { node } = job
-
-      if (!node.nodeEl?.isConnected) {
-        this.generationQueue.splice(index, 1)
-        this.queuedGenerationIds.delete(node.id)
-        continue
-      }
-
-      const state = this.getNodeState(node)
-
-      if (state.cached) {
-        this.generationQueue.splice(index, 1)
-        this.queuedGenerationIds.delete(node.id)
-        continue
-      }
-
-      const priority = this.getGenerationPriority(node)
-
-      if (priority <= bestPriority) {
-        bestPriority = priority
-        bestIndex = index
-      }
-    }
-
-    if (bestIndex < 0) return null
-
-    const [job] = this.generationQueue.splice(bestIndex, 1)
-    this.queuedGenerationIds.delete(job.node.id)
     this.metrics.queueWaitTotalMs += performance.now() - job.enqueuedAt
     this.metrics.queueWaitCount++
 
@@ -1744,13 +1684,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private removeQueuedGeneration(node: LinkNode) {
-    if (!this.queuedGenerationIds.delete(node.id)) return
-
-    const index = this.generationQueue.findIndex(job => job.node === node)
-
-    if (index >= 0) {
-      this.generationQueue.splice(index, 1)
-    }
+    this.generationQueue.remove(node.id)
   }
 
   private handleNodeUrlChanged(node: LinkNode) {
@@ -1794,6 +1728,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handleBreakpointUpdate(node: LinkNode) {
+    this.generationQueue.markPrioritiesDirty()
+
     const session = this.activeGeneration
     const isInteractive = this.activeInteractiveNode === node
     const isGenerating = session?.node === node
