@@ -298,7 +298,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   cacheDir = `${this.manifest.dir}/data/linkCache`
 
-
   private readonly thumbnailCacheIds = new Set<string>()
   private readonly metadataCacheIds = new Set<string>()
   private readonly metadataMemory = new Map<string, CacheMetadata>()
@@ -2765,59 +2764,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       })
     }
 
-    const averageGenerationMs =
-      this.metrics.generationCompleted > 0
-        ? Math.round(this.metrics.generationTotalMs / this.metrics.generationCompleted)
-        : 0
-
-    const averageCaptureMs =
-      this.metrics.generationCompleted > 0 ? Math.round(this.metrics.captureTotalMs / this.metrics.generationCompleted) : 0
-    const averagePreloadReadyMs =
-      this.metrics.generationPreloadsReady > 0
-        ? Math.round(this.metrics.generationPreloadReadyTotalMs / this.metrics.generationPreloadsReady)
-        : 0
-    const averagePromotionWaitMs =
-      this.metrics.preloadPromotionWaitCount > 0
-        ? Math.round(this.metrics.preloadPromotionWaitTotalMs / this.metrics.preloadPromotionWaitCount)
-        : 0
-    const averageColdGenerationMs =
-      this.metrics.generationColdCount > 0
-        ? Math.round(this.metrics.generationColdTotalMs / this.metrics.generationColdCount)
-        : 0
-    const averagePreloadedGenerationMs =
-      this.metrics.generationPreloadedCount > 0
-        ? Math.round(this.metrics.generationPreloadedTotalMs / this.metrics.generationPreloadedCount)
-        : 0
-    const lastBatchSeconds = this.metrics.lastBatchDurationMs / 1000
-    const lastBatchThroughput =
-      lastBatchSeconds > 0 ? this.metrics.lastBatchCompleted / lastBatchSeconds : 0
-    const averageQueueWaitMs =
-      this.metrics.queueWaitCount > 0 ? Math.round(this.metrics.queueWaitTotalMs / this.metrics.queueWaitCount) : 0
-    const averageFrameCreateMs =
-      this.metrics.frameCreateCount > 0 ? Math.round(this.metrics.frameCreateTotalMs / this.metrics.frameCreateCount) : 0
-    const averageDomReadyMs =
-      this.metrics.domReadyCount > 0 ? Math.round(this.metrics.domReadyTotalMs / this.metrics.domReadyCount) : 0
-    const averageThemeMs = this.metrics.themeCount > 0 ? Math.round(this.metrics.themeTotalMs / this.metrics.themeCount) : 0
-    const averagePaintReadyMs =
-      this.metrics.paintReadyCount > 0 ? Math.round(this.metrics.paintReadyTotalMs / this.metrics.paintReadyCount) : 0
-    const averageCapturePageMs =
-      this.metrics.capturePageCount > 0 ? Math.round(this.metrics.capturePageTotalMs / this.metrics.capturePageCount) : 0
-    const averageEncodeMs =
-      this.metrics.encodeCount > 0 ? Math.round(this.metrics.encodeTotalMs / this.metrics.encodeCount) : 0
-    const averageThumbnailWriteMs =
-      this.metrics.thumbnailWriteCount > 0
-        ? Math.round(this.metrics.thumbnailWriteTotalMs / this.metrics.thumbnailWriteCount)
-        : 0
-    const averageMetadataWriteMs =
-      this.metrics.metadataWriteCount > 0
-        ? Math.round(this.metrics.metadataWriteTotalMs / this.metrics.metadataWriteCount)
-        : 0
-    const averagePreviewReadyMs =
-      this.metrics.previewReadyCount > 0 ? Math.round(this.metrics.previewReadyTotalMs / this.metrics.previewReadyCount) : 0
-    const averageLocalGenerationMs =
-      this.metrics.localGenerationCount > 0
-        ? Math.round(this.metrics.localGenerationTotalMs / this.metrics.localGenerationCount)
-        : 0
+    const metricSummary = this.metrics.summary()
     const localRendererAvailable = this.localBrowserRenderer?.available ?? false
     const generationEngine = localRendererAvailable
       ? `local browser sidecar (${this.localBrowserRenderer?.poolSize ?? 0} workers)`
@@ -2873,28 +2820,28 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Local browser average render: ${this.localBrowserRenderer?.averageRenderMs ?? 0} ms`,
       `Local browser average navigation: ${this.localBrowserRenderer?.averageNavigationMs ?? 0} ms`,
       `Local browser average screenshot: ${this.localBrowserRenderer?.averageScreenshotMs ?? 0} ms`,
-      `Average local generation: ${averageLocalGenerationMs} ms`,
+      `Average local generation: ${metricSummary.averageLocalGenerationMs} ms`,
       `Generation preload: ${this.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
       `Preloads started/ready/hit/failed: ${this.metrics.generationPreloadsStarted}/${this.metrics.generationPreloadsReady}/${this.metrics.generationPreloadHits}/${this.metrics.generationPreloadFailures}`,
       `Preload immediate/pending hits: ${this.metrics.preloadImmediateHits}/${this.metrics.preloadPendingHits}`,
-      `Average preload ready: ${averagePreloadReadyMs} ms`,
-      `Average preload promotion wait: ${averagePromotionWaitMs} ms`,
-      `Average cold generation: ${averageColdGenerationMs} ms`,
-      `Average preloaded generation: ${averagePreloadedGenerationMs} ms`,
+      `Average preload ready: ${metricSummary.averagePreloadReadyMs} ms`,
+      `Average preload promotion wait: ${metricSummary.averagePromotionWaitMs} ms`,
+      `Average cold generation: ${metricSummary.averageColdGenerationMs} ms`,
+      `Average preloaded generation: ${metricSummary.averagePreloadedGenerationMs} ms`,
       `Last batch: ${this.metrics.lastBatchCompleted} cards / ${Math.round(this.metrics.lastBatchDurationMs)} ms`,
-      `Last batch throughput: ${lastBatchThroughput.toFixed(2)} cards/s`,
-      `Average queue wait: ${averageQueueWaitMs} ms`,
-      `Average frame create: ${averageFrameCreateMs} ms`,
-      `Average DOM ready: ${averageDomReadyMs} ms`,
-      `Average theme apply: ${averageThemeMs} ms`,
-      `Average paint ready: ${averagePaintReadyMs} ms`,
-      `Average capturePage: ${averageCapturePageMs} ms`,
-      `Average encode: ${averageEncodeMs} ms`,
-      `Average thumbnail write: ${averageThumbnailWriteMs} ms`,
-      `Average metadata write: ${averageMetadataWriteMs} ms`,
-      `Average preview ready: ${averagePreviewReadyMs} ms`,
-      `Average generation: ${averageGenerationMs} ms`,
-      `Average capture pipeline: ${averageCaptureMs} ms`,
+      `Last batch throughput: ${metricSummary.lastBatchThroughput.toFixed(2)} cards/s`,
+      `Average queue wait: ${metricSummary.averageQueueWaitMs} ms`,
+      `Average frame create: ${metricSummary.averageFrameCreateMs} ms`,
+      `Average DOM ready: ${metricSummary.averageDomReadyMs} ms`,
+      `Average theme apply: ${metricSummary.averageThemeMs} ms`,
+      `Average paint ready: ${metricSummary.averagePaintReadyMs} ms`,
+      `Average capturePage: ${metricSummary.averageCapturePageMs} ms`,
+      `Average encode: ${metricSummary.averageEncodeMs} ms`,
+      `Average thumbnail write: ${metricSummary.averageThumbnailWriteMs} ms`,
+      `Average metadata write: ${metricSummary.averageMetadataWriteMs} ms`,
+      `Average preview ready: ${metricSummary.averagePreviewReadyMs} ms`,
+      `Average generation: ${metricSummary.averageGenerationMs} ms`,
+      `Average capture pipeline: ${metricSummary.averageCaptureMs} ms`,
       `Thumbnail bytes written: ${this.metrics.capturedThumbnailBytes}`
     ].join('\n')
 
