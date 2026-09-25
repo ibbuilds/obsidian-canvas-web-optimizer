@@ -2,15 +2,23 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+    paths:
+      - manifest.json
+      - .github/workflows/release.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   release:
-    name: Build and publish release
+    name: Build and publish version
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -18,31 +26,55 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve version
+        id: version
+        run: |
+          VERSION="$(node -p "require('./manifest.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check existing release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up pnpm
+        if: steps.existing.outputs.exists != 'true'
         uses: pnpm/action-setup@v4
         with:
           version: 12.4.1
           run_install: false
 
       - name: Set up Node
+        if: steps.existing.outputs.exists != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
 
       - name: Install dependencies
+        if: steps.existing.outputs.exists != 'true'
         run: pnpm install --frozen-lockfile
 
-      - name: Verify tag matches manifest
-        run: |
-          VERSION="$(node -p "require('./manifest.json').version")"
-          test "$GITHUB_REF_NAME" = "v$VERSION"
-
       - name: Test and build
+        if: steps.existing.outputs.exists != 'true'
         run: pnpm run build
 
       - name: Publish GitHub release
+        if: steps.existing.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME"             main.js manifest.json styles.css             --title "$GITHUB_REF_NAME"             --generate-notes
+          TAG: ${{ steps.version.outputs.tag }}
+        run: >-
+          gh release create "$TAG"
+          main.js manifest.json styles.css
+          --target "$GITHUB_SHA"
+          --title "$TAG"
+          --generate-notes
