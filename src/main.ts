@@ -9,7 +9,13 @@ import {
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
 import PreviewCache, { CACHE_METADATA_VERSION, type CacheMetadata } from './cache/preview-cache'
-import { extractCanvasNodeIds, isFatalLoadFailure, pickPreferredConcurrency } from './core-utils'
+import {
+  classifyViewportProximity,
+  extractCanvasNodeIds,
+  isFatalLoadFailure,
+  pickPreferredConcurrency,
+  type RectBounds
+} from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
 import LocalBrowserRenderer, {
   type LocalBrowserRenderResult,
@@ -490,8 +496,33 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     return this.previewCache.has(node.id)
   }
 
+  private getNodeCanvasBounds(node: LinkNode): RectBounds | null {
+    if (
+      typeof node.x !== 'number' ||
+      typeof node.y !== 'number' ||
+      typeof node.width !== 'number' ||
+      typeof node.height !== 'number'
+    ) {
+      return null
+    }
+
+    return {
+      minX: node.x,
+      minY: node.y,
+      maxX: node.x + node.width,
+      maxY: node.y + node.height
+    }
+  }
+
   private isNodeNearVisibleViewport(node: LinkNode): boolean {
     if (!node.nodeEl?.isConnected) return false
+
+    const canvasBounds = this.getNodeCanvasBounds(node)
+    const viewport = node.canvas?.getViewportBBox?.()
+
+    if (canvasBounds && viewport) {
+      return classifyViewportProximity(canvasBounds, viewport) === 0
+    }
 
     const rect = node.nodeEl.getBoundingClientRect()
     const viewportRect = node.canvas?.wrapperEl?.getBoundingClientRect()
@@ -505,23 +536,21 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return false
     }
 
-    const viewport =
+    const fallbackViewport =
       viewportRect && viewportRect.width > 0 && viewportRect.height > 0
         ? viewportRect
         : {
             left: 0,
             top: 0,
             right: node.nodeEl.ownerDocument.defaultView?.innerWidth ?? 0,
-            bottom: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0,
-            width: node.nodeEl.ownerDocument.defaultView?.innerWidth ?? 0,
-            height: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0
+            bottom: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0
           }
 
     return (
-      rect.right >= viewport.left &&
-      rect.left <= viewport.right &&
-      rect.bottom >= viewport.top &&
-      rect.top <= viewport.bottom
+      rect.right >= fallbackViewport.left &&
+      rect.left <= fallbackViewport.right &&
+      rect.bottom >= fallbackViewport.top &&
+      rect.top <= fallbackViewport.bottom
     )
   }
 
@@ -1182,44 +1211,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private getGenerationPriority(node: LinkNode): number {
     const viewport = node.canvas?.getViewportBBox?.()
+    const bounds = this.getNodeCanvasBounds(node)
 
-    if (
-      !viewport ||
-      typeof node.x !== 'number' ||
-      typeof node.y !== 'number' ||
-      typeof node.width !== 'number' ||
-      typeof node.height !== 'number'
-    ) {
-      return 1
-    }
+    if (!viewport || !bounds) return 1
 
-    const nodeMinX = node.x
-    const nodeMinY = node.y
-    const nodeMaxX = node.x + node.width
-    const nodeMaxY = node.y + node.height
-
-    const intersects = (minX: number, minY: number, maxX: number, maxY: number) =>
-      nodeMaxX >= minX && nodeMinX <= maxX && nodeMaxY >= minY && nodeMinY <= maxY
-
-    if (intersects(viewport.minX, viewport.minY, viewport.maxX, viewport.maxY)) {
-      return 0
-    }
-
-    const marginX = viewport.maxX - viewport.minX
-    const marginY = viewport.maxY - viewport.minY
-
-    if (
-      intersects(
-        viewport.minX - marginX,
-        viewport.minY - marginY,
-        viewport.maxX + marginX,
-        viewport.maxY + marginY
-      )
-    ) {
-      return 1
-    }
-
-    return 2
+    return classifyViewportProximity(bounds, viewport)
   }
 
   private generateQueuedThumbnail(job: GenerationJob): Promise<void> {
