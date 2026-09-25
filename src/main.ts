@@ -18,6 +18,7 @@ import {
 } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
 import DynamicPriorityQueue from './generation/dynamic-priority-queue'
+import InteractiveActivationController from './interactive/activation-controller'
 import LocalBrowserRenderer, {
   type LocalBrowserRenderResult,
   type LocalBrowserRenderTask
@@ -318,11 +319,27 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private localBatchTuning: LocalBatchTuningSnapshot | null = null
   private localTuningStatus = 'hardware heuristic'
 
-  private activeInteractiveNode: LinkNode | null = null
-  private requestedInteractiveNode: LinkNode | null = null
-  private interactiveTransitionRunning = false
+  private readonly interactiveActivation = new InteractiveActivationController<LinkNode>({
+    isAvailable: node => this.isNodeContentMounted(node),
+    prepare: node => {
+      this.cancelGenerationPreload(true)
+      this.abortLocalGenerations(true)
+      this.abortActiveGeneration(true)
+      this.releaseBackgroundExecution()
+      this.removePendingPlaceholder(node)
+    },
+    activate: node => {
+      this.setInteractiveClasses(node, true)
+      this.requestNodeFrame(node, 'interactive')
+    },
+    deactivate: node => this.deactivateInteractive(node)
+  })
   private interactiveLightPreferenceStatus = 'not attempted'
   private interactiveMatchMediaLight: boolean | null = null
+
+  private get activeInteractiveNode(): LinkNode | null {
+    return this.interactiveActivation.activeNode
+  }
 
   private readonly metrics = new DiagnosticsMetrics()
 
@@ -415,7 +432,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.log('Unloading plugin')
 
     this.generationQueue.clear()
-    this.requestedInteractiveNode = null
+    this.interactiveActivation.cancelPending()
     this.abortActiveGeneration(false)
     this.cancelGenerationPreload(true)
     this.abortLocalGenerations(false)
@@ -1803,59 +1820,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private requestInteractiveActivation(node: LinkNode) {
-    this.requestedInteractiveNode = node
-
-    if (this.interactiveTransitionRunning) return
-
-    void this.processInteractiveActivationRequests()
-  }
-
-  private async processInteractiveActivationRequests() {
-    if (this.interactiveTransitionRunning) return
-
-    this.interactiveTransitionRunning = true
-
-    try {
-      while (this.requestedInteractiveNode) {
-        const requestedNode = this.requestedInteractiveNode
-        this.requestedInteractiveNode = null
-
-        if (
-          !this.isNodeContentMounted(requestedNode) ||
-          this.activeInteractiveNode === requestedNode
-        ) {
-          continue
-        }
-
-        if (this.activeInteractiveNode) {
-          await this.deactivateInteractive(this.activeInteractiveNode)
-        }
-
-        if (this.requestedInteractiveNode) {
-          continue
-        }
-
-        if (!this.isNodeContentMounted(requestedNode)) {
-          continue
-        }
-
-        this.cancelGenerationPreload(true)
-        this.abortLocalGenerations(true)
-        this.abortActiveGeneration(true)
-        this.releaseBackgroundExecution()
-        this.removePendingPlaceholder(requestedNode)
-
-        this.activeInteractiveNode = requestedNode
-        this.setInteractiveClasses(requestedNode, true)
-        this.requestNodeFrame(requestedNode, 'interactive')
-      }
-    } finally {
-      this.interactiveTransitionRunning = false
-
-      if (this.requestedInteractiveNode) {
-        void this.processInteractiveActivationRequests()
-      }
-    }
+    this.interactiveActivation.request(node)
   }
 
   private async deactivateInteractive(node: LinkNode) {
@@ -1917,8 +1882,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (this.activeInteractiveNode !== node) return
 
     this.setInteractiveClasses(node, false)
-    this.activeInteractiveNode = null
-    this.scheduleThumbnailQueue()
+
+    if (this.interactiveActivation.clear(node)) {
+      this.scheduleThumbnailQueue()
+    }
   }
 
   private setInteractiveClasses(node: LinkNode, active: boolean) {
