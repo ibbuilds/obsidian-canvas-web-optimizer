@@ -19,4 +19,3 @@ export const LIGHT_THEME_SCRIPT = `
     meta.setAttribute('content', 'light')
   })()
 `
-
