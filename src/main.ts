@@ -11,7 +11,9 @@ import PreviewCache, { CACHE_METADATA_VERSION, type CacheMetadata } from './cach
 import { type FrameMode, installLinkNodePatches } from './canvas/link-node-patcher'
 import {
   classifyViewportProximity,
+  createRectBounds,
   extractCanvasNodeIds,
+  fitRenderSize,
   isFatalLoadFailure,
   type RectBounds
 } from './core-utils'
@@ -385,21 +387,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private getNodeCanvasBounds(node: LinkNode): RectBounds | null {
-    if (
-      typeof node.x !== 'number' ||
-      typeof node.y !== 'number' ||
-      typeof node.width !== 'number' ||
-      typeof node.height !== 'number'
-    ) {
-      return null
-    }
-
-    return {
-      minX: node.x,
-      minY: node.y,
-      maxX: node.x + node.width,
-      maxY: node.y + node.height
-    }
+    return createRectBounds(node.x, node.y, node.width, node.height)
   }
 
   private isNodeNearVisibleViewport(node: LinkNode): boolean {
@@ -1289,24 +1277,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private getLocalRenderSize(node: LinkNode): { width: number; height: number } {
-    let width = node.contentEl?.clientWidth || node.width || 640
-    let height = node.contentEl?.clientHeight || node.height || 360
-
-    width = Math.max(64, width)
-    height = Math.max(64, height)
-
-    const longEdge = Math.max(width, height)
-
-    if (longEdge > THUMBNAIL_MAX_LONG_EDGE) {
-      const scale = THUMBNAIL_MAX_LONG_EDGE / longEdge
-      width *= scale
-      height *= scale
-    }
-
-    return {
-      width: Math.round(width),
-      height: Math.round(height)
-    }
+    return fitRenderSize(
+      node.contentEl?.clientWidth || node.width || 640,
+      node.contentEl?.clientHeight || node.height || 360,
+      THUMBNAIL_MAX_LONG_EDGE
+    )
   }
 
   private async commitLocalThumbnail(
