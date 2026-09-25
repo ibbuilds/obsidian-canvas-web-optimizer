@@ -2242,22 +2242,22 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const uninstaller = around(linkNodeConstructor.prototype, {
       _saveThumbnail: () =>
-        async function () {
+        async function (this: LinkNode) {
           return thisPlugin.saveThumbnail(this)
         },
 
       _getThumbnailPath: () =>
-        function () {
+        function (this: LinkNode) {
           return thisPlugin.previewCache.thumbnailPath(this.id)
         },
 
       _getMetadataPath: () =>
-        function () {
+        function (this: LinkNode) {
           return thisPlugin.previewCache.metadataPath(this.id)
         },
 
       mountContent: (next: (...args: unknown[]) => unknown) =>
-        function (...args: unknown[]) {
+        function (this: LinkNode, ...args: unknown[]) {
           const result = next.call(this, ...args)
 
           if (!this._initializing) {
@@ -2268,7 +2268,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         },
 
       updateBreakpoint: (next: (...args: unknown[]) => unknown) =>
-        function (...args: unknown[]) {
+        function (this: LinkNode, ...args: unknown[]) {
           const result = next.call(this, ...args)
 
           thisPlugin.handleBreakpointUpdate(this)
@@ -2277,7 +2277,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         },
 
       setData: (next: (...args: unknown[]) => unknown) =>
-        function (...args: unknown[]) {
+        function (this: LinkNode, ...args: unknown[]) {
           const previousUrl = this.url
           const result = next.call(this, ...args)
 
@@ -2289,7 +2289,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         },
 
       initialize: (next: (...args: unknown[]) => unknown) =>
-        function (...args: unknown[]) {
+        function (this: LinkNode, ...args: unknown[]) {
           this._initializing = true
 
           let result: unknown
@@ -2311,7 +2311,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         },
 
       recreateFrame: (next: (...args: unknown[]) => unknown) =>
-        function (...args: unknown[]) {
+        function (this: LinkNode, ...args: unknown[]) {
           if (this._initializing) return null
 
           const mode = thisPlugin.requestedFrameModes.get(this)
