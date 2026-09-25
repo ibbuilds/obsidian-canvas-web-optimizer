@@ -228,6 +228,44 @@ function resolveGuestWebContents(
   }
 }
 
+function openExternalUrl(url: string): Promise<void> {
+  const runtimeRequire = getRuntimeRequire()
+
+  if (!runtimeRequire) {
+    return Promise.reject(new Error('Electron runtime is unavailable'))
+  }
+
+  try {
+    const remote = runtimeRequire('@electron/remote') as {
+      shell?: {
+        openExternal(target: string): Promise<void>
+      }
+    }
+
+    if (remote.shell?.openExternal) {
+      return remote.shell.openExternal(url)
+    }
+  } catch {
+    // Fall through to the renderer Electron export.
+  }
+
+  try {
+    const electron = runtimeRequire('electron') as {
+      shell?: {
+        openExternal(target: string): Promise<void>
+      }
+    }
+
+    if (electron.shell?.openExternal) {
+      return electron.shell.openExternal(url)
+    }
+  } catch {
+    // Report one stable error below.
+  }
+
+  return Promise.reject(new Error('Electron shell is unavailable'))
+}
+
 function afterTransition(element: HTMLElement, callback: () => void) {
   let finished = false
   let timeoutId = 0
@@ -774,6 +812,22 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         event.stopImmediatePropagation()
 
         this.requestInteractiveActivation(node)
+      },
+      true
+    )
+
+    node.nodeEl.addEventListener(
+      'click',
+      event => {
+        const target = event.target as Element | null
+        const label = target?.closest?.('.canvas-node-label')
+
+        if (!label || !node.nodeEl.contains(label)) return
+
+        event.preventDefault()
+        event.stopImmediatePropagation()
+
+        void openExternalUrl(node.url).catch(error => this.log(error, true))
       },
       true
     )
