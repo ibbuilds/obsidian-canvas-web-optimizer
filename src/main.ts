@@ -14,6 +14,7 @@ import LocalBrowserRenderer, {
   type LocalBrowserRenderTask
 } from './local-browser-renderer'
 import NetworkPreconnector from './network-preconnector'
+import { GENERATION_LIGHT_THEME_CSS, LIGHT_THEME_SCRIPT } from './web-theme'
 
 const CACHE_METADATA_VERSION = 2
 const CACHE_SCHEMA_VERSION = 2
@@ -32,28 +33,6 @@ const GENERATION_RETRY_DELAY_MS = 150
 const LOCAL_GENERATION_TIMEOUT_MS = 7500
 const PRECONNECT_LOOKAHEAD_ORIGINS = 6
 const HTTP_WARM_LOOKAHEAD_URLS = 2
-
-const GENERATION_LIGHT_THEME_CSS = `
-  :root {
-    color-scheme: light !important;
-  }
-`
-
-const LIGHT_THEME_SCRIPT = `
-  (() => {
-    document.documentElement.style.setProperty('color-scheme', 'light', 'important')
-
-    let meta = document.querySelector('meta[name="color-scheme"]')
-
-    if (!meta) {
-      meta = document.createElement('meta')
-      meta.setAttribute('name', 'color-scheme')
-      document.head?.appendChild(meta)
-    }
-
-    meta.setAttribute('content', 'light')
-  })()
-`
 
 const WEBVIEW_PAINT_READY_SCRIPT = `
   new Promise(resolve => {
