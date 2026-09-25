@@ -2290,13 +2290,45 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    frameEl.addEventListener(
-      'dom-ready',
-      () => {
-        void this.revealInteractiveFrame(node, frameEl)
-      },
-      { once: true }
-    )
+    let lightReloadCompleted = false
+
+    const onInteractiveReady = () => {
+      void (async () => {
+        if (
+          this.activeInteractiveNode !== node ||
+          node.frameEl !== frameEl ||
+          !frameEl.isConnected
+        ) {
+          frameEl.removeEventListener('dom-ready', onInteractiveReady)
+          return
+        }
+
+        if (!lightReloadCompleted) {
+          const lightPreferenceApplied = await this.forceWebviewLightPreference(frameEl, true)
+
+          if (
+            lightPreferenceApplied &&
+            this.activeInteractiveNode === node &&
+            node.frameEl === frameEl &&
+            frameEl.isConnected
+          ) {
+            // Obsidian creates the <webview> with its URL already assigned, so
+            // site bootstrap code can run before CDP emulation is attached.
+            // Reload once while the thumbnail is still covering the frame.
+            // On the second navigation the page sees light preference from
+            // its very first script/CSS evaluation, matching thumbnail capture.
+            lightReloadCompleted = true
+            frameEl.reload()
+            return
+          }
+        }
+
+        frameEl.removeEventListener('dom-ready', onInteractiveReady)
+        await this.revealInteractiveFrame(node, frameEl)
+      })()
+    }
+
+    frameEl.addEventListener('dom-ready', onInteractiveReady)
   }
 
   private async forceWebviewLightPreference(
