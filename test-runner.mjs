@@ -10,7 +10,8 @@ try {
       'tests/core-utils.test.ts',
       'tests/preview-cache.test.ts',
       'tests/dynamic-priority-queue.test.ts',
-      'tests/interactive-activation.test.ts'
+      'tests/interactive-activation.test.ts',
+      'tests/generation-coordinator.test.ts'
     ],
     bundle: true,
     platform: 'node',
@@ -28,7 +29,8 @@ try {
       `${outdir}/core-utils.test.mjs`,
       `${outdir}/preview-cache.test.mjs`,
       `${outdir}/dynamic-priority-queue.test.mjs`,
-      `${outdir}/interactive-activation.test.mjs`
+      `${outdir}/interactive-activation.test.mjs`,
+      `${outdir}/generation-coordinator.test.mjs`
     ],
     {
       stdio: 'inherit'
