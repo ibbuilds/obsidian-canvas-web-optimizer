@@ -32,6 +32,10 @@
   pointer-events: none;
 }
 
+.canvas-node.canvas-web-active webview {
+  background-color: #fff !important;
+}
+
 .link-thumbnail {
   position: absolute;
   inset: 0;
