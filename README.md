@@ -121,6 +121,8 @@ Run the regression suite:
 pnpm test
 ```
 
+Test files are discovered automatically from `tests/*.test.ts`, so new regression suites do not require test-runner bookkeeping.
+
 Run formatting, lint, and TypeScript checks:
 
 ```bash
