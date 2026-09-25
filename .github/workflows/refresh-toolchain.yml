@@ -1,0 +1,50 @@
+name: Refresh toolchain lock
+
+on:
+  push:
+    branches:
+      - chore/toolchain-modernization
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: chore/toolchain-modernization
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.1
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Refresh selected development tools
+        run: pnpm up typescript@5.9.3 esbuild@0.25.10 @types/node@22 --save-dev
+
+      - name: Validate upgraded toolchain
+        run: pnpm run build
+
+      - name: Commit lockfile refresh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json pnpm-lock.yaml
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: modernize TypeScript and build tooling"
+          git push origin HEAD:chore/toolchain-modernization
