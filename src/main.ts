@@ -1,4 +1,3 @@
-import { around } from 'monkey-around'
 import {
   type Canvas,
   type CanvasLeaf,
@@ -8,16 +7,30 @@ import {
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
-import { extractCanvasNodeIds, isFatalLoadFailure, pickPreferredConcurrency } from './core-utils'
+import PreviewCache, { CACHE_METADATA_VERSION, type CacheMetadata } from './cache/preview-cache'
+import { type FrameMode, installLinkNodePatches } from './canvas/link-node-patcher'
+import {
+  classifyViewportProximity,
+  extractCanvasNodeIds,
+  isFatalLoadFailure,
+  type RectBounds
+} from './core-utils'
+import DiagnosticsMetrics from './diagnostics/metrics'
+import { formatDiagnosticsReport } from './diagnostics/report'
+import AdaptiveConcurrencyTuner, {
+  type ConcurrencyCounters,
+  type ConcurrencyTuningRecord
+} from './generation/concurrency-tuner'
+import GenerationCoordinator from './generation/coordinator'
+import InteractiveActivationController from './interactive/activation-controller'
+import { forceGuestLightPreference } from './interactive/webview-light'
 import LocalBrowserRenderer, {
   type LocalBrowserRenderResult,
   type LocalBrowserRenderTask
 } from './local-browser-renderer'
 import NetworkPreconnector from './network-preconnector'
-
-const CACHE_METADATA_VERSION = 2
-const CACHE_SCHEMA_VERSION = 2
-const CACHE_SCHEMA_FILENAME = 'cache-schema.json'
+import { openExternalUrl } from './platform/electron-runtime'
+import { GENERATION_LIGHT_THEME_CSS, LIGHT_THEME_SCRIPT } from './web-theme'
 
 const THUMBNAIL_JPEG_QUALITY = 76
 const THUMBNAIL_MAX_LONG_EDGE = 896
@@ -32,28 +45,6 @@ const GENERATION_RETRY_DELAY_MS = 150
 const LOCAL_GENERATION_TIMEOUT_MS = 7500
 const PRECONNECT_LOOKAHEAD_ORIGINS = 6
 const HTTP_WARM_LOOKAHEAD_URLS = 2
-
-const GENERATION_LIGHT_THEME_CSS = `
-  :root {
-    color-scheme: light !important;
-  }
-`
-
-const LIGHT_THEME_SCRIPT = `
-  (() => {
-    document.documentElement.style.setProperty('color-scheme', 'light', 'important')
-
-    let meta = document.querySelector('meta[name="color-scheme"]')
-
-    if (!meta) {
-      meta = document.createElement('meta')
-      meta.setAttribute('name', 'color-scheme')
-      document.head?.appendChild(meta)
-    }
-
-    meta.setAttribute('content', 'light')
-  })()
-`
 
 const WEBVIEW_PAINT_READY_SCRIPT = `
   new Promise(resolve => {
@@ -70,35 +61,7 @@ type ThumbnailImage = {
   toJPEG(quality: number): ArrayBuffer
 }
 
-type ElectronDebuggerLike = {
-  attach(protocolVersion?: string): void
-  isAttached(): boolean
-  sendCommand(method: string, params?: Record<string, unknown>): Promise<unknown>
-}
-
-type ElectronGuestWebContentsLike = {
-  debugger: ElectronDebuggerLike
-  isDestroyed?(): boolean
-}
-
-type ElectronWebContentsModuleLike = {
-  fromId(id: number): ElectronGuestWebContentsLike | undefined
-}
-
-type ElectronRemoteLike = {
-  require?: (specifier: string) => unknown
-  webContents?: ElectronWebContentsModuleLike
-}
-
-type FrameMode = 'generation' | 'preload' | 'interactive'
 type GenerationOutcome = 'success' | 'failure' | 'timeout' | 'preempted' | 'stale' | 'unmounted'
-
-type CacheMetadata = {
-  version?: number
-  url?: string
-  title: string
-  capturedAt?: number
-}
 
 type NodeState = {
   evaluated: boolean
@@ -126,26 +89,13 @@ type LocalConcurrentGeneration = {
   timeoutId: number
 }
 
-type LocalConcurrencyScore = {
-  mean: number
-  samples: number
-}
-
-type LocalConcurrencyTuningRecord = {
-  bestConcurrency: number
-  scores: Record<string, LocalConcurrencyScore>
-}
-
 type PluginData = {
-  localRendererTuning?: Record<string, LocalConcurrencyTuningRecord>
+  localRendererTuning?: Record<string, ConcurrencyTuningRecord>
   [key: string]: unknown
 }
 
-type LocalBatchTuningSnapshot = {
+type LocalBatchTuningSnapshot = ConcurrencyCounters & {
   concurrency: number
-  localGenerationCount: number
-  localFallbacks: number
-  generationPreemptions: number
 }
 
 type ActiveGeneration = {
@@ -180,90 +130,6 @@ type DidFailLoadEvent = Event & {
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => window.setTimeout(resolve, ms))
-}
-
-function getRuntimeRequire(): ((specifier: string) => unknown) | null {
-  const runtimeGlobal = globalThis as typeof globalThis & {
-    require?: (specifier: string) => unknown
-  }
-
-  return typeof runtimeGlobal.require === 'function' ? runtimeGlobal.require : null
-}
-
-function resolveGuestWebContents(
-  frameEl: LinkNode['frameEl']
-): ElectronGuestWebContentsLike | null {
-  const id = frameEl?.getWebContentsId?.()
-
-  if (typeof id !== 'number') return null
-
-  const runtimeRequire = getRuntimeRequire()
-
-  if (!runtimeRequire) return null
-
-  try {
-    const remote = runtimeRequire('@electron/remote') as ElectronRemoteLike
-    const direct = remote.webContents?.fromId(id)
-
-    if (direct) return direct
-
-    const remoteElectron = remote.require?.('electron') as
-      | { webContents?: ElectronWebContentsModuleLike }
-      | undefined
-    const throughRemoteRequire = remoteElectron?.webContents?.fromId(id)
-
-    if (throughRemoteRequire) return throughRemoteRequire
-  } catch {
-    // Try the renderer Electron export as a last resort below.
-  }
-
-  try {
-    const electron = runtimeRequire('electron') as {
-      webContents?: ElectronWebContentsModuleLike
-    }
-
-    return electron.webContents?.fromId(id) ?? null
-  } catch {
-    return null
-  }
-}
-
-function openExternalUrl(url: string): Promise<void> {
-  const runtimeRequire = getRuntimeRequire()
-
-  if (!runtimeRequire) {
-    return Promise.reject(new Error('Electron runtime is unavailable'))
-  }
-
-  try {
-    const remote = runtimeRequire('@electron/remote') as {
-      shell?: {
-        openExternal(target: string): Promise<void>
-      }
-    }
-
-    if (remote.shell?.openExternal) {
-      return remote.shell.openExternal(url)
-    }
-  } catch {
-    // Fall through to the renderer Electron export.
-  }
-
-  try {
-    const electron = runtimeRequire('electron') as {
-      shell?: {
-        openExternal(target: string): Promise<void>
-      }
-    }
-
-    if (electron.shell?.openExternal) {
-      return electron.shell.openExternal(url)
-    }
-  } catch {
-    // Report one stable error below.
-  }
-
-  return Promise.reject(new Error('Electron shell is unavailable'))
 }
 
 function afterTransition(element: HTMLElement, callback: () => void) {
@@ -318,22 +184,20 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   cacheDir = `${this.manifest.dir}/data/linkCache`
 
-  cacheHits = 0
-  cacheMisses = 0
-
-  private readonly thumbnailCacheIds = new Set<string>()
-  private readonly metadataCacheIds = new Set<string>()
-  private readonly metadataMemory = new Map<string, CacheMetadata>()
+  private previewCache!: PreviewCache
   private readonly nodeStates = new WeakMap<LinkNode, NodeState>()
   private readonly requestedFrameModes = new WeakMap<LinkNode, FrameMode>()
   private readonly pendingPlaceholders = new WeakMap<LinkNode, HTMLElement>()
 
-  private generationQueue: GenerationJob[] = []
-  private readonly queuedGenerationIds = new Set<string>()
+  private readonly generationCoordinator = new GenerationCoordinator<GenerationJob>({
+    getKey: job => job.node.id,
+    getPriority: job => this.getGenerationPriority(job.node),
+    isValid: job => Boolean(job.node.nodeEl?.isConnected) && !this.getNodeState(job.node).cached,
+    process: () => this.processThumbnailQueue()
+  })
   private activeGeneration: ActiveGeneration | null = null
   private generationPreload: GenerationPreload | null = null
   private generationPreloadDisabled = false
-  private generationQueueScheduled = false
   private readonly backgroundExecution = new BackgroundExecutionController()
   private backgroundExecutionRelease: (() => void) | null = null
   private networkPreconnector: NetworkPreconnector | null = null
@@ -341,62 +205,31 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly localGenerations = new Map<string, LocalConcurrentGeneration>()
   private pluginData: PluginData = {}
   private localBatchTuning: LocalBatchTuningSnapshot | null = null
-  private localTuningStatus = 'hardware heuristic'
+  private concurrencyTuner: AdaptiveConcurrencyTuner | null = null
 
-  private activeInteractiveNode: LinkNode | null = null
-  private requestedInteractiveNode: LinkNode | null = null
-  private interactiveTransitionRunning = false
+  private readonly interactiveActivation = new InteractiveActivationController<LinkNode>({
+    isAvailable: node => this.isNodeContentMounted(node),
+    prepare: node => {
+      this.cancelGenerationPreload(true)
+      this.abortLocalGenerations(true)
+      this.abortActiveGeneration(true)
+      this.releaseBackgroundExecution()
+      this.removePendingPlaceholder(node)
+    },
+    activate: node => {
+      this.setInteractiveClasses(node, true)
+      this.requestNodeFrame(node, 'interactive')
+    },
+    deactivate: node => this.deactivateInteractive(node)
+  })
   private interactiveLightPreferenceStatus = 'not attempted'
   private interactiveMatchMediaLight: boolean | null = null
 
-  private generationCompleted = 0
-  private generationFailed = 0
-  private generationTimedOut = 0
-  private generationPreemptions = 0
-  private generationPreloadsStarted = 0
-  private generationPreloadsReady = 0
-  private generationPreloadHits = 0
-  private generationPreloadFailures = 0
-  private generationPreloadReadyTotalMs = 0
-  private preloadPromotionWaitTotalMs = 0
-  private preloadPromotionWaitCount = 0
-  private preloadImmediateHits = 0
-  private preloadPendingHits = 0
-  private generationColdTotalMs = 0
-  private generationColdCount = 0
-  private generationPreloadedTotalMs = 0
-  private generationPreloadedCount = 0
-  private generationTotalMs = 0
-  private batchStartedAt: number | null = null
-  private batchCompleted = 0
-  private lastBatchDurationMs = 0
-  private lastBatchCompleted = 0
-  private queueWaitTotalMs = 0
-  private queueWaitCount = 0
-  private frameCreateTotalMs = 0
-  private frameCreateCount = 0
-  private domReadyTotalMs = 0
-  private domReadyCount = 0
-  private themeTotalMs = 0
-  private themeCount = 0
-  private paintReadyTotalMs = 0
-  private paintReadyCount = 0
-  private captureTotalMs = 0
-  private capturePageTotalMs = 0
-  private capturePageCount = 0
-  private encodeTotalMs = 0
-  private encodeCount = 0
-  private thumbnailWriteTotalMs = 0
-  private thumbnailWriteCount = 0
-  private metadataWriteTotalMs = 0
-  private metadataWriteCount = 0
-  private previewReadyTotalMs = 0
-  private previewReadyCount = 0
-  private capturedThumbnailBytes = 0
-  private localGenerationTotalMs = 0
-  private localGenerationCount = 0
-  private localFallbacks = 0
-  private localTimeouts = 0
+  private get activeInteractiveNode(): LinkNode | null {
+    return this.interactiveActivation.activeNode
+  }
+
+  private readonly metrics = new DiagnosticsMetrics()
 
   async onload() {
     this.addCommand({
@@ -423,9 +256,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       })
     )
 
-    await this.app.vault.adapter.mkdir(this.cacheDir)
-    await this.ensureCacheSchema()
-    await this.buildCacheIndex()
+    this.previewCache = new PreviewCache(this.app, this.cacheDir, (message, debug) =>
+      this.log(message, debug)
+    )
+    await this.previewCache.initialize()
 
     const loadedData = await this.loadData()
 
@@ -434,31 +268,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.networkPreconnector = new NetworkPreconnector(this.getWebviewPartition())
     this.localBrowserRenderer = new LocalBrowserRenderer()
 
-    const tuningRecord = this.pluginData.localRendererTuning?.[this.localBrowserRenderer.tuningKey]
-
-    if (tuningRecord) {
-      const candidates = this.localBrowserRenderer.tuningCandidates
-      const untested = candidates.find(
-        candidate => tuningRecord.scores[String(candidate)] === undefined
-      )
-
-      if (untested !== undefined) {
-        this.localBrowserRenderer.setPoolSize(untested)
-        const testedCount =
-          candidates.length -
-          candidates.filter(candidate => tuningRecord.scores[String(candidate)] === undefined)
-            .length
-        this.localTuningStatus = `calibrating ${untested} (${testedCount}/${candidates.length} tested)`
-      } else {
-        const best = this.getPreferredLocalConcurrency(tuningRecord, this.localBrowserRenderer)
-
-        tuningRecord.bestConcurrency = best
-        this.localBrowserRenderer.setPoolSize(best)
-        this.localTuningStatus = `saved best ${best}`
-      }
-    } else {
-      this.localTuningStatus = `hardware heuristic ${this.localBrowserRenderer.poolSize}`
-    }
+    this.concurrencyTuner = new AdaptiveConcurrencyTuner(this.localBrowserRenderer)
+    this.concurrencyTuner.initialize(
+      this.pluginData.localRendererTuning?.[this.localBrowserRenderer.tuningKey]
+    )
 
     this.app.workspace.onLayoutReady(() => {
       if (this.tryPatchLinkNode()) return
@@ -485,9 +298,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   onunload() {
     this.log('Unloading plugin')
 
-    this.generationQueue = []
-    this.queuedGenerationIds.clear()
-    this.requestedInteractiveNode = null
+    this.generationCoordinator.clear()
+    this.interactiveActivation.cancelPending()
     this.abortActiveGeneration(false)
     this.cancelGenerationPreload(true)
     this.abortLocalGenerations(false)
@@ -496,6 +308,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.backgroundExecution.dispose()
     this.localBrowserRenderer?.dispose()
     this.localBrowserRenderer = null
+    this.concurrencyTuner = null
     this.networkPreconnector = null
 
     this.reloadActiveCanvasViews()
@@ -527,65 +340,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     console.log(`[${this.name}]`, msg)
-  }
-
-  private async ensureCacheSchema() {
-    const schemaPath = `${this.cacheDir}/${CACHE_SCHEMA_FILENAME}`
-    let currentVersion = 0
-
-    try {
-      if (await this.app.vault.adapter.exists(schemaPath)) {
-        const raw = await this.app.vault.adapter.read(schemaPath)
-        const parsed = JSON.parse(raw) as { version?: number }
-        currentVersion = parsed.version ?? 0
-      }
-    } catch (error) {
-      this.log(error, true)
-    }
-
-    if (currentVersion === CACHE_SCHEMA_VERSION) return
-
-    const listing = await this.app.vault.adapter.list(this.cacheDir)
-    const staleFiles = listing.files.filter(path =>
-      /(?:\.thumbnail\.jpg|\.metadata\.json|\/url-index\.json)$/.test(path)
-    )
-
-    await Promise.all(
-      staleFiles.map(async path => {
-        try {
-          await this.app.vault.adapter.remove(path)
-        } catch (error) {
-          this.log(error, true)
-        }
-      })
-    )
-
-    await this.app.vault.adapter.write(
-      schemaPath,
-      JSON.stringify({
-        version: CACHE_SCHEMA_VERSION,
-        migratedAt: Date.now()
-      })
-    )
-  }
-
-  private async buildCacheIndex() {
-    const listing = await this.app.vault.adapter.list(this.cacheDir)
-
-    for (const path of listing.files) {
-      const thumbnailMatch = path.match(/([^/]+)\.thumbnail\.jpg$/)
-
-      if (thumbnailMatch) {
-        this.thumbnailCacheIds.add(thumbnailMatch[1])
-        continue
-      }
-
-      const metadataMatch = path.match(/([^/]+)\.metadata\.json$/)
-
-      if (metadataMatch) {
-        this.metadataCacheIds.add(metadataMatch[1])
-      }
-    }
   }
 
   private getNodeState(node: LinkNode): NodeState {
@@ -627,11 +381,36 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private hasIndexedCache(node: LinkNode): boolean {
-    return this.thumbnailCacheIds.has(node.id) && this.metadataCacheIds.has(node.id)
+    return this.previewCache.has(node.id)
+  }
+
+  private getNodeCanvasBounds(node: LinkNode): RectBounds | null {
+    if (
+      typeof node.x !== 'number' ||
+      typeof node.y !== 'number' ||
+      typeof node.width !== 'number' ||
+      typeof node.height !== 'number'
+    ) {
+      return null
+    }
+
+    return {
+      minX: node.x,
+      minY: node.y,
+      maxX: node.x + node.width,
+      maxY: node.y + node.height
+    }
   }
 
   private isNodeNearVisibleViewport(node: LinkNode): boolean {
     if (!node.nodeEl?.isConnected) return false
+
+    const canvasBounds = this.getNodeCanvasBounds(node)
+    const viewport = node.canvas?.getViewportBBox?.()
+
+    if (canvasBounds && viewport) {
+      return classifyViewportProximity(canvasBounds, viewport) === 0
+    }
 
     const rect = node.nodeEl.getBoundingClientRect()
     const viewportRect = node.canvas?.wrapperEl?.getBoundingClientRect()
@@ -645,23 +424,21 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return false
     }
 
-    const viewport =
+    const fallbackViewport =
       viewportRect && viewportRect.width > 0 && viewportRect.height > 0
         ? viewportRect
         : {
             left: 0,
             top: 0,
             right: node.nodeEl.ownerDocument.defaultView?.innerWidth ?? 0,
-            bottom: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0,
-            width: node.nodeEl.ownerDocument.defaultView?.innerWidth ?? 0,
-            height: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0
+            bottom: node.nodeEl.ownerDocument.defaultView?.innerHeight ?? 0
           }
 
     return (
-      rect.right >= viewport.left &&
-      rect.left <= viewport.right &&
-      rect.bottom >= viewport.top &&
-      rect.top <= viewport.bottom
+      rect.right >= fallbackViewport.left &&
+      rect.left <= fallbackViewport.right &&
+      rect.bottom >= fallbackViewport.top &&
+      rect.top <= fallbackViewport.bottom
     )
   }
 
@@ -717,13 +494,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private async evaluateNodeCache(node: LinkNode, state: NodeState) {
     try {
-      let metadata = this.metadataMemory.get(node.id)
-
-      if (!metadata) {
-        const raw = await this.app.vault.adapter.read(`${this.cacheDir}/${node.id}.metadata.json`)
-        metadata = JSON.parse(raw) as CacheMetadata
-        this.metadataMemory.set(node.id, metadata)
-      }
+      const metadata = await this.previewCache.readMetadata(node.id)
 
       if (metadata?.version !== CACHE_METADATA_VERSION || typeof metadata.title !== 'string') {
         this.markNodeCacheMiss(node, state)
@@ -738,7 +509,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       state.evaluated = true
       state.cached = true
       state.metadata = metadata
-      this.cacheHits++
+      this.metrics.cacheHits++
 
       node.updateNodeLabel(metadata.title)
       this.applyPreparedNodeState(node, state)
@@ -753,10 +524,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     state.cached = false
     state.metadata = null
 
-    this.thumbnailCacheIds.delete(node.id)
-    this.metadataCacheIds.delete(node.id)
-    this.metadataMemory.delete(node.id)
-    this.cacheMisses++
+    this.previewCache.forget(node.id)
+    this.metrics.cacheMisses++
 
     this.applyPreparedNodeState(node, state)
   }
@@ -914,9 +683,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     preview.alt = 'Webpage thumbnail'
     preview.decoding = 'async'
     preview.draggable = false
-    const resourcePath = this.app.vault.adapter.getResourcePath(
-      `${this.cacheDir}/${node.id}.thumbnail.jpg`
-    )
+    const resourcePath = this.previewCache.resourcePath(node.id)
     const cacheVersion = this.getNodeState(node).metadata?.capturedAt
 
     if (cacheVersion) {
@@ -989,9 +756,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     state.cached = false
     state.metadata = null
 
-    this.thumbnailCacheIds.delete(node.id)
-    this.metadataCacheIds.delete(node.id)
-    this.metadataMemory.delete(node.id)
+    this.previewCache.forget(node.id)
     this.ensurePendingPlaceholder(node)
 
     if (this.activeGeneration?.node === node) {
@@ -1024,28 +789,28 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (
       this.activeGeneration?.node.id === node.id ||
       this.localGenerations.has(node.id) ||
-      this.queuedGenerationIds.has(node.id)
+      this.generationCoordinator.has(node.id)
     ) {
       return
     }
 
     if (
-      this.batchStartedAt === null &&
+      this.metrics.batchStartedAt === null &&
       !this.activeGeneration &&
       this.localGenerations.size === 0 &&
-      this.generationQueue.length === 0
+      this.generationCoordinator.length === 0
     ) {
-      this.batchStartedAt = performance.now()
-      this.batchCompleted = 0
+      this.metrics.batchStartedAt = performance.now()
+      this.metrics.batchCompleted = 0
 
       const renderer = this.localBrowserRenderer
 
       this.localBatchTuning = renderer?.available
         ? {
             concurrency: renderer.poolSize,
-            localGenerationCount: this.localGenerationCount,
-            localFallbacks: this.localFallbacks,
-            generationPreemptions: this.generationPreemptions
+            localGenerationCount: this.metrics.localGenerationCount,
+            localFallbacks: this.metrics.localFallbacks,
+            generationPreemptions: this.metrics.generationPreemptions
           }
         : null
     }
@@ -1057,13 +822,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       forceNative
     }
 
-    if (front) {
-      this.generationQueue.unshift(job)
-    } else {
-      this.generationQueue.push(job)
-    }
-
-    this.queuedGenerationIds.add(node.id)
+    this.generationCoordinator.enqueue(job, front)
     this.scheduleThumbnailQueue()
   }
 
@@ -1072,20 +831,22 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (
       this.activeInteractiveNode ||
-      this.generationQueueScheduled ||
-      this.generationQueue.length === 0
+      this.generationCoordinator.isScheduled ||
+      this.generationCoordinator.length === 0
     ) {
       this.releaseBackgroundExecutionIfIdle()
       return
     }
 
-    this.ensureBackgroundExecution(this.generationQueue[0].node)
-    this.generationQueueScheduled = true
+    const nextJob = this.generationCoordinator.peek()
 
-    queueMicrotask(() => {
-      this.generationQueueScheduled = false
-      void this.processThumbnailQueue()
-    })
+    if (!nextJob) {
+      this.releaseBackgroundExecutionIfIdle()
+      return
+    }
+
+    this.ensureBackgroundExecution(nextJob.node)
+    this.generationCoordinator.schedule()
   }
 
   private async processThumbnailQueue() {
@@ -1104,8 +865,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         if (!localJob) break
 
         if (!this.ensureNodeContentMounted(localJob.node)) {
-          this.generationQueue.unshift(localJob)
-          this.queuedGenerationIds.add(localJob.node.id)
+          this.generationCoordinator.enqueue(localJob, true)
           break
         }
 
@@ -1117,8 +877,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
         if (nativeFallbackJob) {
           if (!this.ensureNodeContentMounted(nativeFallbackJob.node)) {
-            this.generationQueue.unshift(nativeFallbackJob)
-            this.queuedGenerationIds.add(nativeFallbackJob.node.id)
+            this.generationCoordinator.enqueue(nativeFallbackJob, true)
           } else {
             this.preconnectQueuedWork()
             this.warmQueuedWork()
@@ -1147,8 +906,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     if (!this.ensureNodeContentMounted(job.node)) {
-      this.generationQueue.unshift(job)
-      this.queuedGenerationIds.add(job.node.id)
+      this.generationCoordinator.enqueue(job, true)
       return
     }
 
@@ -1162,52 +920,23 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private preconnectQueuedWork() {
-    if (!this.networkPreconnector || this.generationQueue.length === 0) return
+    if (!this.networkPreconnector || this.generationCoordinator.length === 0) return
 
-    const urls = this.generationQueue
-      .slice()
-      .sort(
-        (left, right) =>
-          this.getGenerationPriority(left.node) - this.getGenerationPriority(right.node)
-      )
-      .map(job => job.node.url)
+    const urls = this.generationCoordinator.values().map(job => job.node.url)
 
     this.networkPreconnector.preconnect(urls, PRECONNECT_LOOKAHEAD_ORIGINS)
   }
 
   private warmQueuedWork() {
-    if (!this.networkPreconnector || this.generationQueue.length === 0) return
+    if (!this.networkPreconnector || this.generationCoordinator.length === 0) return
 
-    const urls = this.generationQueue
-      .slice()
-      .sort(
-        (left, right) =>
-          this.getGenerationPriority(left.node) - this.getGenerationPriority(right.node)
-      )
-      .map(job => job.node.url)
+    const urls = this.generationCoordinator.values().map(job => job.node.url)
 
     this.networkPreconnector.warm(urls, HTTP_WARM_LOOKAHEAD_URLS)
   }
 
   private peekNextGenerationJob(): GenerationJob | null {
-    let bestJob: GenerationJob | null = null
-    let bestPriority = Number.POSITIVE_INFINITY
-
-    for (let index = this.generationQueue.length - 1; index >= 0; index--) {
-      const job = this.generationQueue[index]
-      const { node } = job
-
-      if (!node.nodeEl?.isConnected || this.getNodeState(node).cached) continue
-
-      const priority = this.getGenerationPriority(node)
-
-      if (priority <= bestPriority) {
-        bestPriority = priority
-        bestJob = job
-      }
-    }
-
-    return bestJob
+    return this.generationCoordinator.peek()
   }
 
   private startNextGenerationPreload() {
@@ -1241,7 +970,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     this.generationPreload = preload
-    this.generationPreloadsStarted++
+    this.metrics.generationPreloadsStarted++
     this.requestNodeFrame(job.node, 'preload')
   }
 
@@ -1257,11 +986,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (ready) {
       preload.readyAt = performance.now()
-      this.generationPreloadsReady++
-      this.generationPreloadReadyTotalMs += preload.readyAt - preload.startedAt
+      this.metrics.generationPreloadsReady++
+      this.metrics.generationPreloadReadyTotalMs += preload.readyAt - preload.startedAt
     } else {
       if (runtimeFailure) {
-        this.generationPreloadFailures++
+        this.metrics.generationPreloadFailures++
         this.generationPreloadDisabled = true
       }
 
@@ -1290,88 +1019,23 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private dequeueNextGenerationJob(
     predicate: (job: GenerationJob) => boolean = () => true
   ): GenerationJob | null {
-    let bestIndex = -1
-    let bestPriority = Number.POSITIVE_INFINITY
+    const job = this.generationCoordinator.dequeue(predicate)
 
-    for (let index = this.generationQueue.length - 1; index >= 0; index--) {
-      const job = this.generationQueue[index]
+    if (!job) return null
 
-      if (!predicate(job)) continue
-
-      const { node } = job
-
-      if (!node.nodeEl?.isConnected) {
-        this.generationQueue.splice(index, 1)
-        this.queuedGenerationIds.delete(node.id)
-        continue
-      }
-
-      const state = this.getNodeState(node)
-
-      if (state.cached) {
-        this.generationQueue.splice(index, 1)
-        this.queuedGenerationIds.delete(node.id)
-        continue
-      }
-
-      const priority = this.getGenerationPriority(node)
-
-      if (priority <= bestPriority) {
-        bestPriority = priority
-        bestIndex = index
-      }
-    }
-
-    if (bestIndex < 0) return null
-
-    const [job] = this.generationQueue.splice(bestIndex, 1)
-    this.queuedGenerationIds.delete(job.node.id)
-    this.queueWaitTotalMs += performance.now() - job.enqueuedAt
-    this.queueWaitCount++
+    this.metrics.queueWaitTotalMs += performance.now() - job.enqueuedAt
+    this.metrics.queueWaitCount++
 
     return job
   }
 
   private getGenerationPriority(node: LinkNode): number {
     const viewport = node.canvas?.getViewportBBox?.()
+    const bounds = this.getNodeCanvasBounds(node)
 
-    if (
-      !viewport ||
-      typeof node.x !== 'number' ||
-      typeof node.y !== 'number' ||
-      typeof node.width !== 'number' ||
-      typeof node.height !== 'number'
-    ) {
-      return 1
-    }
+    if (!viewport || !bounds) return 1
 
-    const nodeMinX = node.x
-    const nodeMinY = node.y
-    const nodeMaxX = node.x + node.width
-    const nodeMaxY = node.y + node.height
-
-    const intersects = (minX: number, minY: number, maxX: number, maxY: number) =>
-      nodeMaxX >= minX && nodeMinX <= maxX && nodeMaxY >= minY && nodeMinY <= maxY
-
-    if (intersects(viewport.minX, viewport.minY, viewport.maxX, viewport.maxY)) {
-      return 0
-    }
-
-    const marginX = viewport.maxX - viewport.minX
-    const marginY = viewport.maxY - viewport.minY
-
-    if (
-      intersects(
-        viewport.minX - marginX,
-        viewport.minY - marginY,
-        viewport.maxX + marginX,
-        viewport.maxY + marginY
-      )
-    ) {
-      return 1
-    }
-
-    return 2
+    return classifyViewportProximity(bounds, viewport)
   }
 
   private generateQueuedThumbnail(job: GenerationJob): Promise<void> {
@@ -1408,23 +1072,23 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         if (outcome === 'success') {
           const generationDuration = performance.now() - session.startedAt
 
-          this.generationCompleted++
-          this.batchCompleted++
-          this.generationTotalMs += generationDuration
+          this.metrics.generationCompleted++
+          this.metrics.batchCompleted++
+          this.metrics.generationTotalMs += generationDuration
 
           if (session.usedPreload) {
-            this.generationPreloadedTotalMs += generationDuration
-            this.generationPreloadedCount++
+            this.metrics.generationPreloadedTotalMs += generationDuration
+            this.metrics.generationPreloadedCount++
           } else {
-            this.generationColdTotalMs += generationDuration
-            this.generationColdCount++
+            this.metrics.generationColdTotalMs += generationDuration
+            this.metrics.generationColdCount++
           }
         } else if (outcome === 'timeout') {
-          this.generationTimedOut++
+          this.metrics.generationTimedOut++
         } else if (outcome === 'failure') {
-          this.generationFailed++
+          this.metrics.generationFailed++
         } else if (outcome === 'preempted') {
-          this.generationPreemptions++
+          this.metrics.generationPreemptions++
         }
 
         if (session.usedPreload && (outcome === 'failure' || outcome === 'timeout')) {
@@ -1478,19 +1142,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       if (preload) {
         session.usedPreload = true
-        this.generationPreloadHits++
+        this.metrics.generationPreloadHits++
 
         const promotionWaitStartedAt = performance.now()
 
         if (preload.readyAt !== undefined) {
-          this.preloadImmediateHits++
+          this.metrics.preloadImmediateHits++
         } else {
-          this.preloadPendingHits++
+          this.metrics.preloadPendingHits++
         }
 
         void preload.readyPromise.then(ready => {
-          this.preloadPromotionWaitTotalMs += performance.now() - promotionWaitStartedAt
-          this.preloadPromotionWaitCount++
+          this.metrics.preloadPromotionWaitTotalMs += performance.now() - promotionWaitStartedAt
+          this.metrics.preloadPromotionWaitCount++
           if (this.activeGeneration !== session) return
 
           const frameEl = preload.frameEl
@@ -1532,7 +1196,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     generation.timeoutId = window.setTimeout(() => {
       if (!this.isCurrentLocalGeneration(generation)) return
 
-      this.localTimeouts++
+      this.metrics.localTimeouts++
       this.log(`Local browser render timed out for ${generation.url}; falling back to native`, true)
       this.finishLocalGeneration(generation, 'fallback')
     }, LOCAL_GENERATION_TIMEOUT_MS)
@@ -1577,19 +1241,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (outcome === 'success') {
       const generationDuration = performance.now() - generation.startedAt
 
-      this.generationCompleted++
-      this.batchCompleted++
-      this.generationTotalMs += generationDuration
-      this.localGenerationTotalMs += generationDuration
-      this.localGenerationCount++
+      this.metrics.generationCompleted++
+      this.metrics.batchCompleted++
+      this.metrics.generationTotalMs += generationDuration
+      this.metrics.localGenerationTotalMs += generationDuration
+      this.metrics.localGenerationCount++
     } else if (outcome === 'fallback') {
-      this.localFallbacks++
+      this.metrics.localFallbacks++
 
       if (!this.getNodeState(node).cached && node.nodeEl?.isConnected) {
         this.enqueueThumbnailGeneration(node, true, job.attempt, true)
       }
     } else if (outcome === 'preempted') {
-      this.generationPreemptions++
+      this.metrics.generationPreemptions++
     }
 
     if (
@@ -1661,14 +1325,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     try {
       const thumbnailWriteStartedAt = performance.now()
-      await this.app.vault.adapter.writeBinary(
-        `${this.cacheDir}/${node.id}.thumbnail.jpg`,
-        result.jpeg
-      )
-      this.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
-      this.thumbnailWriteCount++
-      this.captureTotalMs += performance.now() - captureStartedAt
-      this.capturedThumbnailBytes += result.jpeg.byteLength
+      await this.previewCache.writeThumbnail(node.id, result.jpeg)
+      this.metrics.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
+      this.metrics.thumbnailWriteCount++
+      this.metrics.captureTotalMs += performance.now() - captureStartedAt
+      this.metrics.capturedThumbnailBytes += result.jpeg.byteLength
     } catch (error) {
       this.log(error, true)
       this.finishLocalGeneration(generation, 'fallback')
@@ -1702,13 +1363,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     try {
       const metadataWriteStartedAt = performance.now()
 
-      await this.app.vault.adapter.write(
-        `${this.cacheDir}/${node.id}.metadata.json`,
-        JSON.stringify(metadata)
-      )
+      await this.previewCache.writeMetadata(node.id, metadata)
 
-      this.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
-      this.metadataWriteCount++
+      this.metrics.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
+      this.metrics.metadataWriteCount++
     } catch (error) {
       this.log(error, true)
       this.finishLocalGeneration(generation, 'fallback')
@@ -1721,16 +1379,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     state.cached = true
     state.metadata = metadata
 
-    this.thumbnailCacheIds.add(node.id)
-    this.metadataCacheIds.add(node.id)
-    this.metadataMemory.set(node.id, metadata)
-
     node.updateNodeLabel(title)
 
     const previewStartedAt = performance.now()
     const previewReady = await this.showPreviewOverFrame(node, false)
-    this.previewReadyTotalMs += performance.now() - previewStartedAt
-    this.previewReadyCount++
+    this.metrics.previewReadyTotalMs += performance.now() - previewStartedAt
+    this.metrics.previewReadyCount++
 
     if (!this.isCurrentLocalGeneration(generation)) return
 
@@ -1741,14 +1395,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       failedState.cached = false
       failedState.metadata = null
 
-      this.thumbnailCacheIds.delete(node.id)
-      this.metadataCacheIds.delete(node.id)
-      this.metadataMemory.delete(node.id)
-
-      await Promise.allSettled([
-        this.app.vault.adapter.remove(`${this.cacheDir}/${node.id}.thumbnail.jpg`),
-        this.app.vault.adapter.remove(`${this.cacheDir}/${node.id}.metadata.json`)
-      ])
+      await this.previewCache.remove(node.id)
 
       this.finishLocalGeneration(generation, 'fallback')
       return
@@ -1775,16 +1422,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (
       this.activeGeneration ||
       this.localGenerations.size > 0 ||
-      this.generationQueue.length > 0
+      this.generationCoordinator.length > 0
     ) {
       return
     }
 
-    if (this.batchStartedAt !== null) {
-      this.lastBatchDurationMs = performance.now() - this.batchStartedAt
-      this.lastBatchCompleted = this.batchCompleted
-      this.batchStartedAt = null
-      this.batchCompleted = 0
+    if (this.metrics.batchStartedAt !== null) {
+      this.metrics.lastBatchDurationMs = performance.now() - this.metrics.batchStartedAt
+      this.metrics.lastBatchCompleted = this.metrics.batchCompleted
+      this.metrics.batchStartedAt = null
+      this.metrics.batchCompleted = 0
 
       const tuningSnapshot = this.localBatchTuning
       this.localBatchTuning = null
@@ -1792,20 +1439,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       if (tuningSnapshot) {
         void this.observeLocalConcurrencyBatch(
           tuningSnapshot,
-          this.lastBatchCompleted,
-          this.lastBatchDurationMs
+          this.metrics.lastBatchCompleted,
+          this.metrics.lastBatchDurationMs
         )
       }
     }
 
     this.releaseBackgroundExecution()
-  }
-
-  private getPreferredLocalConcurrency(
-    record: LocalConcurrencyTuningRecord,
-    renderer: LocalBrowserRenderer
-  ): number {
-    return pickPreferredConcurrency(renderer.tuningCandidates, record.scores, renderer.poolSize)
   }
 
   private async observeLocalConcurrencyBatch(
@@ -1814,82 +1454,30 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     durationMs: number
   ) {
     const renderer = this.localBrowserRenderer
+    const tuner = this.concurrencyTuner
 
-    if (!renderer?.available || completed < 6 || durationMs <= 0) return
+    if (!renderer || !tuner) return
 
-    const localGenerated = this.localGenerationCount - snapshot.localGenerationCount
-    const fallbacks = this.localFallbacks - snapshot.localFallbacks
-    const preemptions = this.generationPreemptions - snapshot.generationPreemptions
-
-    if (localGenerated < Math.max(4, Math.floor(completed * 0.6)) || preemptions > 0) {
-      this.localTuningStatus = 'learning skipped (mixed/preempted batch)'
-      return
-    }
-
-    const throughput = completed / (durationMs / 1000)
-    const fallbackRate = fallbacks / Math.max(1, localGenerated)
-    const reliabilityFactor = Math.max(0.65, 1 - fallbackRate * 0.5)
-    const score = throughput * reliabilityFactor
     const key = renderer.tuningKey
+    const observation = tuner.observe(
+      this.pluginData.localRendererTuning?.[key],
+      snapshot,
+      {
+        localGenerationCount: this.metrics.localGenerationCount,
+        localFallbacks: this.metrics.localFallbacks,
+        generationPreemptions: this.metrics.generationPreemptions
+      },
+      completed,
+      durationMs
+    )
+
+    if (!observation.shouldPersist || !observation.record) return
 
     if (!this.pluginData.localRendererTuning) {
       this.pluginData.localRendererTuning = {}
     }
 
-    const record = this.pluginData.localRendererTuning[key] ?? {
-      bestConcurrency: snapshot.concurrency,
-      scores: {}
-    }
-
-    const scoreKey = String(snapshot.concurrency)
-    const existing = record.scores[scoreKey]
-
-    record.scores[scoreKey] = existing
-      ? {
-          mean: (existing.mean * existing.samples + score) / (existing.samples + 1),
-          samples: existing.samples + 1
-        }
-      : {
-          mean: score,
-          samples: 1
-        }
-
-    const candidates = renderer.tuningCandidates
-    const best = this.getPreferredLocalConcurrency(record, renderer)
-
-    record.bestConcurrency = best
-
-    const untested = candidates.find(candidate => record.scores[String(candidate)] === undefined)
-
-    if (untested !== undefined) {
-      renderer.setPoolSize(untested)
-      const testedCount =
-        candidates.length -
-        candidates.filter(candidate => record.scores[String(candidate)] === undefined).length
-      this.localTuningStatus = `calibrating ${untested}; provisional best ${best} (${testedCount}/${candidates.length})`
-    } else {
-      const scored = candidates
-        .map(concurrency => ({
-          concurrency,
-          score: record.scores[String(concurrency)]?.mean ?? 0,
-          samples: record.scores[String(concurrency)]?.samples ?? 0
-        }))
-        .sort((left, right) => right.score - left.score)
-      const topScore = scored[0]?.score ?? 0
-      const confirmation = scored
-        .filter(entry => entry.score >= topScore * 0.97 && entry.samples < 2)
-        .sort((left, right) => left.concurrency - right.concurrency)[0]
-
-      if (confirmation) {
-        renderer.setPoolSize(confirmation.concurrency)
-        this.localTuningStatus = `confirming ${confirmation.concurrency}; provisional best ${best}`
-      } else {
-        renderer.setPoolSize(best)
-        this.localTuningStatus = `settled at ${best}`
-      }
-    }
-
-    this.pluginData.localRendererTuning[key] = record
+    this.pluginData.localRendererTuning[key] = observation.record
 
     try {
       await this.saveData(this.pluginData)
@@ -1917,13 +1505,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private removeQueuedGeneration(node: LinkNode) {
-    if (!this.queuedGenerationIds.delete(node.id)) return
-
-    const index = this.generationQueue.findIndex(job => job.node === node)
-
-    if (index >= 0) {
-      this.generationQueue.splice(index, 1)
-    }
+    this.generationCoordinator.remove(node.id)
   }
 
   private handleNodeUrlChanged(node: LinkNode) {
@@ -1967,6 +1549,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handleBreakpointUpdate(node: LinkNode) {
+    this.generationCoordinator.markPrioritiesDirty()
+
     const session = this.activeGeneration
     const isInteractive = this.activeInteractiveNode === node
     const isGenerating = session?.node === node
@@ -2040,59 +1624,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private requestInteractiveActivation(node: LinkNode) {
-    this.requestedInteractiveNode = node
-
-    if (this.interactiveTransitionRunning) return
-
-    void this.processInteractiveActivationRequests()
-  }
-
-  private async processInteractiveActivationRequests() {
-    if (this.interactiveTransitionRunning) return
-
-    this.interactiveTransitionRunning = true
-
-    try {
-      while (this.requestedInteractiveNode) {
-        const requestedNode = this.requestedInteractiveNode
-        this.requestedInteractiveNode = null
-
-        if (
-          !this.isNodeContentMounted(requestedNode) ||
-          this.activeInteractiveNode === requestedNode
-        ) {
-          continue
-        }
-
-        if (this.activeInteractiveNode) {
-          await this.deactivateInteractive(this.activeInteractiveNode)
-        }
-
-        if (this.requestedInteractiveNode) {
-          continue
-        }
-
-        if (!this.isNodeContentMounted(requestedNode)) {
-          continue
-        }
-
-        this.cancelGenerationPreload(true)
-        this.abortLocalGenerations(true)
-        this.abortActiveGeneration(true)
-        this.releaseBackgroundExecution()
-        this.removePendingPlaceholder(requestedNode)
-
-        this.activeInteractiveNode = requestedNode
-        this.setInteractiveClasses(requestedNode, true)
-        this.requestNodeFrame(requestedNode, 'interactive')
-      }
-    } finally {
-      this.interactiveTransitionRunning = false
-
-      if (this.requestedInteractiveNode) {
-        void this.processInteractiveActivationRequests()
-      }
-    }
+    this.interactiveActivation.request(node)
   }
 
   private async deactivateInteractive(node: LinkNode) {
@@ -2154,8 +1686,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (this.activeInteractiveNode !== node) return
 
     this.setInteractiveClasses(node, false)
-    this.activeInteractiveNode = null
-    this.scheduleThumbnailQueue()
+
+    if (this.interactiveActivation.clear(node)) {
+      this.scheduleThumbnailQueue()
+    }
   }
 
   private setInteractiveClasses(node: LinkNode, active: boolean) {
@@ -2222,8 +1756,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
           const themeStartedAt = performance.now()
           await this.applyGenerationLightTheme(frameEl)
-          this.themeTotalMs += performance.now() - themeStartedAt
-          this.themeCount++
+          this.metrics.themeTotalMs += performance.now() - themeStartedAt
+          this.metrics.themeCount++
 
           const paintStartedAt = performance.now()
 
@@ -2236,8 +1770,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
             // Best effort, matching the normal generation path.
           }
 
-          this.paintReadyTotalMs += performance.now() - paintStartedAt
-          this.paintReadyCount++
+          this.metrics.paintReadyTotalMs += performance.now() - paintStartedAt
+          this.metrics.paintReadyCount++
 
           if (node.frameEl !== frameEl || !frameEl.isConnected) {
             this.settleGenerationPreload(preload, false, true)
@@ -2293,8 +1827,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         session.frameCreatedAt === undefined
       ) {
         session.frameCreatedAt = performance.now()
-        this.frameCreateTotalMs += session.frameCreatedAt - session.frameRequestedAt
-        this.frameCreateCount++
+        this.metrics.frameCreateTotalMs += session.frameCreatedAt - session.frameRequestedAt
+        this.metrics.frameCreateCount++
       }
 
       frameEl.addEventListener(
@@ -2304,10 +1838,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
           if (currentSession?.node === node && currentSession.domReadyAt === undefined) {
             currentSession.domReadyAt = performance.now()
-            this.domReadyTotalMs +=
+            this.metrics.domReadyTotalMs +=
               currentSession.domReadyAt -
               (currentSession.frameCreatedAt ?? currentSession.startedAt)
-            this.domReadyCount++
+            this.metrics.domReadyCount++
           }
 
           void this.captureGeneratedFrame(node, frameEl)
@@ -2363,60 +1897,17 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     frameEl: LinkNode['frameEl'],
     trackInteractive = false
   ): Promise<boolean> {
-    if (!frameEl?.isConnected) {
-      if (trackInteractive) {
-        this.interactiveLightPreferenceStatus = 'frame unavailable'
-      }
+    const result = await forceGuestLightPreference(frameEl)
 
-      return false
+    if (trackInteractive) {
+      this.interactiveLightPreferenceStatus = result.status
     }
 
-    const guest = resolveGuestWebContents(frameEl)
-
-    if (!guest || guest.isDestroyed?.()) {
-      if (trackInteractive) {
-        this.interactiveLightPreferenceStatus = 'guest WebContents unavailable'
-      }
-
-      return false
+    if (result.error) {
+      this.log(`Unable to force light color preference for webview: ${result.error.message}`, true)
     }
 
-    try {
-      if (!guest.debugger.isAttached()) {
-        try {
-          guest.debugger.attach('1.3')
-        } catch {
-          guest.debugger.attach()
-        }
-      }
-
-      await guest.debugger.sendCommand('Emulation.setEmulatedMedia', {
-        media: 'screen',
-        features: [{ name: 'prefers-color-scheme', value: 'light' }]
-      })
-
-      await Promise.allSettled([
-        guest.debugger.sendCommand('Emulation.setAutoDarkModeOverride', {
-          enabled: false
-        }),
-        guest.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
-          source: LIGHT_THEME_SCRIPT
-        })
-      ])
-
-      if (trackInteractive) {
-        this.interactiveLightPreferenceStatus = 'CDP applied'
-      }
-
-      return true
-    } catch (error) {
-      if (trackInteractive) {
-        this.interactiveLightPreferenceStatus = `CDP failed: ${String(error)}`
-      }
-
-      this.log(`Unable to force light color preference for webview: ${String(error)}`, true)
-      return false
-    }
+    return result.applied
   }
 
   private async applyLightTheme(frameEl: LinkNode['frameEl']): Promise<boolean> {
@@ -2487,8 +1978,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (!session.preparedByPreload) {
       const themeStartedAt = performance.now()
       await this.applyGenerationLightTheme(frameEl)
-      this.themeTotalMs += performance.now() - themeStartedAt
-      this.themeCount++
+      this.metrics.themeTotalMs += performance.now() - themeStartedAt
+      this.metrics.themeCount++
 
       const paintStartedAt = performance.now()
 
@@ -2501,8 +1992,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         // Best effort.
       }
 
-      this.paintReadyTotalMs += performance.now() - paintStartedAt
-      this.paintReadyCount++
+      this.metrics.paintReadyTotalMs += performance.now() - paintStartedAt
+      this.metrics.paintReadyCount++
     }
 
     if (this.activeGeneration !== session) return
@@ -2552,13 +2043,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     try {
       const metadataWriteStartedAt = performance.now()
 
-      await this.app.vault.adapter.write(
-        `${this.cacheDir}/${node.id}.metadata.json`,
-        JSON.stringify(metadata)
-      )
+      await this.previewCache.writeMetadata(node.id, metadata)
 
-      this.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
-      this.metadataWriteCount++
+      this.metrics.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
+      this.metrics.metadataWriteCount++
     } catch (error) {
       this.log(error, true)
       this.removeNodeFrame(node)
@@ -2572,16 +2060,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     state.cached = true
     state.metadata = metadata
 
-    this.thumbnailCacheIds.add(node.id)
-    this.metadataCacheIds.add(node.id)
-    this.metadataMemory.set(node.id, metadata)
-
     node.updateNodeLabel(title)
 
     const previewStartedAt = performance.now()
     const previewReady = await this.showPreviewOverFrame(node, false)
-    this.previewReadyTotalMs += performance.now() - previewStartedAt
-    this.previewReadyCount++
+    this.metrics.previewReadyTotalMs += performance.now() - previewStartedAt
+    this.metrics.previewReadyCount++
 
     if (this.activeGeneration !== session) return
 
@@ -2622,8 +2106,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     try {
       const capturePageStartedAt = performance.now()
       const image = await frameEl.capturePage()
-      this.capturePageTotalMs += performance.now() - capturePageStartedAt
-      this.capturePageCount++
+      this.metrics.capturePageTotalMs += performance.now() - capturePageStartedAt
+      this.metrics.capturePageCount++
 
       if (node.frameEl !== frameEl || !frameEl.isConnected || image.isEmpty()) {
         return false
@@ -2632,16 +2116,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       const encodeStartedAt = performance.now()
       const optimized = this.optimizeThumbnail(image)
       const jpeg = optimized.toJPEG(THUMBNAIL_JPEG_QUALITY)
-      this.encodeTotalMs += performance.now() - encodeStartedAt
-      this.encodeCount++
+      this.metrics.encodeTotalMs += performance.now() - encodeStartedAt
+      this.metrics.encodeCount++
 
       const thumbnailWriteStartedAt = performance.now()
-      await this.app.vault.adapter.writeBinary(`${this.cacheDir}/${node.id}.thumbnail.jpg`, jpeg)
-      this.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
-      this.thumbnailWriteCount++
+      await this.previewCache.writeThumbnail(node.id, jpeg)
+      this.metrics.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
+      this.metrics.thumbnailWriteCount++
 
-      this.captureTotalMs += performance.now() - startedAt
-      this.capturedThumbnailBytes += jpeg.byteLength
+      this.metrics.captureTotalMs += performance.now() - startedAt
+      this.metrics.capturedThumbnailBytes += jpeg.byteLength
 
       return true
     } catch (error) {
@@ -2665,103 +2149,37 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   patchLinkNode(linkNodeConstructor: LinkNodeConstructor): boolean {
-    const thisPlugin = this
+    const uninstaller = installLinkNodePatches(linkNodeConstructor, {
+      saveThumbnail: node => this.saveThumbnail(node),
+      thumbnailPath: node => this.previewCache.thumbnailPath(node.id),
+      metadataPath: node => this.previewCache.metadataPath(node.id),
+      onMounted: node => this.onNodeMounted(node),
+      onBreakpoint: node => this.handleBreakpointUpdate(node),
+      onUrlChanged: node => this.handleNodeUrlChanged(node),
+      onInitialized: node => {
+        this.attachActivationHandler(node)
+        void this.prepareNode(node)
 
-    const uninstaller = around(linkNodeConstructor.prototype, {
-      _saveThumbnail: () =>
-        async function () {
-          return thisPlugin.saveThumbnail(this)
-        },
+        queueMicrotask(() => {
+          this.rehydrateCachedNode(node)
+        })
+      },
+      consumeFrameMode: node => {
+        const mode = this.requestedFrameModes.get(node) ?? null
 
-      _getThumbnailPath: () =>
-        function () {
-          return `${thisPlugin.cacheDir}/${this.id}.thumbnail.jpg`
-        },
-
-      _getMetadataPath: () =>
-        function () {
-          return `${thisPlugin.cacheDir}/${this.id}.metadata.json`
-        },
-
-      mountContent: (next: (...args: unknown[]) => unknown) =>
-        function (...args: unknown[]) {
-          const result = next.call(this, ...args)
-
-          if (!this._initializing) {
-            thisPlugin.onNodeMounted(this)
-          }
-
-          return result
-        },
-
-      updateBreakpoint: (next: (...args: unknown[]) => unknown) =>
-        function (...args: unknown[]) {
-          const result = next.call(this, ...args)
-
-          thisPlugin.handleBreakpointUpdate(this)
-
-          return result
-        },
-
-      setData: (next: (...args: unknown[]) => unknown) =>
-        function (...args: unknown[]) {
-          const previousUrl = this.url
-          const result = next.call(this, ...args)
-
-          if (previousUrl && previousUrl !== this.url) {
-            thisPlugin.handleNodeUrlChanged(this)
-          }
-
-          return result
-        },
-
-      initialize: (next: (...args: unknown[]) => unknown) =>
-        function (...args: unknown[]) {
-          this._initializing = true
-
-          let result: unknown
-
-          try {
-            result = next.call(this, ...args)
-          } finally {
-            this._initializing = false
-          }
-
-          thisPlugin.attachActivationHandler(this)
-          void thisPlugin.prepareNode(this)
-
-          queueMicrotask(() => {
-            thisPlugin.rehydrateCachedNode(this)
-          })
-
-          return result
-        },
-
-      recreateFrame: (next: (...args: unknown[]) => unknown) =>
-        function (...args: unknown[]) {
-          if (this._initializing) return null
-
-          const mode = thisPlugin.requestedFrameModes.get(this)
-
-          if (!mode) {
-            thisPlugin.onNodeMounted(this)
-            return null
-          }
-
-          thisPlugin.requestedFrameModes.delete(this)
-
-          const result = next.call(this, ...args)
-
-          thisPlugin.configureFrame(this, mode)
-
-          return result
+        if (mode) {
+          this.requestedFrameModes.delete(node)
         }
+
+        return mode
+      },
+      onFrameCreated: (node, mode) => this.configureFrame(node, mode)
     })
 
     this.register(uninstaller)
 
-    thisPlugin.log('Canvas patched successfully')
-    thisPlugin.app.workspace.trigger(`${thisPlugin.manifest.id}:patched-canvas`)
+    this.log('Canvas patched successfully')
+    this.app.workspace.trigger(`${this.manifest.id}:patched-canvas`)
 
     return true
   }
@@ -2795,59 +2213,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   resetDiagnostics() {
-    this.cacheHits = 0
-    this.cacheMisses = 0
-    this.generationCompleted = 0
-    this.generationFailed = 0
-    this.generationTimedOut = 0
-    this.generationPreemptions = 0
-    this.generationPreloadsStarted = 0
-    this.generationPreloadsReady = 0
-    this.generationPreloadHits = 0
-    this.generationPreloadFailures = 0
-    this.generationPreloadReadyTotalMs = 0
-    this.preloadPromotionWaitTotalMs = 0
-    this.preloadPromotionWaitCount = 0
-    this.preloadImmediateHits = 0
-    this.preloadPendingHits = 0
-    this.generationColdTotalMs = 0
-    this.generationColdCount = 0
-    this.generationPreloadedTotalMs = 0
-    this.generationPreloadedCount = 0
-    this.generationTotalMs = 0
-    this.batchStartedAt =
-      this.activeGeneration || this.localGenerations.size > 0 || this.generationQueue.length > 0
+    const batchStartedAt =
+      this.activeGeneration ||
+      this.localGenerations.size > 0 ||
+      this.generationCoordinator.length > 0
         ? performance.now()
         : null
-    this.batchCompleted = 0
-    this.lastBatchDurationMs = 0
-    this.lastBatchCompleted = 0
-    this.queueWaitTotalMs = 0
-    this.queueWaitCount = 0
-    this.frameCreateTotalMs = 0
-    this.frameCreateCount = 0
-    this.domReadyTotalMs = 0
-    this.domReadyCount = 0
-    this.themeTotalMs = 0
-    this.themeCount = 0
-    this.paintReadyTotalMs = 0
-    this.paintReadyCount = 0
-    this.captureTotalMs = 0
-    this.capturePageTotalMs = 0
-    this.capturePageCount = 0
-    this.encodeTotalMs = 0
-    this.encodeCount = 0
-    this.thumbnailWriteTotalMs = 0
-    this.thumbnailWriteCount = 0
-    this.metadataWriteTotalMs = 0
-    this.metadataWriteCount = 0
-    this.previewReadyTotalMs = 0
-    this.previewReadyCount = 0
-    this.capturedThumbnailBytes = 0
-    this.localGenerationTotalMs = 0
-    this.localGenerationCount = 0
-    this.localFallbacks = 0
-    this.localTimeouts = 0
+
+    this.metrics.reset(batchStartedAt)
     this.interactiveLightPreferenceStatus = 'not attempted'
     this.interactiveMatchMediaLight = null
     this.localBrowserRenderer?.resetMetrics()
@@ -2881,138 +2254,48 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       })
     }
 
-    const averageGenerationMs =
-      this.generationCompleted > 0
-        ? Math.round(this.generationTotalMs / this.generationCompleted)
-        : 0
-
-    const averageCaptureMs =
-      this.generationCompleted > 0 ? Math.round(this.captureTotalMs / this.generationCompleted) : 0
-    const averagePreloadReadyMs =
-      this.generationPreloadsReady > 0
-        ? Math.round(this.generationPreloadReadyTotalMs / this.generationPreloadsReady)
-        : 0
-    const averagePromotionWaitMs =
-      this.preloadPromotionWaitCount > 0
-        ? Math.round(this.preloadPromotionWaitTotalMs / this.preloadPromotionWaitCount)
-        : 0
-    const averageColdGenerationMs =
-      this.generationColdCount > 0
-        ? Math.round(this.generationColdTotalMs / this.generationColdCount)
-        : 0
-    const averagePreloadedGenerationMs =
-      this.generationPreloadedCount > 0
-        ? Math.round(this.generationPreloadedTotalMs / this.generationPreloadedCount)
-        : 0
-    const lastBatchSeconds = this.lastBatchDurationMs / 1000
-    const lastBatchThroughput =
-      lastBatchSeconds > 0 ? this.lastBatchCompleted / lastBatchSeconds : 0
-    const averageQueueWaitMs =
-      this.queueWaitCount > 0 ? Math.round(this.queueWaitTotalMs / this.queueWaitCount) : 0
-    const averageFrameCreateMs =
-      this.frameCreateCount > 0 ? Math.round(this.frameCreateTotalMs / this.frameCreateCount) : 0
-    const averageDomReadyMs =
-      this.domReadyCount > 0 ? Math.round(this.domReadyTotalMs / this.domReadyCount) : 0
-    const averageThemeMs = this.themeCount > 0 ? Math.round(this.themeTotalMs / this.themeCount) : 0
-    const averagePaintReadyMs =
-      this.paintReadyCount > 0 ? Math.round(this.paintReadyTotalMs / this.paintReadyCount) : 0
-    const averageCapturePageMs =
-      this.capturePageCount > 0 ? Math.round(this.capturePageTotalMs / this.capturePageCount) : 0
-    const averageEncodeMs =
-      this.encodeCount > 0 ? Math.round(this.encodeTotalMs / this.encodeCount) : 0
-    const averageThumbnailWriteMs =
-      this.thumbnailWriteCount > 0
-        ? Math.round(this.thumbnailWriteTotalMs / this.thumbnailWriteCount)
-        : 0
-    const averageMetadataWriteMs =
-      this.metadataWriteCount > 0
-        ? Math.round(this.metadataWriteTotalMs / this.metadataWriteCount)
-        : 0
-    const averagePreviewReadyMs =
-      this.previewReadyCount > 0 ? Math.round(this.previewReadyTotalMs / this.previewReadyCount) : 0
-    const averageLocalGenerationMs =
-      this.localGenerationCount > 0
-        ? Math.round(this.localGenerationTotalMs / this.localGenerationCount)
-        : 0
     const localRendererAvailable = this.localBrowserRenderer?.available ?? false
-    const generationEngine = localRendererAvailable
-      ? `local browser sidecar (${this.localBrowserRenderer?.poolSize ?? 0} workers)`
-      : 'native webview'
-    const localBrowserStatus = this.localBrowserRenderer
-      ? `${this.localBrowserRenderer.browserName} / ${this.localBrowserRenderer.state}`
-      : 'not initialized'
-    const localBrowserUnavailableReason = this.localBrowserRenderer?.unavailableReason ?? 'none'
-
-    const diagnostics = [
-      `Mounted web cards: ${mountedWebCards.size}`,
-      `Cached previews: ${cachedPreviews}`,
-      `Live webviews: ${liveWebviews}`,
-      `Generating thumbnails: ${(this.activeGeneration ? 1 : 0) + this.localGenerations.size}`,
-      `Queued: ${this.generationQueue.length}`,
-      `Generation engine: ${generationEngine}`,
-      `Local browser: ${localBrowserStatus}`,
-      `Local browser unavailable reason: ${localBrowserUnavailableReason}`,
-      `Local browser hardware: ${this.localBrowserRenderer?.hardwareSummary ?? 'unknown'}`,
-      `Local browser concurrency: ${this.localBrowserRenderer?.concurrencySummary ?? 'unknown'}`,
-      `Local browser tuning: ${this.localTuningStatus}`,
-      `Local browser active tasks: ${this.localBrowserRenderer?.activeCount ?? 0}`,
-      `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
-      `Interactive light preference: ${this.interactiveLightPreferenceStatus}`,
-      `Interactive matchMedia light: ${
-        this.interactiveMatchMediaLight === null ? 'not tested' : this.interactiveMatchMediaLight
-      }`,
-      `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
-      `Network preconnect: ${
-        localRendererAvailable
-          ? 'standby (local browser preferred)'
-          : this.networkPreconnector?.active
-            ? 'on'
-            : 'off'
-      } (${this.networkPreconnector?.count ?? 0})`,
-      `HTTP warm cache: ${
-        localRendererAvailable
-          ? 'standby (local browser preferred)'
-          : this.networkPreconnector?.fetchActive
-            ? 'on'
-            : 'off'
-      } (${this.networkPreconnector?.warmCompletedCount ?? 0}/${this.networkPreconnector?.warmStartedCount ?? 0}, failed ${this.networkPreconnector?.warmFailedCount ?? 0})`,
-      `Cache hits: ${this.cacheHits}`,
-      `Cache misses: ${this.cacheMisses}`,
-      `Generated: ${this.generationCompleted}`,
-      `Generation failures: ${this.generationFailed}`,
-      `Generation timeouts: ${this.generationTimedOut}`,
-      `Generation preemptions: ${this.generationPreemptions}`,
-      `Local browser fallbacks/timeouts: ${this.localFallbacks}/${this.localTimeouts}`,
-      `Local browser render failures: ${this.localBrowserRenderer?.renderFailureCount ?? 0}`,
-      `Local browser launches/closes/launch failures: ${this.localBrowserRenderer?.launchCount ?? 0}/${this.localBrowserRenderer?.closeCount ?? 0}/${this.localBrowserRenderer?.launchFailureCount ?? 0}`,
-      `Local browser average launch: ${this.localBrowserRenderer?.averageLaunchMs ?? 0} ms`,
-      `Local browser average render: ${this.localBrowserRenderer?.averageRenderMs ?? 0} ms`,
-      `Local browser average navigation: ${this.localBrowserRenderer?.averageNavigationMs ?? 0} ms`,
-      `Local browser average screenshot: ${this.localBrowserRenderer?.averageScreenshotMs ?? 0} ms`,
-      `Average local generation: ${averageLocalGenerationMs} ms`,
-      `Generation preload: ${this.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
-      `Preloads started/ready/hit/failed: ${this.generationPreloadsStarted}/${this.generationPreloadsReady}/${this.generationPreloadHits}/${this.generationPreloadFailures}`,
-      `Preload immediate/pending hits: ${this.preloadImmediateHits}/${this.preloadPendingHits}`,
-      `Average preload ready: ${averagePreloadReadyMs} ms`,
-      `Average preload promotion wait: ${averagePromotionWaitMs} ms`,
-      `Average cold generation: ${averageColdGenerationMs} ms`,
-      `Average preloaded generation: ${averagePreloadedGenerationMs} ms`,
-      `Last batch: ${this.lastBatchCompleted} cards / ${Math.round(this.lastBatchDurationMs)} ms`,
-      `Last batch throughput: ${lastBatchThroughput.toFixed(2)} cards/s`,
-      `Average queue wait: ${averageQueueWaitMs} ms`,
-      `Average frame create: ${averageFrameCreateMs} ms`,
-      `Average DOM ready: ${averageDomReadyMs} ms`,
-      `Average theme apply: ${averageThemeMs} ms`,
-      `Average paint ready: ${averagePaintReadyMs} ms`,
-      `Average capturePage: ${averageCapturePageMs} ms`,
-      `Average encode: ${averageEncodeMs} ms`,
-      `Average thumbnail write: ${averageThumbnailWriteMs} ms`,
-      `Average metadata write: ${averageMetadataWriteMs} ms`,
-      `Average preview ready: ${averagePreviewReadyMs} ms`,
-      `Average generation: ${averageGenerationMs} ms`,
-      `Average capture pipeline: ${averageCaptureMs} ms`,
-      `Thumbnail bytes written: ${this.capturedThumbnailBytes}`
-    ].join('\n')
+    const diagnostics = formatDiagnosticsReport({
+      mountedWebCards: mountedWebCards.size,
+      cachedPreviews,
+      liveWebviews,
+      generatingThumbnails: (this.activeGeneration ? 1 : 0) + this.localGenerations.size,
+      queued: this.generationCoordinator.length,
+      interactiveWebviewActive: Boolean(this.activeInteractiveNode),
+      interactiveLightPreferenceStatus: this.interactiveLightPreferenceStatus,
+      interactiveMatchMediaLight: this.interactiveMatchMediaLight,
+      backgroundExecutionActive: this.backgroundExecution.active,
+      generationPreloadDisabled: this.generationPreloadDisabled,
+      metrics: this.metrics,
+      localBrowser: {
+        available: localRendererAvailable,
+        poolSize: this.localBrowserRenderer?.poolSize ?? 0,
+        status: this.localBrowserRenderer
+          ? `${this.localBrowserRenderer.browserName} / ${this.localBrowserRenderer.state}`
+          : 'not initialized',
+        unavailableReason: this.localBrowserRenderer?.unavailableReason ?? 'none',
+        hardwareSummary: this.localBrowserRenderer?.hardwareSummary ?? 'unknown',
+        concurrencySummary: this.localBrowserRenderer?.concurrencySummary ?? 'unknown',
+        tuningStatus: this.concurrencyTuner?.status ?? 'not initialized',
+        activeTasks: this.localBrowserRenderer?.activeCount ?? 0,
+        renderFailures: this.localBrowserRenderer?.renderFailureCount ?? 0,
+        launches: this.localBrowserRenderer?.launchCount ?? 0,
+        closes: this.localBrowserRenderer?.closeCount ?? 0,
+        launchFailures: this.localBrowserRenderer?.launchFailureCount ?? 0,
+        averageLaunchMs: this.localBrowserRenderer?.averageLaunchMs ?? 0,
+        averageRenderMs: this.localBrowserRenderer?.averageRenderMs ?? 0,
+        averageNavigationMs: this.localBrowserRenderer?.averageNavigationMs ?? 0,
+        averageScreenshotMs: this.localBrowserRenderer?.averageScreenshotMs ?? 0
+      },
+      network: {
+        preconnectActive: this.networkPreconnector?.active ?? false,
+        preconnectCount: this.networkPreconnector?.count ?? 0,
+        warmActive: this.networkPreconnector?.fetchActive ?? false,
+        warmCompleted: this.networkPreconnector?.warmCompletedCount ?? 0,
+        warmStarted: this.networkPreconnector?.warmStartedCount ?? 0,
+        warmFailed: this.networkPreconnector?.warmFailedCount ?? 0
+      }
+    })
 
     this.log(diagnostics)
 
@@ -3020,18 +2303,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   async cleanupThumbnails() {
-    const thumbnails = await this.app.vault.adapter.list(this.cacheDir)
-
-    const cachedNodeIds = new Set<string>()
-
-    for (const file of thumbnails.files) {
-      const match = file.match(/([^/]+)\.(?:thumbnail\.jpg|metadata\.json)$/)
-
-      if (match) {
-        cachedNodeIds.add(match[1])
-      }
-    }
-
     const canvasFiles = this.app.vault.getFiles().filter(file => file.path.endsWith('.canvas'))
     const usedNodeIds = new Set<string>()
 
@@ -3044,29 +2315,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       })
     }
 
-    const unusedNodeIds = [...cachedNodeIds].filter(nodeId => !usedNodeIds.has(nodeId))
+    const removed = await this.previewCache.cleanupUnused(usedNodeIds)
 
-    for (const nodeId of unusedNodeIds) {
-      this.log(`Removing cache for missing node ${nodeId}`)
-
-      const thumbnailFile = `${this.cacheDir}/${nodeId}.thumbnail.jpg`
-      const metadataFile = `${this.cacheDir}/${nodeId}.metadata.json`
-
-      const removeFile = async (path: string) => {
-        if (await this.app.vault.adapter.exists(path)) {
-          await this.app.vault.adapter.remove(path)
-        }
-      }
-
-      await removeFile(thumbnailFile)
-      await removeFile(metadataFile)
-
-      this.thumbnailCacheIds.delete(nodeId)
-      this.metadataCacheIds.delete(nodeId)
-      this.metadataMemory.delete(nodeId)
-    }
-
-    new Notice(`${unusedNodeIds.length} Unused thumbnails cleaned up!`)
+    new Notice(`${removed} Unused thumbnails cleaned up!`)
   }
 
   extractNodeIdsFromCanvas(content: string): string[] {
