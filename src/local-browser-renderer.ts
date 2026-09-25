@@ -10,6 +10,7 @@ import {
   totalmem
 } from 'node:os'
 import { join } from 'node:path'
+import { buildTuningCandidates, calculateLivePoolSize } from './core-utils'
 
 const BROWSER_START_TIMEOUT_MS = 6000
 const CDP_COMMAND_TIMEOUT_MS = 3500
@@ -530,16 +531,13 @@ export default class LocalBrowserRenderer {
   }
 
   get poolSize(): number {
-    const freeMemoryGiB = freemem() / 1024 ** 3
-    const liveMemoryLimit = Math.max(
-      1,
-      Math.floor(
-        Math.max(0, freeMemoryGiB - LOCAL_BROWSER_MEMORY_RESERVE_GIB) /
-          LOCAL_BROWSER_MEMORY_PER_WORKER_GIB
-      )
+    return calculateLivePoolSize(
+      this.targetPoolSize,
+      this.maxPoolSize,
+      freemem() / 1024 ** 3,
+      LOCAL_BROWSER_MEMORY_RESERVE_GIB,
+      LOCAL_BROWSER_MEMORY_PER_WORKER_GIB
     )
-
-    return Math.max(1, Math.min(this.targetPoolSize, this.maxPoolSize, liveMemoryLimit))
   }
 
   get tuningKey(): string {
@@ -551,22 +549,7 @@ export default class LocalBrowserRenderer {
   }
 
   get tuningCandidates(): number[] {
-    const floor = this.maxPoolSize <= 3 ? 1 : Math.max(1, Math.floor(this.maxPoolSize * 0.5))
-    const candidates = Array.from(
-      { length: this.maxPoolSize - floor + 1 },
-      (_, index) => floor + index
-    )
-
-    return candidates.sort((left, right) => {
-      const leftDistance = Math.abs(left - this.heuristicPoolSize)
-      const rightDistance = Math.abs(right - this.heuristicPoolSize)
-
-      if (leftDistance !== rightDistance) {
-        return leftDistance - rightDistance
-      }
-
-      return right - left
-    })
+    return buildTuningCandidates(this.maxPoolSize, this.heuristicPoolSize)
   }
 
   get concurrencySummary(): string {
