@@ -25,6 +25,7 @@ These behaviors are compatibility contracts. Refactors must not change them unle
 main.ts
 ├── cache/preview-cache.ts
 ├── diagnostics/metrics.ts
+├── diagnostics/report.ts
 ├── generation/coordinator.ts
 │   └── generation/dynamic-priority-queue.ts
 ├── interactive/activation-controller.ts
@@ -79,7 +80,7 @@ The Canvas document itself is not a cache backend.
 
 ## Generation scheduling
 
-`GenerationCoordinator` owns microtask scheduling and delegates ordering/storage to `DynamicPriorityQueue`.
+`GenerationCoordinator` owns microtask scheduling and delegates ordering/storage to `DynamicPriorityQueue`. The queue uses keyed entries plus tombstone compaction so repeated dequeues/removals do not repeatedly shift the full queue.
 
 Priorities are dynamic:
 
@@ -119,7 +120,7 @@ This preserves the external `LocalBrowserRenderer` API while keeping discovery a
 
 ## Diagnostics
 
-`DiagnosticsMetrics` owns counters, timers, reset behavior, and derived averages. Runtime classes update metrics, while presentation remains in the plugin command.
+`DiagnosticsMetrics` owns counters, timers, reset behavior, and derived averages. `diagnostics/report.ts` owns the stable human-readable report format. Runtime classes update metrics, while the plugin only collects runtime snapshots and displays the formatted report.
 
 This prevents performance instrumentation from becoming part of control-flow state.
 
@@ -145,9 +146,10 @@ Current automated coverage includes:
 - tuning candidates and preferred concurrency
 - viewport priority buckets
 - preview cache lifecycle and cleanup
-- dynamic generation queue behavior
+- dynamic generation queue behavior, large-batch compaction, and keyed removal
 - generation coordinator scheduling
 - interactive activation transitions
+- diagnostics report formatting
 
 CI runs tests, Biome checks, TypeScript, and a production bundle.
 
