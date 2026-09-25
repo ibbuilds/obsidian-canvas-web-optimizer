@@ -5,9 +5,9 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "format": "biome format --write src package.json manifest.json",
+    "format": "biome format --write src tests test-runner.mjs package.json manifest.json",
     "lint": "biome lint src",
-    "check": "biome check src tests test-runner.mjs && tsc --noEmit --skipLibCheck",
+    "check": "biome check src tests test-runner.mjs && tsc",
     "build": "pnpm run test && pnpm run check && node esbuild.config.mjs production",
     "version": "node version-bump.mjs && git add manifest.json versions.json",
     "test": "node test-runner.mjs"
