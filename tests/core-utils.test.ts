@@ -45,18 +45,9 @@ test('preferred concurrency chooses the smallest near-top performer', () => {
 test('viewport proximity classifies visible, nearby, and background nodes', () => {
   const viewport = { minX: 0, minY: 0, maxX: 100, maxY: 100 }
 
-  assert.equal(
-    classifyViewportProximity({ minX: 10, minY: 10, maxX: 20, maxY: 20 }, viewport),
-    0
-  )
-  assert.equal(
-    classifyViewportProximity({ minX: 150, minY: 20, maxX: 170, maxY: 40 }, viewport),
-    1
-  )
-  assert.equal(
-    classifyViewportProximity({ minX: 350, minY: 20, maxX: 370, maxY: 40 }, viewport),
-    2
-  )
+  assert.equal(classifyViewportProximity({ minX: 10, minY: 10, maxX: 20, maxY: 20 }, viewport), 0)
+  assert.equal(classifyViewportProximity({ minX: 150, minY: 20, maxX: 170, maxY: 40 }, viewport), 1)
+  assert.equal(classifyViewportProximity({ minX: 350, minY: 20, maxX: 370, maxY: 40 }, viewport), 2)
 })
 
 test('Canvas cache cleanup extracts only valid string node ids', () => {
