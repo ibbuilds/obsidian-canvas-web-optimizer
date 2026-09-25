@@ -39,8 +39,11 @@ test('diagnostics report preserves core runtime lines', () => {
       launchFailures: 0,
       averageLaunchMs: 100,
       averageRenderMs: 700,
+      averageSetupMs: 40,
       averageNavigationMs: 600,
-      averageScreenshotMs: 50
+      averagePaintReadyMs: 10,
+      averageScreenshotMs: 50,
+      screenshotOptimizationStatus: 'optimizeForSpeed enabled'
     },
     network: {
       preconnectActive: false,
@@ -56,5 +59,8 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Generation engine: local browser sidecar \(5 workers\)/)
   assert.match(report, /Interactive matchMedia light: true/)
   assert.match(report, /Cache hits: 3/)
+  assert.match(report, /Local browser screenshot mode: optimizeForSpeed enabled/)
+  assert.match(report, /Local browser average setup: 40 ms/)
+  assert.match(report, /Local browser average paint ready: 10 ms/)
   assert.match(report, /Last batch throughput: 2\.00 cards\/s/)
 })
