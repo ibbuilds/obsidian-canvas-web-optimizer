@@ -82,6 +82,7 @@ export default class LocalBrowserRenderer {
   private paintReadyCount = 0
   private screenshotTotalMs = 0
   private screenshotOptimizeForSpeed: boolean | null = null
+  private lastRenderFailure = 'none'
 
   private readonly logicalCpuCount = Math.max(1, navigator.hardwareConcurrency || 4)
   private readonly totalMemoryGiB = totalmem() / 1024 ** 3
@@ -215,6 +216,10 @@ export default class LocalBrowserRenderer {
     return 'optimizeForSpeed probing'
   }
 
+  get lastFailureSummary(): string {
+    return this.lastRenderFailure
+  }
+
   resetMetrics() {
     this.browserLaunches = 0
     this.browserCloses = 0
@@ -229,6 +234,7 @@ export default class LocalBrowserRenderer {
     this.paintReadyTotalMs = 0
     this.paintReadyCount = 0
     this.screenshotTotalMs = 0
+    this.lastRenderFailure = 'none'
   }
 
   render(url: string, width: number, height: number): LocalBrowserRenderTask {
@@ -236,6 +242,7 @@ export default class LocalBrowserRenderer {
     let cancelled = false
     let targetId: string | null = null
     let runtime: BrowserRuntime | null = null
+    let stage = 'browser startup'
 
     const cancel = () => {
       if (cancelled) return
@@ -261,6 +268,7 @@ export default class LocalBrowserRenderer {
           throw new Error('Local browser render cancelled')
         }
 
+        stage = 'target setup'
         const setupStartedAt = performance.now()
         const target = await runtime.connection.send<{ targetId: string }>('Target.createTarget', {
           url: 'about:blank'
@@ -305,6 +313,7 @@ export default class LocalBrowserRenderer {
         this.setupTotalMs += performance.now() - setupStartedAt
         this.setupCount++
 
+        stage = 'navigation'
         const domReady = runtime.connection.waitForEvent(
           'Page.domContentEventFired',
           sessionId,
@@ -329,6 +338,7 @@ export default class LocalBrowserRenderer {
         }
 
         const navigationMs = performance.now() - navigationStartedAt
+        stage = 'paint/theme'
         const paintStartedAt = performance.now()
         const themeAndTitle = runtime.connection
           .send<{
@@ -360,6 +370,7 @@ export default class LocalBrowserRenderer {
           throw new Error('Local browser render cancelled')
         }
 
+        stage = 'screenshot'
         const screenshotStartedAt = performance.now()
         const [titleResponse, screenshot] = await Promise.all([
           themeAndTitle,
@@ -392,6 +403,7 @@ export default class LocalBrowserRenderer {
       } catch (error) {
         if (!cancelled) {
           this.renderFailures++
+          this.lastRenderFailure = `${stage}: ${url} — ${toError(error).message}`
         }
 
         throw error
