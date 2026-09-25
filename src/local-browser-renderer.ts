@@ -11,6 +11,7 @@ import {
 } from 'node:os'
 import { join } from 'node:path'
 import { buildTuningCandidates, calculateLivePoolSize } from './core-utils'
+import { LIGHT_THEME_SCRIPT } from './web-theme'
 
 const BROWSER_START_TIMEOUT_MS = 6000
 const CDP_COMMAND_TIMEOUT_MS = 3500
@@ -21,22 +22,6 @@ const MIN_SCREENSHOT_BYTES = 512
 const LOCAL_BROWSER_MAX_WORKERS = 8
 const LOCAL_BROWSER_MEMORY_RESERVE_GIB = 2
 const LOCAL_BROWSER_MEMORY_PER_WORKER_GIB = 1.75
-
-const LIGHT_THEME_SCRIPT = `
-  (() => {
-    document.documentElement.style.setProperty('color-scheme', 'light', 'important')
-
-    let meta = document.querySelector('meta[name="color-scheme"]')
-
-    if (!meta) {
-      meta = document.createElement('meta')
-      meta.setAttribute('name', 'color-scheme')
-      document.head?.appendChild(meta)
-    }
-
-    meta.setAttribute('content', 'light')
-  })()
-`
 
 type BrowserCandidate = {
   name: string
