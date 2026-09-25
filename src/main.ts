@@ -9,6 +9,7 @@ import {
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
 import { extractCanvasNodeIds, isFatalLoadFailure, pickPreferredConcurrency } from './core-utils'
+import DiagnosticsMetrics from './diagnostics/metrics'
 import LocalBrowserRenderer, {
   type LocalBrowserRenderResult,
   type LocalBrowserRenderTask
@@ -297,8 +298,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   cacheDir = `${this.manifest.dir}/data/linkCache`
 
-  cacheHits = 0
-  cacheMisses = 0
 
   private readonly thumbnailCacheIds = new Set<string>()
   private readonly metadataCacheIds = new Set<string>()
@@ -328,54 +327,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private interactiveLightPreferenceStatus = 'not attempted'
   private interactiveMatchMediaLight: boolean | null = null
 
-  private generationCompleted = 0
-  private generationFailed = 0
-  private generationTimedOut = 0
-  private generationPreemptions = 0
-  private generationPreloadsStarted = 0
-  private generationPreloadsReady = 0
-  private generationPreloadHits = 0
-  private generationPreloadFailures = 0
-  private generationPreloadReadyTotalMs = 0
-  private preloadPromotionWaitTotalMs = 0
-  private preloadPromotionWaitCount = 0
-  private preloadImmediateHits = 0
-  private preloadPendingHits = 0
-  private generationColdTotalMs = 0
-  private generationColdCount = 0
-  private generationPreloadedTotalMs = 0
-  private generationPreloadedCount = 0
-  private generationTotalMs = 0
-  private batchStartedAt: number | null = null
-  private batchCompleted = 0
-  private lastBatchDurationMs = 0
-  private lastBatchCompleted = 0
-  private queueWaitTotalMs = 0
-  private queueWaitCount = 0
-  private frameCreateTotalMs = 0
-  private frameCreateCount = 0
-  private domReadyTotalMs = 0
-  private domReadyCount = 0
-  private themeTotalMs = 0
-  private themeCount = 0
-  private paintReadyTotalMs = 0
-  private paintReadyCount = 0
-  private captureTotalMs = 0
-  private capturePageTotalMs = 0
-  private capturePageCount = 0
-  private encodeTotalMs = 0
-  private encodeCount = 0
-  private thumbnailWriteTotalMs = 0
-  private thumbnailWriteCount = 0
-  private metadataWriteTotalMs = 0
-  private metadataWriteCount = 0
-  private previewReadyTotalMs = 0
-  private previewReadyCount = 0
-  private capturedThumbnailBytes = 0
-  private localGenerationTotalMs = 0
-  private localGenerationCount = 0
-  private localFallbacks = 0
-  private localTimeouts = 0
+  private readonly metrics = new DiagnosticsMetrics()
 
   async onload() {
     this.addCommand({
@@ -717,7 +669,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       state.evaluated = true
       state.cached = true
       state.metadata = metadata
-      this.cacheHits++
+      this.metrics.cacheHits++
 
       node.updateNodeLabel(metadata.title)
       this.applyPreparedNodeState(node, state)
@@ -735,7 +687,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.thumbnailCacheIds.delete(node.id)
     this.metadataCacheIds.delete(node.id)
     this.metadataMemory.delete(node.id)
-    this.cacheMisses++
+    this.metrics.cacheMisses++
 
     this.applyPreparedNodeState(node, state)
   }
@@ -1009,22 +961,22 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     if (
-      this.batchStartedAt === null &&
+      this.metrics.batchStartedAt === null &&
       !this.activeGeneration &&
       this.localGenerations.size === 0 &&
       this.generationQueue.length === 0
     ) {
-      this.batchStartedAt = performance.now()
-      this.batchCompleted = 0
+      this.metrics.batchStartedAt = performance.now()
+      this.metrics.batchCompleted = 0
 
       const renderer = this.localBrowserRenderer
 
       this.localBatchTuning = renderer?.available
         ? {
             concurrency: renderer.poolSize,
-            localGenerationCount: this.localGenerationCount,
-            localFallbacks: this.localFallbacks,
-            generationPreemptions: this.generationPreemptions
+            localGenerationCount: this.metrics.localGenerationCount,
+            localFallbacks: this.metrics.localFallbacks,
+            generationPreemptions: this.metrics.generationPreemptions
           }
         : null
     }
@@ -1220,7 +1172,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     this.generationPreload = preload
-    this.generationPreloadsStarted++
+    this.metrics.generationPreloadsStarted++
     this.requestNodeFrame(job.node, 'preload')
   }
 
@@ -1236,11 +1188,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (ready) {
       preload.readyAt = performance.now()
-      this.generationPreloadsReady++
-      this.generationPreloadReadyTotalMs += preload.readyAt - preload.startedAt
+      this.metrics.generationPreloadsReady++
+      this.metrics.generationPreloadReadyTotalMs += preload.readyAt - preload.startedAt
     } else {
       if (runtimeFailure) {
-        this.generationPreloadFailures++
+        this.metrics.generationPreloadFailures++
         this.generationPreloadDisabled = true
       }
 
@@ -1305,8 +1257,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const [job] = this.generationQueue.splice(bestIndex, 1)
     this.queuedGenerationIds.delete(job.node.id)
-    this.queueWaitTotalMs += performance.now() - job.enqueuedAt
-    this.queueWaitCount++
+    this.metrics.queueWaitTotalMs += performance.now() - job.enqueuedAt
+    this.metrics.queueWaitCount++
 
     return job
   }
@@ -1387,23 +1339,23 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         if (outcome === 'success') {
           const generationDuration = performance.now() - session.startedAt
 
-          this.generationCompleted++
-          this.batchCompleted++
-          this.generationTotalMs += generationDuration
+          this.metrics.generationCompleted++
+          this.metrics.batchCompleted++
+          this.metrics.generationTotalMs += generationDuration
 
           if (session.usedPreload) {
-            this.generationPreloadedTotalMs += generationDuration
-            this.generationPreloadedCount++
+            this.metrics.generationPreloadedTotalMs += generationDuration
+            this.metrics.generationPreloadedCount++
           } else {
-            this.generationColdTotalMs += generationDuration
-            this.generationColdCount++
+            this.metrics.generationColdTotalMs += generationDuration
+            this.metrics.generationColdCount++
           }
         } else if (outcome === 'timeout') {
-          this.generationTimedOut++
+          this.metrics.generationTimedOut++
         } else if (outcome === 'failure') {
-          this.generationFailed++
+          this.metrics.generationFailed++
         } else if (outcome === 'preempted') {
-          this.generationPreemptions++
+          this.metrics.generationPreemptions++
         }
 
         if (session.usedPreload && (outcome === 'failure' || outcome === 'timeout')) {
@@ -1457,19 +1409,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       if (preload) {
         session.usedPreload = true
-        this.generationPreloadHits++
+        this.metrics.generationPreloadHits++
 
         const promotionWaitStartedAt = performance.now()
 
         if (preload.readyAt !== undefined) {
-          this.preloadImmediateHits++
+          this.metrics.preloadImmediateHits++
         } else {
-          this.preloadPendingHits++
+          this.metrics.preloadPendingHits++
         }
 
         void preload.readyPromise.then(ready => {
-          this.preloadPromotionWaitTotalMs += performance.now() - promotionWaitStartedAt
-          this.preloadPromotionWaitCount++
+          this.metrics.preloadPromotionWaitTotalMs += performance.now() - promotionWaitStartedAt
+          this.metrics.preloadPromotionWaitCount++
           if (this.activeGeneration !== session) return
 
           const frameEl = preload.frameEl
@@ -1511,7 +1463,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     generation.timeoutId = window.setTimeout(() => {
       if (!this.isCurrentLocalGeneration(generation)) return
 
-      this.localTimeouts++
+      this.metrics.localTimeouts++
       this.log(`Local browser render timed out for ${generation.url}; falling back to native`, true)
       this.finishLocalGeneration(generation, 'fallback')
     }, LOCAL_GENERATION_TIMEOUT_MS)
@@ -1556,19 +1508,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (outcome === 'success') {
       const generationDuration = performance.now() - generation.startedAt
 
-      this.generationCompleted++
-      this.batchCompleted++
-      this.generationTotalMs += generationDuration
-      this.localGenerationTotalMs += generationDuration
-      this.localGenerationCount++
+      this.metrics.generationCompleted++
+      this.metrics.batchCompleted++
+      this.metrics.generationTotalMs += generationDuration
+      this.metrics.localGenerationTotalMs += generationDuration
+      this.metrics.localGenerationCount++
     } else if (outcome === 'fallback') {
-      this.localFallbacks++
+      this.metrics.localFallbacks++
 
       if (!this.getNodeState(node).cached && node.nodeEl?.isConnected) {
         this.enqueueThumbnailGeneration(node, true, job.attempt, true)
       }
     } else if (outcome === 'preempted') {
-      this.generationPreemptions++
+      this.metrics.generationPreemptions++
     }
 
     if (
@@ -1644,10 +1596,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         `${this.cacheDir}/${node.id}.thumbnail.jpg`,
         result.jpeg
       )
-      this.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
-      this.thumbnailWriteCount++
-      this.captureTotalMs += performance.now() - captureStartedAt
-      this.capturedThumbnailBytes += result.jpeg.byteLength
+      this.metrics.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
+      this.metrics.thumbnailWriteCount++
+      this.metrics.captureTotalMs += performance.now() - captureStartedAt
+      this.metrics.capturedThumbnailBytes += result.jpeg.byteLength
     } catch (error) {
       this.log(error, true)
       this.finishLocalGeneration(generation, 'fallback')
@@ -1686,8 +1638,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         JSON.stringify(metadata)
       )
 
-      this.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
-      this.metadataWriteCount++
+      this.metrics.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
+      this.metrics.metadataWriteCount++
     } catch (error) {
       this.log(error, true)
       this.finishLocalGeneration(generation, 'fallback')
@@ -1708,8 +1660,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const previewStartedAt = performance.now()
     const previewReady = await this.showPreviewOverFrame(node, false)
-    this.previewReadyTotalMs += performance.now() - previewStartedAt
-    this.previewReadyCount++
+    this.metrics.previewReadyTotalMs += performance.now() - previewStartedAt
+    this.metrics.previewReadyCount++
 
     if (!this.isCurrentLocalGeneration(generation)) return
 
@@ -1759,11 +1711,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
-    if (this.batchStartedAt !== null) {
-      this.lastBatchDurationMs = performance.now() - this.batchStartedAt
-      this.lastBatchCompleted = this.batchCompleted
-      this.batchStartedAt = null
-      this.batchCompleted = 0
+    if (this.metrics.batchStartedAt !== null) {
+      this.metrics.lastBatchDurationMs = performance.now() - this.metrics.batchStartedAt
+      this.metrics.lastBatchCompleted = this.metrics.batchCompleted
+      this.metrics.batchStartedAt = null
+      this.metrics.batchCompleted = 0
 
       const tuningSnapshot = this.localBatchTuning
       this.localBatchTuning = null
@@ -1771,8 +1723,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       if (tuningSnapshot) {
         void this.observeLocalConcurrencyBatch(
           tuningSnapshot,
-          this.lastBatchCompleted,
-          this.lastBatchDurationMs
+          this.metrics.lastBatchCompleted,
+          this.metrics.lastBatchDurationMs
         )
       }
     }
@@ -1796,9 +1748,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (!renderer?.available || completed < 6 || durationMs <= 0) return
 
-    const localGenerated = this.localGenerationCount - snapshot.localGenerationCount
-    const fallbacks = this.localFallbacks - snapshot.localFallbacks
-    const preemptions = this.generationPreemptions - snapshot.generationPreemptions
+    const localGenerated = this.metrics.localGenerationCount - snapshot.localGenerationCount
+    const fallbacks = this.metrics.localFallbacks - snapshot.localFallbacks
+    const preemptions = this.metrics.generationPreemptions - snapshot.generationPreemptions
 
     if (localGenerated < Math.max(4, Math.floor(completed * 0.6)) || preemptions > 0) {
       this.localTuningStatus = 'learning skipped (mixed/preempted batch)'
@@ -2201,8 +2153,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
           const themeStartedAt = performance.now()
           await this.applyGenerationLightTheme(frameEl)
-          this.themeTotalMs += performance.now() - themeStartedAt
-          this.themeCount++
+          this.metrics.themeTotalMs += performance.now() - themeStartedAt
+          this.metrics.themeCount++
 
           const paintStartedAt = performance.now()
 
@@ -2215,8 +2167,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
             // Best effort, matching the normal generation path.
           }
 
-          this.paintReadyTotalMs += performance.now() - paintStartedAt
-          this.paintReadyCount++
+          this.metrics.paintReadyTotalMs += performance.now() - paintStartedAt
+          this.metrics.paintReadyCount++
 
           if (node.frameEl !== frameEl || !frameEl.isConnected) {
             this.settleGenerationPreload(preload, false, true)
@@ -2272,8 +2224,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         session.frameCreatedAt === undefined
       ) {
         session.frameCreatedAt = performance.now()
-        this.frameCreateTotalMs += session.frameCreatedAt - session.frameRequestedAt
-        this.frameCreateCount++
+        this.metrics.frameCreateTotalMs += session.frameCreatedAt - session.frameRequestedAt
+        this.metrics.frameCreateCount++
       }
 
       frameEl.addEventListener(
@@ -2283,10 +2235,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
           if (currentSession?.node === node && currentSession.domReadyAt === undefined) {
             currentSession.domReadyAt = performance.now()
-            this.domReadyTotalMs +=
+            this.metrics.domReadyTotalMs +=
               currentSession.domReadyAt -
               (currentSession.frameCreatedAt ?? currentSession.startedAt)
-            this.domReadyCount++
+            this.metrics.domReadyCount++
           }
 
           void this.captureGeneratedFrame(node, frameEl)
@@ -2466,8 +2418,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (!session.preparedByPreload) {
       const themeStartedAt = performance.now()
       await this.applyGenerationLightTheme(frameEl)
-      this.themeTotalMs += performance.now() - themeStartedAt
-      this.themeCount++
+      this.metrics.themeTotalMs += performance.now() - themeStartedAt
+      this.metrics.themeCount++
 
       const paintStartedAt = performance.now()
 
@@ -2480,8 +2432,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         // Best effort.
       }
 
-      this.paintReadyTotalMs += performance.now() - paintStartedAt
-      this.paintReadyCount++
+      this.metrics.paintReadyTotalMs += performance.now() - paintStartedAt
+      this.metrics.paintReadyCount++
     }
 
     if (this.activeGeneration !== session) return
@@ -2536,8 +2488,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         JSON.stringify(metadata)
       )
 
-      this.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
-      this.metadataWriteCount++
+      this.metrics.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
+      this.metrics.metadataWriteCount++
     } catch (error) {
       this.log(error, true)
       this.removeNodeFrame(node)
@@ -2559,8 +2511,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     const previewStartedAt = performance.now()
     const previewReady = await this.showPreviewOverFrame(node, false)
-    this.previewReadyTotalMs += performance.now() - previewStartedAt
-    this.previewReadyCount++
+    this.metrics.previewReadyTotalMs += performance.now() - previewStartedAt
+    this.metrics.previewReadyCount++
 
     if (this.activeGeneration !== session) return
 
@@ -2601,8 +2553,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     try {
       const capturePageStartedAt = performance.now()
       const image = await frameEl.capturePage()
-      this.capturePageTotalMs += performance.now() - capturePageStartedAt
-      this.capturePageCount++
+      this.metrics.capturePageTotalMs += performance.now() - capturePageStartedAt
+      this.metrics.capturePageCount++
 
       if (node.frameEl !== frameEl || !frameEl.isConnected || image.isEmpty()) {
         return false
@@ -2611,16 +2563,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       const encodeStartedAt = performance.now()
       const optimized = this.optimizeThumbnail(image)
       const jpeg = optimized.toJPEG(THUMBNAIL_JPEG_QUALITY)
-      this.encodeTotalMs += performance.now() - encodeStartedAt
-      this.encodeCount++
+      this.metrics.encodeTotalMs += performance.now() - encodeStartedAt
+      this.metrics.encodeCount++
 
       const thumbnailWriteStartedAt = performance.now()
       await this.app.vault.adapter.writeBinary(`${this.cacheDir}/${node.id}.thumbnail.jpg`, jpeg)
-      this.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
-      this.thumbnailWriteCount++
+      this.metrics.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
+      this.metrics.thumbnailWriteCount++
 
-      this.captureTotalMs += performance.now() - startedAt
-      this.capturedThumbnailBytes += jpeg.byteLength
+      this.metrics.captureTotalMs += performance.now() - startedAt
+      this.metrics.capturedThumbnailBytes += jpeg.byteLength
 
       return true
     } catch (error) {
@@ -2774,59 +2726,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   resetDiagnostics() {
-    this.cacheHits = 0
-    this.cacheMisses = 0
-    this.generationCompleted = 0
-    this.generationFailed = 0
-    this.generationTimedOut = 0
-    this.generationPreemptions = 0
-    this.generationPreloadsStarted = 0
-    this.generationPreloadsReady = 0
-    this.generationPreloadHits = 0
-    this.generationPreloadFailures = 0
-    this.generationPreloadReadyTotalMs = 0
-    this.preloadPromotionWaitTotalMs = 0
-    this.preloadPromotionWaitCount = 0
-    this.preloadImmediateHits = 0
-    this.preloadPendingHits = 0
-    this.generationColdTotalMs = 0
-    this.generationColdCount = 0
-    this.generationPreloadedTotalMs = 0
-    this.generationPreloadedCount = 0
-    this.generationTotalMs = 0
-    this.batchStartedAt =
+    const batchStartedAt =
       this.activeGeneration || this.localGenerations.size > 0 || this.generationQueue.length > 0
         ? performance.now()
         : null
-    this.batchCompleted = 0
-    this.lastBatchDurationMs = 0
-    this.lastBatchCompleted = 0
-    this.queueWaitTotalMs = 0
-    this.queueWaitCount = 0
-    this.frameCreateTotalMs = 0
-    this.frameCreateCount = 0
-    this.domReadyTotalMs = 0
-    this.domReadyCount = 0
-    this.themeTotalMs = 0
-    this.themeCount = 0
-    this.paintReadyTotalMs = 0
-    this.paintReadyCount = 0
-    this.captureTotalMs = 0
-    this.capturePageTotalMs = 0
-    this.capturePageCount = 0
-    this.encodeTotalMs = 0
-    this.encodeCount = 0
-    this.thumbnailWriteTotalMs = 0
-    this.thumbnailWriteCount = 0
-    this.metadataWriteTotalMs = 0
-    this.metadataWriteCount = 0
-    this.previewReadyTotalMs = 0
-    this.previewReadyCount = 0
-    this.capturedThumbnailBytes = 0
-    this.localGenerationTotalMs = 0
-    this.localGenerationCount = 0
-    this.localFallbacks = 0
-    this.localTimeouts = 0
+
+    this.metrics.reset(batchStartedAt)
     this.interactiveLightPreferenceStatus = 'not attempted'
     this.interactiveMatchMediaLight = null
     this.localBrowserRenderer?.resetMetrics()
@@ -2861,57 +2766,57 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     const averageGenerationMs =
-      this.generationCompleted > 0
-        ? Math.round(this.generationTotalMs / this.generationCompleted)
+      this.metrics.generationCompleted > 0
+        ? Math.round(this.metrics.generationTotalMs / this.metrics.generationCompleted)
         : 0
 
     const averageCaptureMs =
-      this.generationCompleted > 0 ? Math.round(this.captureTotalMs / this.generationCompleted) : 0
+      this.metrics.generationCompleted > 0 ? Math.round(this.metrics.captureTotalMs / this.metrics.generationCompleted) : 0
     const averagePreloadReadyMs =
-      this.generationPreloadsReady > 0
-        ? Math.round(this.generationPreloadReadyTotalMs / this.generationPreloadsReady)
+      this.metrics.generationPreloadsReady > 0
+        ? Math.round(this.metrics.generationPreloadReadyTotalMs / this.metrics.generationPreloadsReady)
         : 0
     const averagePromotionWaitMs =
-      this.preloadPromotionWaitCount > 0
-        ? Math.round(this.preloadPromotionWaitTotalMs / this.preloadPromotionWaitCount)
+      this.metrics.preloadPromotionWaitCount > 0
+        ? Math.round(this.metrics.preloadPromotionWaitTotalMs / this.metrics.preloadPromotionWaitCount)
         : 0
     const averageColdGenerationMs =
-      this.generationColdCount > 0
-        ? Math.round(this.generationColdTotalMs / this.generationColdCount)
+      this.metrics.generationColdCount > 0
+        ? Math.round(this.metrics.generationColdTotalMs / this.metrics.generationColdCount)
         : 0
     const averagePreloadedGenerationMs =
-      this.generationPreloadedCount > 0
-        ? Math.round(this.generationPreloadedTotalMs / this.generationPreloadedCount)
+      this.metrics.generationPreloadedCount > 0
+        ? Math.round(this.metrics.generationPreloadedTotalMs / this.metrics.generationPreloadedCount)
         : 0
-    const lastBatchSeconds = this.lastBatchDurationMs / 1000
+    const lastBatchSeconds = this.metrics.lastBatchDurationMs / 1000
     const lastBatchThroughput =
-      lastBatchSeconds > 0 ? this.lastBatchCompleted / lastBatchSeconds : 0
+      lastBatchSeconds > 0 ? this.metrics.lastBatchCompleted / lastBatchSeconds : 0
     const averageQueueWaitMs =
-      this.queueWaitCount > 0 ? Math.round(this.queueWaitTotalMs / this.queueWaitCount) : 0
+      this.metrics.queueWaitCount > 0 ? Math.round(this.metrics.queueWaitTotalMs / this.metrics.queueWaitCount) : 0
     const averageFrameCreateMs =
-      this.frameCreateCount > 0 ? Math.round(this.frameCreateTotalMs / this.frameCreateCount) : 0
+      this.metrics.frameCreateCount > 0 ? Math.round(this.metrics.frameCreateTotalMs / this.metrics.frameCreateCount) : 0
     const averageDomReadyMs =
-      this.domReadyCount > 0 ? Math.round(this.domReadyTotalMs / this.domReadyCount) : 0
-    const averageThemeMs = this.themeCount > 0 ? Math.round(this.themeTotalMs / this.themeCount) : 0
+      this.metrics.domReadyCount > 0 ? Math.round(this.metrics.domReadyTotalMs / this.metrics.domReadyCount) : 0
+    const averageThemeMs = this.metrics.themeCount > 0 ? Math.round(this.metrics.themeTotalMs / this.metrics.themeCount) : 0
     const averagePaintReadyMs =
-      this.paintReadyCount > 0 ? Math.round(this.paintReadyTotalMs / this.paintReadyCount) : 0
+      this.metrics.paintReadyCount > 0 ? Math.round(this.metrics.paintReadyTotalMs / this.metrics.paintReadyCount) : 0
     const averageCapturePageMs =
-      this.capturePageCount > 0 ? Math.round(this.capturePageTotalMs / this.capturePageCount) : 0
+      this.metrics.capturePageCount > 0 ? Math.round(this.metrics.capturePageTotalMs / this.metrics.capturePageCount) : 0
     const averageEncodeMs =
-      this.encodeCount > 0 ? Math.round(this.encodeTotalMs / this.encodeCount) : 0
+      this.metrics.encodeCount > 0 ? Math.round(this.metrics.encodeTotalMs / this.metrics.encodeCount) : 0
     const averageThumbnailWriteMs =
-      this.thumbnailWriteCount > 0
-        ? Math.round(this.thumbnailWriteTotalMs / this.thumbnailWriteCount)
+      this.metrics.thumbnailWriteCount > 0
+        ? Math.round(this.metrics.thumbnailWriteTotalMs / this.metrics.thumbnailWriteCount)
         : 0
     const averageMetadataWriteMs =
-      this.metadataWriteCount > 0
-        ? Math.round(this.metadataWriteTotalMs / this.metadataWriteCount)
+      this.metrics.metadataWriteCount > 0
+        ? Math.round(this.metrics.metadataWriteTotalMs / this.metrics.metadataWriteCount)
         : 0
     const averagePreviewReadyMs =
-      this.previewReadyCount > 0 ? Math.round(this.previewReadyTotalMs / this.previewReadyCount) : 0
+      this.metrics.previewReadyCount > 0 ? Math.round(this.metrics.previewReadyTotalMs / this.metrics.previewReadyCount) : 0
     const averageLocalGenerationMs =
-      this.localGenerationCount > 0
-        ? Math.round(this.localGenerationTotalMs / this.localGenerationCount)
+      this.metrics.localGenerationCount > 0
+        ? Math.round(this.metrics.localGenerationTotalMs / this.metrics.localGenerationCount)
         : 0
     const localRendererAvailable = this.localBrowserRenderer?.available ?? false
     const generationEngine = localRendererAvailable
@@ -2955,13 +2860,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
             ? 'on'
             : 'off'
       } (${this.networkPreconnector?.warmCompletedCount ?? 0}/${this.networkPreconnector?.warmStartedCount ?? 0}, failed ${this.networkPreconnector?.warmFailedCount ?? 0})`,
-      `Cache hits: ${this.cacheHits}`,
-      `Cache misses: ${this.cacheMisses}`,
-      `Generated: ${this.generationCompleted}`,
-      `Generation failures: ${this.generationFailed}`,
-      `Generation timeouts: ${this.generationTimedOut}`,
-      `Generation preemptions: ${this.generationPreemptions}`,
-      `Local browser fallbacks/timeouts: ${this.localFallbacks}/${this.localTimeouts}`,
+      `Cache hits: ${this.metrics.cacheHits}`,
+      `Cache misses: ${this.metrics.cacheMisses}`,
+      `Generated: ${this.metrics.generationCompleted}`,
+      `Generation failures: ${this.metrics.generationFailed}`,
+      `Generation timeouts: ${this.metrics.generationTimedOut}`,
+      `Generation preemptions: ${this.metrics.generationPreemptions}`,
+      `Local browser fallbacks/timeouts: ${this.metrics.localFallbacks}/${this.metrics.localTimeouts}`,
       `Local browser render failures: ${this.localBrowserRenderer?.renderFailureCount ?? 0}`,
       `Local browser launches/closes/launch failures: ${this.localBrowserRenderer?.launchCount ?? 0}/${this.localBrowserRenderer?.closeCount ?? 0}/${this.localBrowserRenderer?.launchFailureCount ?? 0}`,
       `Local browser average launch: ${this.localBrowserRenderer?.averageLaunchMs ?? 0} ms`,
@@ -2970,13 +2875,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Local browser average screenshot: ${this.localBrowserRenderer?.averageScreenshotMs ?? 0} ms`,
       `Average local generation: ${averageLocalGenerationMs} ms`,
       `Generation preload: ${this.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
-      `Preloads started/ready/hit/failed: ${this.generationPreloadsStarted}/${this.generationPreloadsReady}/${this.generationPreloadHits}/${this.generationPreloadFailures}`,
-      `Preload immediate/pending hits: ${this.preloadImmediateHits}/${this.preloadPendingHits}`,
+      `Preloads started/ready/hit/failed: ${this.metrics.generationPreloadsStarted}/${this.metrics.generationPreloadsReady}/${this.metrics.generationPreloadHits}/${this.metrics.generationPreloadFailures}`,
+      `Preload immediate/pending hits: ${this.metrics.preloadImmediateHits}/${this.metrics.preloadPendingHits}`,
       `Average preload ready: ${averagePreloadReadyMs} ms`,
       `Average preload promotion wait: ${averagePromotionWaitMs} ms`,
       `Average cold generation: ${averageColdGenerationMs} ms`,
       `Average preloaded generation: ${averagePreloadedGenerationMs} ms`,
-      `Last batch: ${this.lastBatchCompleted} cards / ${Math.round(this.lastBatchDurationMs)} ms`,
+      `Last batch: ${this.metrics.lastBatchCompleted} cards / ${Math.round(this.metrics.lastBatchDurationMs)} ms`,
       `Last batch throughput: ${lastBatchThroughput.toFixed(2)} cards/s`,
       `Average queue wait: ${averageQueueWaitMs} ms`,
       `Average frame create: ${averageFrameCreateMs} ms`,
@@ -2990,7 +2895,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Average preview ready: ${averagePreviewReadyMs} ms`,
       `Average generation: ${averageGenerationMs} ms`,
       `Average capture pipeline: ${averageCaptureMs} ms`,
-      `Thumbnail bytes written: ${this.capturedThumbnailBytes}`
+      `Thumbnail bytes written: ${this.metrics.capturedThumbnailBytes}`
     ].join('\n')
 
     this.log(diagnostics)
