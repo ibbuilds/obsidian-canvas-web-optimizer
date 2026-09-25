@@ -337,10 +337,11 @@ export default class LocalBrowserRenderer {
           throw new Error(`Local browser navigation failed: ${navigation.errorText}`)
         }
 
-        const readinessSource = await Promise.race([
+        const readinessSource = await this.waitForNavigationReadiness(
           domReady,
-          this.waitForDocumentReady(runtime.connection, sessionId).then(() => 'probe' as const)
-        ])
+          runtime.connection,
+          sessionId
+        )
 
         if (readinessSource === 'probe') {
           this.navigationReadinessProbeWins++
@@ -438,6 +439,42 @@ export default class LocalBrowserRenderer {
       promise,
       cancel
     }
+  }
+
+  private waitForNavigationReadiness(
+    domReady: Promise<'event'>,
+    connection: CdpConnection,
+    sessionId: string
+  ): Promise<'event' | 'probe'> {
+    const probe = this.waitForDocumentReady(connection, sessionId).then(() => 'probe' as const)
+
+    return new Promise((resolve, reject) => {
+      let failures = 0
+      let lastError: Error | null = null
+      let settled = false
+
+      const succeed = (source: 'event' | 'probe') => {
+        if (settled) return
+
+        settled = true
+        resolve(source)
+      }
+
+      const fail = (error: unknown) => {
+        if (settled) return
+
+        failures++
+        lastError = toError(error)
+
+        if (failures < 2) return
+
+        settled = true
+        reject(lastError)
+      }
+
+      void domReady.then(succeed).catch(fail)
+      void probe.then(succeed).catch(fail)
+    })
   }
 
   private async waitForDocumentReady(connection: CdpConnection, sessionId: string): Promise<void> {
