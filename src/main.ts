@@ -20,7 +20,9 @@ import {
 } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
 import { formatDiagnosticsReport } from './diagnostics/report'
-import AdaptiveConcurrencyTuner, { type ConcurrencyTuningRecord } from './generation/concurrency-tuner'
+import AdaptiveConcurrencyTuner, {
+  type ConcurrencyTuningRecord
+} from './generation/concurrency-tuner'
 import GenerationCoordinator from './generation/coordinator'
 import type {
   ActiveGeneration,
