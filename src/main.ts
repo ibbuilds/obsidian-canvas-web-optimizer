@@ -2176,8 +2176,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         launchFailures: this.localBrowserRenderer?.launchFailureCount ?? 0,
         averageLaunchMs: this.localBrowserRenderer?.averageLaunchMs ?? 0,
         averageRenderMs: this.localBrowserRenderer?.averageRenderMs ?? 0,
+        averageSetupMs: this.localBrowserRenderer?.averageSetupMs ?? 0,
         averageNavigationMs: this.localBrowserRenderer?.averageNavigationMs ?? 0,
-        averageScreenshotMs: this.localBrowserRenderer?.averageScreenshotMs ?? 0
+        averagePaintReadyMs: this.localBrowserRenderer?.averagePaintReadyMs ?? 0,
+        averageScreenshotMs: this.localBrowserRenderer?.averageScreenshotMs ?? 0,
+        screenshotOptimizationStatus:
+          this.localBrowserRenderer?.screenshotOptimizationStatus ?? 'not initialized'
       },
       network: {
         preconnectActive: this.networkPreconnector?.active ?? false,
