@@ -16,10 +16,10 @@ export type LinkNodePatchHooks = {
 }
 
 export function installLinkNodePatches(
-  constructor: LinkNodeConstructor,
+  linkNodeConstructor: LinkNodeConstructor,
   hooks: LinkNodePatchHooks
 ): () => void {
-  return around(constructor.prototype, {
+  return around(linkNodeConstructor.prototype, {
     _saveThumbnail: () =>
       async function (this: LinkNode) {
         return hooks.saveThumbnail(this)
