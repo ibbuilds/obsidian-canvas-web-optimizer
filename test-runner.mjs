@@ -6,7 +6,11 @@ const outdir = '.test-dist'
 
 try {
   await esbuild.build({
-    entryPoints: ['tests/core-utils.test.ts', 'tests/preview-cache.test.ts'],
+    entryPoints: [
+      'tests/core-utils.test.ts',
+      'tests/preview-cache.test.ts',
+      'tests/dynamic-priority-queue.test.ts'
+    ],
     bundle: true,
     platform: 'node',
     format: 'esm',
@@ -18,7 +22,12 @@ try {
 
   const result = spawnSync(
     process.execPath,
-    ['--test', `${outdir}/core-utils.test.mjs`, `${outdir}/preview-cache.test.mjs`],
+    [
+      '--test',
+      `${outdir}/core-utils.test.mjs`,
+      `${outdir}/preview-cache.test.mjs`,
+      `${outdir}/dynamic-priority-queue.test.mjs`
+    ],
     {
       stdio: 'inherit'
     }
