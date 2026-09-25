@@ -68,7 +68,6 @@ test('invalid jobs are discarded and predicates select the right lane', () => {
   assert.equal(queue.length, 0)
 })
 
-
 test('queue handles large batches without duplicate keys or stale tombstones', () => {
   const queue = createQueue()
 
