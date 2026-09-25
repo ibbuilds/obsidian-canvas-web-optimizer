@@ -2369,7 +2369,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   resetDiagnostics() {
     const batchStartedAt =
-      this.activeGeneration || this.localGenerations.size > 0 || this.generationCoordinator.length > 0
+      this.activeGeneration ||
+      this.localGenerations.size > 0 ||
+      this.generationCoordinator.length > 0
         ? performance.now()
         : null
 
