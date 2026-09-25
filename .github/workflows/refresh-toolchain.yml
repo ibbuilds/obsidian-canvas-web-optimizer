@@ -33,7 +33,7 @@ jobs:
           cache: pnpm
 
       - name: Refresh selected development tools
-        run: pnpm up typescript@5.9.3 esbuild@0.25.10 @types/node@22 --save-dev
+        run: pnpm up typescript@5.9.3 esbuild@0.25.10 @types/node@22
 
       - name: Validate upgraded toolchain
         run: pnpm run build
