@@ -105,6 +105,18 @@ Priority is derived from Canvas coordinates when available, avoiding per-card DO
 
 The queue is key-addressed by node ID, which prevents duplicate work.
 
+## Canvas Utilities coordination
+
+Canvas Utilities is an optional producer/manipulator of native Canvas nodes. Integration is intentionally event-based rather than a package dependency.
+
+During `canvas-utilities:batch-start`, new background generation scheduling is paused. Node initialization and cache evaluation may still occur, so work is collected without immediately consuming render resources. On `canvas-utilities:batch-end`, generation priorities are marked dirty and scheduling resumes against the final Canvas geometry. `canvas-utilities:geometry-changed` also invalidates queue priority ordering.
+
+This boundary keeps ownership strict:
+
+- Canvas Utilities owns node creation, size, position, grouping, alignment, and layout.
+- Canvas Web Optimizer owns preview cache, thumbnail generation, webview lifecycle, and generation priority.
+- Neither plugin reads or mutates the other's private storage.
+
 ## Interactive webviews
 
 `InteractiveActivationController` owns the request/active/transition state machine. The plugin supplies side effects:

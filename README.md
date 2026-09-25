@@ -70,6 +70,14 @@ Use **Canvas Web Optimizer: Cleanup unused thumbnails** to remove cached files f
 
 Diagnostics include queue state, cache hits/misses, local-browser lifecycle, adaptive concurrency, render timing, fallbacks, failures, and interactive webview theme state.
 
+## Canvas Utilities interoperability
+
+Canvas Web Optimizer can coordinate with the optional [Canvas Utilities](https://github.com/ibbuilds/obsidian-canvas-utilities) plugin without depending on it.
+
+When Canvas Utilities performs a bulk create or geometry operation, it emits workspace events. Canvas Web Optimizer uses those events to pause new background thumbnail scheduling during the mutation, then refresh generation priorities and resume work once the final Canvas geometry is stable.
+
+This prevents large pastes and layout operations from starting avoidable thumbnail work against intermediate node positions. Both plugins remain fully usable on their own.
+
 ## Theme behavior
 
 Thumbnail capture requests a light browser color preference so previews are consistent.
