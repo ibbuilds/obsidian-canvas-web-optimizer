@@ -31,6 +31,10 @@ export default class InteractiveActivationController<T> {
     return true
   }
 
+  cancelPending() {
+    this.requested = null
+  }
+
   clearAll() {
     this.requested = null
     this.active = null
