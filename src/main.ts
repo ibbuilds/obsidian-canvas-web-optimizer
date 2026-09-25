@@ -2,13 +2,17 @@ import { around } from 'monkey-around'
 import {
   type Canvas,
   type CanvasLeaf,
-  type CanvasNodeData,
   type LinkNode,
   type LinkNodeConstructor,
   Notice,
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
+import {
+  extractCanvasNodeIds,
+  isFatalLoadFailure,
+  pickPreferredConcurrency
+} from './core-utils'
 import LocalBrowserRenderer, {
   type LocalBrowserRenderResult,
   type LocalBrowserRenderTask
@@ -311,13 +315,6 @@ function waitForImage(image: HTMLImageElement): Promise<boolean> {
     image.addEventListener('load', onLoad, { once: true })
     image.addEventListener('error', onError, { once: true })
   })
-}
-
-function isFatalLoadFailure(event: DidFailLoadEvent): boolean {
-  if (event.isMainFrame === false) return false
-
-  // ERR_ABORTED is common during normal navigation/redirects.
-  return event.errorCode !== -3
 }
 
 export default class CanvasWebOptimizerPlugin extends Plugin {
@@ -1812,26 +1809,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     record: LocalConcurrencyTuningRecord,
     renderer: LocalBrowserRenderer
   ): number {
-    const scored = renderer.tuningCandidates
-      .map(concurrency => ({
-        concurrency,
-        score: record.scores[String(concurrency)]?.mean
-      }))
-      .filter(
-        (entry): entry is { concurrency: number; score: number } =>
-          typeof entry.score === 'number' && Number.isFinite(entry.score)
-      )
-
-    if (scored.length === 0) {
-      return renderer.poolSize
-    }
-
-    const topScore = Math.max(...scored.map(entry => entry.score))
-    const nearTop = scored
-      .filter(entry => entry.score >= topScore * 0.97)
-      .sort((left, right) => left.concurrency - right.concurrency)
-
-    return nearTop[0]?.concurrency ?? scored[0].concurrency
+    return pickPreferredConcurrency(renderer.tuningCandidates, record.scores, renderer.poolSize)
   }
 
   private async observeLocalConcurrencyBatch(
@@ -3096,8 +3074,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   extractNodeIdsFromCanvas(content: string): string[] {
-    const canvas = JSON.parse(content)
-
-    return (canvas.nodes || []).map((node: CanvasNodeData) => node.id)
+    return extractCanvasNodeIds(content)
   }
 }
