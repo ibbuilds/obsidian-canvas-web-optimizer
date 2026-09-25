@@ -16,6 +16,7 @@ import {
   type RectBounds
 } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
+import { formatDiagnosticsReport } from './diagnostics/report'
 import AdaptiveConcurrencyTuner, {
   type ConcurrencyCounters,
   type ConcurrencyTuningRecord
@@ -2253,86 +2254,48 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       })
     }
 
-    const metricSummary = this.metrics.summary()
     const localRendererAvailable = this.localBrowserRenderer?.available ?? false
-    const generationEngine = localRendererAvailable
-      ? `local browser sidecar (${this.localBrowserRenderer?.poolSize ?? 0} workers)`
-      : 'native webview'
-    const localBrowserStatus = this.localBrowserRenderer
-      ? `${this.localBrowserRenderer.browserName} / ${this.localBrowserRenderer.state}`
-      : 'not initialized'
-    const localBrowserUnavailableReason = this.localBrowserRenderer?.unavailableReason ?? 'none'
-
-    const diagnostics = [
-      `Mounted web cards: ${mountedWebCards.size}`,
-      `Cached previews: ${cachedPreviews}`,
-      `Live webviews: ${liveWebviews}`,
-      `Generating thumbnails: ${(this.activeGeneration ? 1 : 0) + this.localGenerations.size}`,
-      `Queued: ${this.generationCoordinator.length}`,
-      `Generation engine: ${generationEngine}`,
-      `Local browser: ${localBrowserStatus}`,
-      `Local browser unavailable reason: ${localBrowserUnavailableReason}`,
-      `Local browser hardware: ${this.localBrowserRenderer?.hardwareSummary ?? 'unknown'}`,
-      `Local browser concurrency: ${this.localBrowserRenderer?.concurrencySummary ?? 'unknown'}`,
-      `Local browser tuning: ${this.concurrencyTuner?.status ?? 'not initialized'}`,
-      `Local browser active tasks: ${this.localBrowserRenderer?.activeCount ?? 0}`,
-      `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
-      `Interactive light preference: ${this.interactiveLightPreferenceStatus}`,
-      `Interactive matchMedia light: ${
-        this.interactiveMatchMediaLight === null ? 'not tested' : this.interactiveMatchMediaLight
-      }`,
-      `Background execution: ${this.backgroundExecution.active ? 'on' : 'off'}`,
-      `Network preconnect: ${
-        localRendererAvailable
-          ? 'standby (local browser preferred)'
-          : this.networkPreconnector?.active
-            ? 'on'
-            : 'off'
-      } (${this.networkPreconnector?.count ?? 0})`,
-      `HTTP warm cache: ${
-        localRendererAvailable
-          ? 'standby (local browser preferred)'
-          : this.networkPreconnector?.fetchActive
-            ? 'on'
-            : 'off'
-      } (${this.networkPreconnector?.warmCompletedCount ?? 0}/${this.networkPreconnector?.warmStartedCount ?? 0}, failed ${this.networkPreconnector?.warmFailedCount ?? 0})`,
-      `Cache hits: ${this.metrics.cacheHits}`,
-      `Cache misses: ${this.metrics.cacheMisses}`,
-      `Generated: ${this.metrics.generationCompleted}`,
-      `Generation failures: ${this.metrics.generationFailed}`,
-      `Generation timeouts: ${this.metrics.generationTimedOut}`,
-      `Generation preemptions: ${this.metrics.generationPreemptions}`,
-      `Local browser fallbacks/timeouts: ${this.metrics.localFallbacks}/${this.metrics.localTimeouts}`,
-      `Local browser render failures: ${this.localBrowserRenderer?.renderFailureCount ?? 0}`,
-      `Local browser launches/closes/launch failures: ${this.localBrowserRenderer?.launchCount ?? 0}/${this.localBrowserRenderer?.closeCount ?? 0}/${this.localBrowserRenderer?.launchFailureCount ?? 0}`,
-      `Local browser average launch: ${this.localBrowserRenderer?.averageLaunchMs ?? 0} ms`,
-      `Local browser average render: ${this.localBrowserRenderer?.averageRenderMs ?? 0} ms`,
-      `Local browser average navigation: ${this.localBrowserRenderer?.averageNavigationMs ?? 0} ms`,
-      `Local browser average screenshot: ${this.localBrowserRenderer?.averageScreenshotMs ?? 0} ms`,
-      `Average local generation: ${metricSummary.averageLocalGenerationMs} ms`,
-      `Generation preload: ${this.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
-      `Preloads started/ready/hit/failed: ${this.metrics.generationPreloadsStarted}/${this.metrics.generationPreloadsReady}/${this.metrics.generationPreloadHits}/${this.metrics.generationPreloadFailures}`,
-      `Preload immediate/pending hits: ${this.metrics.preloadImmediateHits}/${this.metrics.preloadPendingHits}`,
-      `Average preload ready: ${metricSummary.averagePreloadReadyMs} ms`,
-      `Average preload promotion wait: ${metricSummary.averagePromotionWaitMs} ms`,
-      `Average cold generation: ${metricSummary.averageColdGenerationMs} ms`,
-      `Average preloaded generation: ${metricSummary.averagePreloadedGenerationMs} ms`,
-      `Last batch: ${this.metrics.lastBatchCompleted} cards / ${Math.round(this.metrics.lastBatchDurationMs)} ms`,
-      `Last batch throughput: ${metricSummary.lastBatchThroughput.toFixed(2)} cards/s`,
-      `Average queue wait: ${metricSummary.averageQueueWaitMs} ms`,
-      `Average frame create: ${metricSummary.averageFrameCreateMs} ms`,
-      `Average DOM ready: ${metricSummary.averageDomReadyMs} ms`,
-      `Average theme apply: ${metricSummary.averageThemeMs} ms`,
-      `Average paint ready: ${metricSummary.averagePaintReadyMs} ms`,
-      `Average capturePage: ${metricSummary.averageCapturePageMs} ms`,
-      `Average encode: ${metricSummary.averageEncodeMs} ms`,
-      `Average thumbnail write: ${metricSummary.averageThumbnailWriteMs} ms`,
-      `Average metadata write: ${metricSummary.averageMetadataWriteMs} ms`,
-      `Average preview ready: ${metricSummary.averagePreviewReadyMs} ms`,
-      `Average generation: ${metricSummary.averageGenerationMs} ms`,
-      `Average capture pipeline: ${metricSummary.averageCaptureMs} ms`,
-      `Thumbnail bytes written: ${this.metrics.capturedThumbnailBytes}`
-    ].join('\n')
+    const diagnostics = formatDiagnosticsReport({
+      mountedWebCards: mountedWebCards.size,
+      cachedPreviews,
+      liveWebviews,
+      generatingThumbnails: (this.activeGeneration ? 1 : 0) + this.localGenerations.size,
+      queued: this.generationCoordinator.length,
+      interactiveWebviewActive: Boolean(this.activeInteractiveNode),
+      interactiveLightPreferenceStatus: this.interactiveLightPreferenceStatus,
+      interactiveMatchMediaLight: this.interactiveMatchMediaLight,
+      backgroundExecutionActive: this.backgroundExecution.active,
+      generationPreloadDisabled: this.generationPreloadDisabled,
+      metrics: this.metrics,
+      localBrowser: {
+        available: localRendererAvailable,
+        poolSize: this.localBrowserRenderer?.poolSize ?? 0,
+        status: this.localBrowserRenderer
+          ? `${this.localBrowserRenderer.browserName} / ${this.localBrowserRenderer.state}`
+          : 'not initialized',
+        unavailableReason: this.localBrowserRenderer?.unavailableReason ?? 'none',
+        hardwareSummary: this.localBrowserRenderer?.hardwareSummary ?? 'unknown',
+        concurrencySummary: this.localBrowserRenderer?.concurrencySummary ?? 'unknown',
+        tuningStatus: this.concurrencyTuner?.status ?? 'not initialized',
+        activeTasks: this.localBrowserRenderer?.activeCount ?? 0,
+        renderFailures: this.localBrowserRenderer?.renderFailureCount ?? 0,
+        launches: this.localBrowserRenderer?.launchCount ?? 0,
+        closes: this.localBrowserRenderer?.closeCount ?? 0,
+        launchFailures: this.localBrowserRenderer?.launchFailureCount ?? 0,
+        averageLaunchMs: this.localBrowserRenderer?.averageLaunchMs ?? 0,
+        averageRenderMs: this.localBrowserRenderer?.averageRenderMs ?? 0,
+        averageNavigationMs: this.localBrowserRenderer?.averageNavigationMs ?? 0,
+        averageScreenshotMs: this.localBrowserRenderer?.averageScreenshotMs ?? 0
+      },
+      network: {
+        preconnectActive: this.networkPreconnector?.active ?? false,
+        preconnectCount: this.networkPreconnector?.count ?? 0,
+        warmActive: this.networkPreconnector?.fetchActive ?? false,
+        warmCompleted: this.networkPreconnector?.warmCompletedCount ?? 0,
+        warmStarted: this.networkPreconnector?.warmStartedCount ?? 0,
+        warmFailed: this.networkPreconnector?.warmFailedCount ?? 0
+      }
+    })
 
     this.log(diagnostics)
 
