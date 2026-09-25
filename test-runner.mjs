@@ -6,7 +6,7 @@ const outdir = '.test-dist'
 
 try {
   await esbuild.build({
-    entryPoints: ['tests/core-utils.test.ts'],
+    entryPoints: ['tests/core-utils.test.ts', 'tests/preview-cache.test.ts'],
     bundle: true,
     platform: 'node',
     format: 'esm',
@@ -16,9 +16,13 @@ try {
     logLevel: 'warning'
   })
 
-  const result = spawnSync(process.execPath, ['--test', `${outdir}/core-utils.test.mjs`], {
-    stdio: 'inherit'
-  })
+  const result = spawnSync(
+    process.execPath,
+    ['--test', `${outdir}/core-utils.test.mjs`, `${outdir}/preview-cache.test.mjs`],
+    {
+      stdio: 'inherit'
+    }
+  )
 
   if (result.error) {
     throw result.error
