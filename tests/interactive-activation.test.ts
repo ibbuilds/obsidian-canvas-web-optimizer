@@ -61,13 +61,7 @@ test('interactive controller switches nodes and keeps the latest request', async
   await flush()
 
   assert.equal(controller.activeNode, c)
-  assert.deepEqual(events, [
-    'prepare:a',
-    'activate:a',
-    'deactivate:a',
-    'prepare:c',
-    'activate:c'
-  ])
+  assert.deepEqual(events, ['prepare:a', 'activate:a', 'deactivate:a', 'prepare:c', 'activate:c'])
 })
 
 test('interactive controller ignores unavailable and already-active nodes', async () => {
