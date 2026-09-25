@@ -17,7 +17,7 @@ import {
   type RectBounds
 } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
-import DynamicPriorityQueue from './generation/dynamic-priority-queue'
+import GenerationCoordinator from './generation/coordinator'
 import InteractiveActivationController from './interactive/activation-controller'
 import LocalBrowserRenderer, {
   type LocalBrowserRenderResult,
@@ -301,15 +301,15 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly requestedFrameModes = new WeakMap<LinkNode, FrameMode>()
   private readonly pendingPlaceholders = new WeakMap<LinkNode, HTMLElement>()
 
-  private readonly generationQueue = new DynamicPriorityQueue<GenerationJob>(
-    job => job.node.id,
-    job => this.getGenerationPriority(job.node),
-    job => Boolean(job.node.nodeEl?.isConnected) && !this.getNodeState(job.node).cached
-  )
+  private readonly generationCoordinator = new GenerationCoordinator<GenerationJob>({
+    getKey: job => job.node.id,
+    getPriority: job => this.getGenerationPriority(job.node),
+    isValid: job => Boolean(job.node.nodeEl?.isConnected) && !this.getNodeState(job.node).cached,
+    process: () => this.processThumbnailQueue()
+  })
   private activeGeneration: ActiveGeneration | null = null
   private generationPreload: GenerationPreload | null = null
   private generationPreloadDisabled = false
-  private generationQueueScheduled = false
   private readonly backgroundExecution = new BackgroundExecutionController()
   private backgroundExecutionRelease: (() => void) | null = null
   private networkPreconnector: NetworkPreconnector | null = null
@@ -431,7 +431,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   onunload() {
     this.log('Unloading plugin')
 
-    this.generationQueue.clear()
+    this.generationCoordinator.clear()
     this.interactiveActivation.cancelPending()
     this.abortActiveGeneration(false)
     this.cancelGenerationPreload(true)
@@ -921,7 +921,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (
       this.activeGeneration?.node.id === node.id ||
       this.localGenerations.has(node.id) ||
-      this.generationQueue.has(node.id)
+      this.generationCoordinator.has(node.id)
     ) {
       return
     }
@@ -930,7 +930,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.metrics.batchStartedAt === null &&
       !this.activeGeneration &&
       this.localGenerations.size === 0 &&
-      this.generationQueue.length === 0
+      this.generationCoordinator.length === 0
     ) {
       this.metrics.batchStartedAt = performance.now()
       this.metrics.batchCompleted = 0
@@ -954,7 +954,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       forceNative
     }
 
-    this.generationQueue.enqueue(job, front)
+    this.generationCoordinator.enqueue(job, front)
     this.scheduleThumbnailQueue()
   }
 
@@ -963,14 +963,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (
       this.activeInteractiveNode ||
-      this.generationQueueScheduled ||
-      this.generationQueue.length === 0
+      this.generationCoordinator.isScheduled ||
+      this.generationCoordinator.length === 0
     ) {
       this.releaseBackgroundExecutionIfIdle()
       return
     }
 
-    const nextJob = this.generationQueue.peek()
+    const nextJob = this.generationCoordinator.peek()
 
     if (!nextJob) {
       this.releaseBackgroundExecutionIfIdle()
@@ -978,12 +978,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     this.ensureBackgroundExecution(nextJob.node)
-    this.generationQueueScheduled = true
-
-    queueMicrotask(() => {
-      this.generationQueueScheduled = false
-      void this.processThumbnailQueue()
-    })
+    this.generationCoordinator.schedule()
   }
 
   private async processThumbnailQueue() {
@@ -1002,7 +997,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         if (!localJob) break
 
         if (!this.ensureNodeContentMounted(localJob.node)) {
-          this.generationQueue.enqueue(localJob, true)
+          this.generationCoordinator.enqueue(localJob, true)
           break
         }
 
@@ -1014,7 +1009,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
         if (nativeFallbackJob) {
           if (!this.ensureNodeContentMounted(nativeFallbackJob.node)) {
-            this.generationQueue.enqueue(nativeFallbackJob, true)
+            this.generationCoordinator.enqueue(nativeFallbackJob, true)
           } else {
             this.preconnectQueuedWork()
             this.warmQueuedWork()
@@ -1043,7 +1038,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     if (!this.ensureNodeContentMounted(job.node)) {
-      this.generationQueue.enqueue(job, true)
+      this.generationCoordinator.enqueue(job, true)
       return
     }
 
@@ -1057,23 +1052,23 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private preconnectQueuedWork() {
-    if (!this.networkPreconnector || this.generationQueue.length === 0) return
+    if (!this.networkPreconnector || this.generationCoordinator.length === 0) return
 
-    const urls = this.generationQueue.values().map(job => job.node.url)
+    const urls = this.generationCoordinator.values().map(job => job.node.url)
 
     this.networkPreconnector.preconnect(urls, PRECONNECT_LOOKAHEAD_ORIGINS)
   }
 
   private warmQueuedWork() {
-    if (!this.networkPreconnector || this.generationQueue.length === 0) return
+    if (!this.networkPreconnector || this.generationCoordinator.length === 0) return
 
-    const urls = this.generationQueue.values().map(job => job.node.url)
+    const urls = this.generationCoordinator.values().map(job => job.node.url)
 
     this.networkPreconnector.warm(urls, HTTP_WARM_LOOKAHEAD_URLS)
   }
 
   private peekNextGenerationJob(): GenerationJob | null {
-    return this.generationQueue.peek()
+    return this.generationCoordinator.peek()
   }
 
   private startNextGenerationPreload() {
@@ -1156,7 +1151,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private dequeueNextGenerationJob(
     predicate: (job: GenerationJob) => boolean = () => true
   ): GenerationJob | null {
-    const job = this.generationQueue.dequeue(predicate)
+    const job = this.generationCoordinator.dequeue(predicate)
 
     if (!job) return null
 
@@ -1559,7 +1554,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (
       this.activeGeneration ||
       this.localGenerations.size > 0 ||
-      this.generationQueue.length > 0
+      this.generationCoordinator.length > 0
     ) {
       return
     }
@@ -1701,7 +1696,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private removeQueuedGeneration(node: LinkNode) {
-    this.generationQueue.remove(node.id)
+    this.generationCoordinator.remove(node.id)
   }
 
   private handleNodeUrlChanged(node: LinkNode) {
@@ -1745,7 +1740,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handleBreakpointUpdate(node: LinkNode) {
-    this.generationQueue.markPrioritiesDirty()
+    this.generationCoordinator.markPrioritiesDirty()
 
     const session = this.activeGeneration
     const isInteractive = this.activeInteractiveNode === node
@@ -2519,7 +2514,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   resetDiagnostics() {
     const batchStartedAt =
-      this.activeGeneration || this.localGenerations.size > 0 || this.generationQueue.length > 0
+      this.activeGeneration || this.localGenerations.size > 0 || this.generationCoordinator.length > 0
         ? performance.now()
         : null
 
@@ -2572,7 +2567,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Cached previews: ${cachedPreviews}`,
       `Live webviews: ${liveWebviews}`,
       `Generating thumbnails: ${(this.activeGeneration ? 1 : 0) + this.localGenerations.size}`,
-      `Queued: ${this.generationQueue.length}`,
+      `Queued: ${this.generationCoordinator.length}`,
       `Generation engine: ${generationEngine}`,
       `Local browser: ${localBrowserStatus}`,
       `Local browser unavailable reason: ${localBrowserUnavailableReason}`,
