@@ -15,8 +15,13 @@ export type LocalBrowserDiagnostics = {
   launchFailures: number
   averageLaunchMs: number
   averageRenderMs: number
+  averageSetupMs: number
   averageNavigationMs: number
+  readinessProbeWins: number
+  averagePaintReadyMs: number
   averageScreenshotMs: number
+  screenshotOptimizationStatus: string
+  lastFailureSummary: string
 }
 
 export type NetworkDiagnostics = {
@@ -91,10 +96,15 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Generation preemptions: ${context.metrics.generationPreemptions}`,
     `Local browser fallbacks/timeouts: ${context.metrics.localFallbacks}/${context.metrics.localTimeouts}`,
     `Local browser render failures: ${local.renderFailures}`,
+    `Local browser last render failure: ${local.lastFailureSummary}`,
     `Local browser launches/closes/launch failures: ${local.launches}/${local.closes}/${local.launchFailures}`,
+    `Local browser screenshot mode: ${local.screenshotOptimizationStatus}`,
     `Local browser average launch: ${local.averageLaunchMs} ms`,
     `Local browser average render: ${local.averageRenderMs} ms`,
+    `Local browser average setup: ${local.averageSetupMs} ms`,
     `Local browser average navigation: ${local.averageNavigationMs} ms`,
+    `Local browser readiness probe wins: ${local.readinessProbeWins}`,
+    `Local browser average paint ready: ${local.averagePaintReadyMs} ms`,
     `Local browser average screenshot: ${local.averageScreenshotMs} ms`,
     `Average local generation: ${summary.averageLocalGenerationMs} ms`,
     `Generation preload: ${context.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
