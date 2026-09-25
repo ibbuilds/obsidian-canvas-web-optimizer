@@ -4,6 +4,9 @@
   "private": true,
   "description": "Optimize web pages in Obsidian Canvas with cached previews and smarter webview resource management.",
   "main": "main.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "format": "biome format --write src tests test-runner.mjs package.json manifest.json",
