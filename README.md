@@ -139,14 +139,17 @@ Pull requests run the regression suite, Biome checks, TypeScript validation, and
 
 ## Releases
 
-Release tags use the format `v<manifest-version>`. Pushing a matching tag runs the release workflow, rebuilds the plugin from a clean checkout, and publishes `main.js`, `manifest.json`, and `styles.css` as GitHub release assets.
+When `manifest.json` is updated on `main`, the release workflow resolves `v<manifest-version>`, runs the full test/build pipeline from a clean checkout, and creates the GitHub release automatically if that version does not already exist.
 
-Example:
+Release assets:
 
-```bash
-git tag v0.2.0
-git push origin v0.2.0
+```text
+main.js
+manifest.json
+styles.css
 ```
+
+Re-running the workflow is safe: an existing release for the same version is detected and skipped.
 
 ## Platform notes
 
