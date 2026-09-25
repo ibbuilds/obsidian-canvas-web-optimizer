@@ -16,11 +16,11 @@ import {
   type RectBounds
 } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
-import GenerationCoordinator from './generation/coordinator'
 import AdaptiveConcurrencyTuner, {
   type ConcurrencyCounters,
   type ConcurrencyTuningRecord
 } from './generation/concurrency-tuner'
+import GenerationCoordinator from './generation/coordinator'
 import InteractiveActivationController from './interactive/activation-controller'
 import { forceGuestLightPreference } from './interactive/webview-light'
 import LocalBrowserRenderer, {
