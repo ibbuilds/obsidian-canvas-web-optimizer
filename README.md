@@ -1,73 +1,84 @@
 # Canvas Web Optimizer
 
-A performance-focused Obsidian plugin for web-heavy Canvas boards.
+A desktop-only Obsidian plugin for large, web-heavy Canvas boards.
 
-Canvas Web Optimizer reduces the cost of embedded web pages by displaying cached previews instead of keeping every website loaded at the same time.
-
-The project is designed for large research boards, inspiration boards, moodboards, and other Obsidian Canvas workflows containing many web references.
-
-## Why?
-
-A Canvas containing many live web pages can become expensive very quickly.
-
-Every active page can consume resources through:
-
-- JavaScript execution
-- animations
-- timers
-- network requests
-- media
-- DOM rendering
-- Chromium webview processes
-
-For a board containing dozens or hundreds of websites, this can result in high CPU and RAM usage and noticeably worse Canvas performance.
-
-Canvas Web Optimizer aims to keep the visual usefulness of web cards without keeping every website active unnecessarily.
+Canvas Web Optimizer replaces idle web cards with local cached thumbnails and restores a live webview only when you interact with a card. The goal is to preserve the usefulness of Canvas web references without keeping dozens or hundreds of Chromium webviews active at the same time.
 
 ## Current behavior
 
-Web page cards can be represented using locally cached thumbnails instead of automatically keeping the full webpage loaded.
+- Web cards use locally cached JPEG previews when idle.
+- Clicking a cached card activates its live webview.
+- Only one interactive webview is kept active at a time.
+- Leaving an interactive card returns it to its cached preview.
+- The Canvas link label remains available on hover/selection/active cards, including at zoomed-out scales.
+- Clicking the card label opens the original URL in the system browser.
+- Cached previews are restored after reopening a Canvas or restarting Obsidian.
+- Transparent web pages receive a white webview backdrop so they match normal browser rendering.
+- Original Canvas files and URLs are never replaced by thumbnails.
 
-When the full webpage is needed, the card can be activated again.
+## Local thumbnail renderer
 
-Cached previews are stored locally in the plugin's data directory and do not modify the Canvas file itself.
+On desktop, the plugin prefers an installed Chromium-based browser:
 
-If the cache is deleted, the original Canvas URLs remain intact and previews can be regenerated.
+- Microsoft Edge
+- Google Chrome
+- Chromium
+- Brave
 
-## Goals
+The renderer starts only when uncached thumbnails need to be generated. It runs headless with an isolated temporary browser profile and communicates through a private Chrome DevTools Protocol pipe.
 
-Canvas Web Optimizer is being developed around a few principles:
+It does **not** use the user's normal browser profile, cookies, history, or signed-in sessions.
 
-- Keep large web-heavy canvases responsive
-- Avoid unnecessary live webviews
-- Cache lightweight visual previews locally
-- Keep Canvas files and user content untouched
-- Preserve original URLs
-- Minimize idle CPU, RAM, and network usage
-- Make web pages available quickly when the user actually needs them
+When the thumbnail queue becomes idle, the browser is closed automatically and the temporary profile is removed.
 
-Planned performance improvements include:
+If a supported local browser is unavailable or a render fails, the plugin falls back to the native Obsidian webview generation path.
 
-- Limit the number of simultaneously active webviews
-- Automatically return inactive web pages to cached previews
-- Optional instant hover activation
-- Controlled thumbnail-generation concurrency
-- Smarter cache management
-- Further optimizations for very large canvases
+## Performance and resource controls
+
+Thumbnail generation is designed to yield to foreground work rather than monopolize the machine.
+
+- Concurrency is bounded by logical CPU count.
+- Concurrency is bounded by installed RAM.
+- Active concurrency is also clamped by currently free RAM.
+- The renderer learns a good worker count for the current machine from completed batches.
+- Near-equivalent throughput prefers the lower worker count.
+- The sidecar browser runs below normal process priority when supported.
+- User interaction preempts background thumbnail work.
+- The browser is not kept alive when there is no generation work.
+
+The fast path remains local. No screenshot API, remote rendering service, account, subscription, or bundled Chromium is required.
 
 ## Cache
 
-Preview thumbnails are disposable cache data.
+Preview files live inside the plugin data directory:
 
-They are stored inside the plugin's local data directory rather than as Canvas attachments.
+```text
+data/linkCache/
+  <node-id>.thumbnail.jpg
+  <node-id>.metadata.json
+```
 
-Deleting the cache does not delete or modify the original links in your Canvas.
+Cache data is disposable. Deleting it does not modify Canvas files or remove original URLs.
+
+Use **Canvas Web Optimizer: Cleanup unused thumbnails** to remove cached files for Canvas nodes that no longer exist.
+
+## Commands
+
+- **Canvas Web Optimizer: Cleanup unused thumbnails**
+- **Canvas Web Optimizer: Show diagnostics**
+- **Canvas Web Optimizer: Reset diagnostics**
+
+Diagnostics include queue state, cache hits/misses, local-browser lifecycle, adaptive concurrency, render timing, fallbacks, failures, and interactive webview theme state.
+
+## Theme behavior
+
+Thumbnail capture requests a light browser color preference so previews are consistent.
+
+Interactive webviews also request a light color preference when the embedded page supports it. Pages with transparent backgrounds are rendered over a white webview substrate. Sites that implement their own theme logic may still control their internal colors.
 
 ## Installation
 
-Canvas Web Optimizer is currently under development and is not yet available through the Obsidian Community Plugins directory.
-
-### Manual installation
+Canvas Web Optimizer is currently installed manually.
 
 Build the plugin:
 
@@ -76,13 +87,13 @@ pnpm install
 pnpm run build
 ```
 
-Then copy the required plugin files into:
+Copy at least these files into:
 
 ```text
 <vault>/.obsidian/plugins/canvas-web-optimizer/
 ```
 
-At minimum:
+Required files:
 
 ```text
 main.js
@@ -90,9 +101,7 @@ manifest.json
 styles.css
 ```
 
-Then reload Obsidian and enable **Canvas Web Optimizer** under:
-
-**Settings → Community plugins**
+Reload Obsidian and enable **Canvas Web Optimizer** under **Settings → Community plugins**.
 
 ## Development
 
@@ -102,25 +111,39 @@ Install dependencies:
 pnpm install
 ```
 
+Run the regression suite:
+
+```bash
+pnpm test
+```
+
+Run formatting, lint, and TypeScript checks:
+
+```bash
+pnpm run check
+```
+
 Create a production build:
 
 ```bash
 pnpm run build
 ```
 
-Run the development build:
+Run the development watcher:
 
 ```bash
 pnpm run dev
 ```
 
-## Important
+Pull requests run the regression suite, Biome checks, TypeScript validation, and a production build in CI.
 
-Generating a thumbnail requires the webpage to load at least once.
+## Platform notes
 
-This means a new Canvas containing many uncached web pages can still require significant resources during its initial thumbnail-generation pass.
+The plugin is desktop-only because its optimization path depends on Electron/Node capabilities.
 
-Reducing and controlling this initial load is one of the optimization areas planned for Canvas Web Optimizer.
+The local-browser fast path includes browser discovery for Windows, macOS, and Linux. Runtime behavior has been exercised most heavily on Windows; machines without a supported browser automatically use the native fallback.
+
+Sites that require an existing signed-in browser session can render differently in generated thumbnails because the sidecar intentionally uses a clean temporary profile.
 
 ## Acknowledgements
 

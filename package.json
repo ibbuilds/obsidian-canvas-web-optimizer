@@ -1,15 +1,16 @@
 {
   "name": "obsidian-canvas-web-optimizer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Optimize web pages in Obsidian Canvas with cached previews and smarter webview resource management.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "format": "biome format --write src package.json manifest.json",
     "lint": "biome lint src",
-    "check": "biome check src && tsc --noEmit --skipLibCheck",
-    "build": "pnpm run check && node esbuild.config.mjs production",
-    "version": "node version-bump.mjs && git add manifest.json versions.json"
+    "check": "biome check src tests test-runner.mjs && tsc --noEmit --skipLibCheck",
+    "build": "pnpm run test && pnpm run check && node esbuild.config.mjs production",
+    "version": "node version-bump.mjs && git add manifest.json versions.json",
+    "test": "node test-runner.mjs"
   },
   "keywords": [
     "obsidian",

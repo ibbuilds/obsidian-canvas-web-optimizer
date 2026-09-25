@@ -1,7 +1,7 @@
 {
   "id": "canvas-web-optimizer",
   "name": "Canvas Web Optimizer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.1.9",
   "description": "Optimize web pages in Obsidian Canvas with cached previews and smarter webview resource management.",
   "author": "ibbuilds",
