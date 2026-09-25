@@ -17,6 +17,7 @@ export type LocalBrowserDiagnostics = {
   averageRenderMs: number
   averageSetupMs: number
   averageNavigationMs: number
+  readinessProbeWins: number
   averagePaintReadyMs: number
   averageScreenshotMs: number
   screenshotOptimizationStatus: string
@@ -102,6 +103,7 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser average render: ${local.averageRenderMs} ms`,
     `Local browser average setup: ${local.averageSetupMs} ms`,
     `Local browser average navigation: ${local.averageNavigationMs} ms`,
+    `Local browser readiness probe wins: ${local.readinessProbeWins}`,
     `Local browser average paint ready: ${local.averagePaintReadyMs} ms`,
     `Local browser average screenshot: ${local.averageScreenshotMs} ms`,
     `Average local generation: ${summary.averageLocalGenerationMs} ms`,
