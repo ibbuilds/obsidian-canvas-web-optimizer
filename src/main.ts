@@ -7,7 +7,7 @@ import {
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
-import PreviewCache, { type CacheMetadata } from './cache/preview-cache'
+import PreviewCache, { CACHE_METADATA_VERSION, type CacheMetadata } from './cache/preview-cache'
 import { type FrameMode, installLinkNodePatches } from './canvas/link-node-patcher'
 import CanvasNodeRuntime, { type CanvasNodeState } from './canvas/node-runtime'
 import {
@@ -408,7 +408,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     return state.preparation
   }
 
-  private async evaluateNodeCache(node: LinkNode, state: NodeState) {
+  private async evaluateNodeCache(node: LinkNode, state: CanvasNodeState) {
     try {
       const metadata = await this.previewCache.readValidMetadata(node.id, node.url)
 
@@ -430,7 +430,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
   }
 
-  private markNodeCacheMiss(node: LinkNode, state: NodeState) {
+  private markNodeCacheMiss(node: LinkNode, state: CanvasNodeState) {
     state.evaluated = true
     state.cached = false
     state.metadata = null
@@ -441,7 +441,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.applyPreparedNodeState(node, state)
   }
 
-  private applyPreparedNodeState(node: LinkNode, state: NodeState) {
+  private applyPreparedNodeState(node: LinkNode, state: CanvasNodeState) {
     if (state.cached) {
       this.removePendingPlaceholder(node)
 
