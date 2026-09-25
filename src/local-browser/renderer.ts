@@ -1,13 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
-import {
-  freemem,
-  constants as osConstants,
-  platform,
-  setPriority,
-  tmpdir,
-  totalmem
-} from 'node:os'
+import { freemem, constants as osConstants, platform, setPriority, tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { buildTuningCandidates, calculateLivePoolSize } from '../core-utils'
 import { LIGHT_THEME_SCRIPT } from '../web-theme'
