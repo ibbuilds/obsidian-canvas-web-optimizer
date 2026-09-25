@@ -13,11 +13,14 @@ import {
   classifyViewportProximity,
   extractCanvasNodeIds,
   isFatalLoadFailure,
-  pickPreferredConcurrency,
   type RectBounds
 } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
 import GenerationCoordinator from './generation/coordinator'
+import AdaptiveConcurrencyTuner, {
+  type ConcurrencyCounters,
+  type ConcurrencyTuningRecord
+} from './generation/concurrency-tuner'
 import InteractiveActivationController from './interactive/activation-controller'
 import { forceGuestLightPreference } from './interactive/webview-light'
 import LocalBrowserRenderer, {
@@ -86,26 +89,13 @@ type LocalConcurrentGeneration = {
   timeoutId: number
 }
 
-type LocalConcurrencyScore = {
-  mean: number
-  samples: number
-}
-
-type LocalConcurrencyTuningRecord = {
-  bestConcurrency: number
-  scores: Record<string, LocalConcurrencyScore>
-}
-
 type PluginData = {
-  localRendererTuning?: Record<string, LocalConcurrencyTuningRecord>
+  localRendererTuning?: Record<string, ConcurrencyTuningRecord>
   [key: string]: unknown
 }
 
-type LocalBatchTuningSnapshot = {
+type LocalBatchTuningSnapshot = ConcurrencyCounters & {
   concurrency: number
-  localGenerationCount: number
-  localFallbacks: number
-  generationPreemptions: number
 }
 
 type ActiveGeneration = {
@@ -215,7 +205,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly localGenerations = new Map<string, LocalConcurrentGeneration>()
   private pluginData: PluginData = {}
   private localBatchTuning: LocalBatchTuningSnapshot | null = null
-  private localTuningStatus = 'hardware heuristic'
+  private concurrencyTuner: AdaptiveConcurrencyTuner | null = null
 
   private readonly interactiveActivation = new InteractiveActivationController<LinkNode>({
     isAvailable: node => this.isNodeContentMounted(node),
@@ -278,31 +268,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.networkPreconnector = new NetworkPreconnector(this.getWebviewPartition())
     this.localBrowserRenderer = new LocalBrowserRenderer()
 
-    const tuningRecord = this.pluginData.localRendererTuning?.[this.localBrowserRenderer.tuningKey]
-
-    if (tuningRecord) {
-      const candidates = this.localBrowserRenderer.tuningCandidates
-      const untested = candidates.find(
-        candidate => tuningRecord.scores[String(candidate)] === undefined
-      )
-
-      if (untested !== undefined) {
-        this.localBrowserRenderer.setPoolSize(untested)
-        const testedCount =
-          candidates.length -
-          candidates.filter(candidate => tuningRecord.scores[String(candidate)] === undefined)
-            .length
-        this.localTuningStatus = `calibrating ${untested} (${testedCount}/${candidates.length} tested)`
-      } else {
-        const best = this.getPreferredLocalConcurrency(tuningRecord, this.localBrowserRenderer)
-
-        tuningRecord.bestConcurrency = best
-        this.localBrowserRenderer.setPoolSize(best)
-        this.localTuningStatus = `saved best ${best}`
-      }
-    } else {
-      this.localTuningStatus = `hardware heuristic ${this.localBrowserRenderer.poolSize}`
-    }
+    this.concurrencyTuner = new AdaptiveConcurrencyTuner(this.localBrowserRenderer)
+    this.concurrencyTuner.initialize(
+      this.pluginData.localRendererTuning?.[this.localBrowserRenderer.tuningKey]
+    )
 
     this.app.workspace.onLayoutReady(() => {
       if (this.tryPatchLinkNode()) return
@@ -339,6 +308,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.backgroundExecution.dispose()
     this.localBrowserRenderer?.dispose()
     this.localBrowserRenderer = null
+    this.concurrencyTuner = null
     this.networkPreconnector = null
 
     this.reloadActiveCanvasViews()
@@ -1478,95 +1448,36 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.releaseBackgroundExecution()
   }
 
-  private getPreferredLocalConcurrency(
-    record: LocalConcurrencyTuningRecord,
-    renderer: LocalBrowserRenderer
-  ): number {
-    return pickPreferredConcurrency(renderer.tuningCandidates, record.scores, renderer.poolSize)
-  }
-
   private async observeLocalConcurrencyBatch(
     snapshot: LocalBatchTuningSnapshot,
     completed: number,
     durationMs: number
   ) {
     const renderer = this.localBrowserRenderer
+    const tuner = this.concurrencyTuner
 
-    if (!renderer?.available || completed < 6 || durationMs <= 0) return
+    if (!renderer || !tuner) return
 
-    const localGenerated = this.metrics.localGenerationCount - snapshot.localGenerationCount
-    const fallbacks = this.metrics.localFallbacks - snapshot.localFallbacks
-    const preemptions = this.metrics.generationPreemptions - snapshot.generationPreemptions
-
-    if (localGenerated < Math.max(4, Math.floor(completed * 0.6)) || preemptions > 0) {
-      this.localTuningStatus = 'learning skipped (mixed/preempted batch)'
-      return
-    }
-
-    const throughput = completed / (durationMs / 1000)
-    const fallbackRate = fallbacks / Math.max(1, localGenerated)
-    const reliabilityFactor = Math.max(0.65, 1 - fallbackRate * 0.5)
-    const score = throughput * reliabilityFactor
     const key = renderer.tuningKey
+    const observation = tuner.observe(
+      this.pluginData.localRendererTuning?.[key],
+      snapshot,
+      {
+        localGenerationCount: this.metrics.localGenerationCount,
+        localFallbacks: this.metrics.localFallbacks,
+        generationPreemptions: this.metrics.generationPreemptions
+      },
+      completed,
+      durationMs
+    )
+
+    if (!observation.shouldPersist || !observation.record) return
 
     if (!this.pluginData.localRendererTuning) {
       this.pluginData.localRendererTuning = {}
     }
 
-    const record = this.pluginData.localRendererTuning[key] ?? {
-      bestConcurrency: snapshot.concurrency,
-      scores: {}
-    }
-
-    const scoreKey = String(snapshot.concurrency)
-    const existing = record.scores[scoreKey]
-
-    record.scores[scoreKey] = existing
-      ? {
-          mean: (existing.mean * existing.samples + score) / (existing.samples + 1),
-          samples: existing.samples + 1
-        }
-      : {
-          mean: score,
-          samples: 1
-        }
-
-    const candidates = renderer.tuningCandidates
-    const best = this.getPreferredLocalConcurrency(record, renderer)
-
-    record.bestConcurrency = best
-
-    const untested = candidates.find(candidate => record.scores[String(candidate)] === undefined)
-
-    if (untested !== undefined) {
-      renderer.setPoolSize(untested)
-      const testedCount =
-        candidates.length -
-        candidates.filter(candidate => record.scores[String(candidate)] === undefined).length
-      this.localTuningStatus = `calibrating ${untested}; provisional best ${best} (${testedCount}/${candidates.length})`
-    } else {
-      const scored = candidates
-        .map(concurrency => ({
-          concurrency,
-          score: record.scores[String(concurrency)]?.mean ?? 0,
-          samples: record.scores[String(concurrency)]?.samples ?? 0
-        }))
-        .sort((left, right) => right.score - left.score)
-      const topScore = scored[0]?.score ?? 0
-      const confirmation = scored
-        .filter(entry => entry.score >= topScore * 0.97 && entry.samples < 2)
-        .sort((left, right) => left.concurrency - right.concurrency)[0]
-
-      if (confirmation) {
-        renderer.setPoolSize(confirmation.concurrency)
-        this.localTuningStatus = `confirming ${confirmation.concurrency}; provisional best ${best}`
-      } else {
-        renderer.setPoolSize(best)
-        this.localTuningStatus = `settled at ${best}`
-      }
-    }
-
-    this.pluginData.localRendererTuning[key] = record
+    this.pluginData.localRendererTuning[key] = observation.record
 
     try {
       await this.saveData(this.pluginData)
@@ -2430,7 +2341,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       `Local browser unavailable reason: ${localBrowserUnavailableReason}`,
       `Local browser hardware: ${this.localBrowserRenderer?.hardwareSummary ?? 'unknown'}`,
       `Local browser concurrency: ${this.localBrowserRenderer?.concurrencySummary ?? 'unknown'}`,
-      `Local browser tuning: ${this.localTuningStatus}`,
+      `Local browser tuning: ${this.concurrencyTuner?.status ?? 'not initialized'}`,
       `Local browser active tasks: ${this.localBrowserRenderer?.activeCount ?? 0}`,
       `Interactive webview: ${this.activeInteractiveNode ? 1 : 0}`,
       `Interactive light preference: ${this.interactiveLightPreferenceStatus}`,
