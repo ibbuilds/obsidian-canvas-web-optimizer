@@ -1,8 +1,8 @@
 import * as assert from 'node:assert/strict'
 import { test } from 'node:test'
 import PreviewCache, { CACHE_METADATA_VERSION } from '../src/cache/preview-cache'
-import DynamicPriorityQueue from '../src/generation/dynamic-priority-queue'
 import GenerationCoordinator from '../src/generation/coordinator'
+import DynamicPriorityQueue from '../src/generation/dynamic-priority-queue'
 import { createFakeApp } from './helpers/fake-app'
 
 type Job = {
@@ -107,12 +107,6 @@ test('preview cache indexes and cleans a thousand-node synthetic Canvas cache', 
     assert.equal(cache.has(nodeId), true)
   }
 
-  assert.equal(
-    [...files.keys()].filter(path => path.endsWith('.thumbnail.jpg')).length,
-    500
-  )
-  assert.equal(
-    [...files.keys()].filter(path => path.endsWith('.metadata.json')).length,
-    500
-  )
+  assert.equal([...files.keys()].filter(path => path.endsWith('.thumbnail.jpg')).length, 500)
+  assert.equal([...files.keys()].filter(path => path.endsWith('.metadata.json')).length, 500)
 })
