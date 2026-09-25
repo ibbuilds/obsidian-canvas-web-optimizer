@@ -1,6 +1,6 @@
 {
   "name": "obsidian-canvas-web-optimizer",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Optimize web pages in Obsidian Canvas with cached previews and smarter webview resource management.",
   "main": "main.js",

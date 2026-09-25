@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.2
+
+### Changed
+
+- Centralized Canvas node geometry and thumbnail render-size calculations behind tested pure helpers.
+- Moved cache metadata validation into `PreviewCache` so cache invariants stay inside the cache service.
+- Centralized ephemeral per-node state, requested frame modes, and placeholder identity in `CanvasNodeRuntime`.
+- Isolated generation runtime types from the plugin composition layer.
+- Reduced `src/main.ts` further while deliberately keeping DOM-heavy frame/preview orchestration in the Obsidian integration layer.
+- Made the test runner discover every `tests/*.test.ts` suite automatically.
+
+### Added
+
+- Regression coverage for node geometry, render sizing, cache metadata validation, and per-node runtime state.
+
 ## 0.2.1
 
 ### Changed
