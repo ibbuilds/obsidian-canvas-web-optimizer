@@ -1,7 +1,7 @@
 import * as assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { LinkNode, LinkNodeConstructor } from 'obsidian'
-import { installLinkNodePatches, type FrameMode } from '../src/canvas/link-node-patcher'
+import { type FrameMode, installLinkNodePatches } from '../src/canvas/link-node-patcher'
 
 class FakeLinkNode {
   id = 'node'
@@ -50,24 +50,21 @@ class FakeLinkNode {
 test('Canvas patcher preserves initialize suppression and lifecycle hooks', async () => {
   const events: string[] = []
   const frameModes = new Map<object, FrameMode>()
-  const uninstall = installLinkNodePatches(
-    FakeLinkNode as unknown as LinkNodeConstructor,
-    {
-      saveThumbnail: async () => true,
-      thumbnailPath: node => `thumb:${node.id}`,
-      metadataPath: node => `meta:${node.id}`,
-      onMounted: () => events.push('mounted'),
-      onBreakpoint: () => events.push('breakpoint'),
-      onUrlChanged: () => events.push('url-changed'),
-      onInitialized: () => events.push('initialized'),
-      consumeFrameMode: node => {
-        const mode = frameModes.get(node) ?? null
-        frameModes.delete(node)
-        return mode
-      },
-      onFrameCreated: (_node, mode) => events.push(`frame:${mode}`)
-    }
-  )
+  const uninstall = installLinkNodePatches(FakeLinkNode as unknown as LinkNodeConstructor, {
+    saveThumbnail: async () => true,
+    thumbnailPath: node => `thumb:${node.id}`,
+    metadataPath: node => `meta:${node.id}`,
+    onMounted: () => events.push('mounted'),
+    onBreakpoint: () => events.push('breakpoint'),
+    onUrlChanged: () => events.push('url-changed'),
+    onInitialized: () => events.push('initialized'),
+    consumeFrameMode: node => {
+      const mode = frameModes.get(node) ?? null
+      frameModes.delete(node)
+      return mode
+    },
+    onFrameCreated: (_node, mode) => events.push(`frame:${mode}`)
+  })
 
   try {
     const node = new FakeLinkNode()
