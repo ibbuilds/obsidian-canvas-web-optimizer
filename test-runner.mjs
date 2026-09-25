@@ -1,5 +1,5 @@
-import { rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { rmSync } from 'node:fs'
 import esbuild from 'esbuild'
 
 const outdir = '.test-dist'
@@ -12,10 +12,11 @@ try {
     format: 'esm',
     target: 'node22',
     outdir,
+    outExtension: { '.js': '.mjs' },
     logLevel: 'warning'
   })
 
-  const result = spawnSync(process.execPath, ['--test', `${outdir}/core-utils.test.js`], {
+  const result = spawnSync(process.execPath, ['--test', `${outdir}/core-utils.test.mjs`], {
     stdio: 'inherit'
   })
 
