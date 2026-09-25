@@ -4,10 +4,7 @@ export type MeanScore = {
 
 export type ScoreRecord = Record<string, MeanScore | undefined>
 
-export function isFatalLoadFailure(event: {
-  errorCode?: number
-  isMainFrame?: boolean
-}): boolean {
+export function isFatalLoadFailure(event: { errorCode?: number; isMainFrame?: boolean }): boolean {
   if (event.isMainFrame === false) return false
 
   // ERR_ABORTED is common during normal navigation/redirects.
@@ -29,17 +26,13 @@ export function calculateLivePoolSize(
   return Math.max(1, Math.min(Math.round(targetPoolSize), maxPoolSize, liveMemoryLimit))
 }
 
-export function buildTuningCandidates(
-  maxPoolSize: number,
-  heuristicPoolSize: number
-): number[] {
+export function buildTuningCandidates(maxPoolSize: number, heuristicPoolSize: number): number[] {
   const safeMaxPoolSize = Math.max(1, Math.round(maxPoolSize))
   const safeHeuristicPoolSize = Math.max(
     1,
     Math.min(safeMaxPoolSize, Math.round(heuristicPoolSize))
   )
-  const floor =
-    safeMaxPoolSize <= 3 ? 1 : Math.max(1, Math.floor(safeMaxPoolSize * 0.5))
+  const floor = safeMaxPoolSize <= 3 ? 1 : Math.max(1, Math.floor(safeMaxPoolSize * 0.5))
   const candidates = Array.from(
     { length: safeMaxPoolSize - floor + 1 },
     (_, index) => floor + index
