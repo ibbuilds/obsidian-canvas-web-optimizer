@@ -9,7 +9,8 @@ try {
     entryPoints: [
       'tests/core-utils.test.ts',
       'tests/preview-cache.test.ts',
-      'tests/dynamic-priority-queue.test.ts'
+      'tests/dynamic-priority-queue.test.ts',
+      'tests/interactive-activation.test.ts'
     ],
     bundle: true,
     platform: 'node',
@@ -26,7 +27,8 @@ try {
       '--test',
       `${outdir}/core-utils.test.mjs`,
       `${outdir}/preview-cache.test.mjs`,
-      `${outdir}/dynamic-priority-queue.test.mjs`
+      `${outdir}/dynamic-priority-queue.test.mjs`,
+      `${outdir}/interactive-activation.test.mjs`
     ],
     {
       stdio: 'inherit'
