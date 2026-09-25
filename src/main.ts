@@ -9,6 +9,7 @@ import {
 import BackgroundExecutionController from './background-execution'
 import PreviewCache, { type CacheMetadata } from './cache/preview-cache'
 import { type FrameMode, installLinkNodePatches } from './canvas/link-node-patcher'
+import CanvasNodeRuntime, { type CanvasNodeState } from './canvas/node-runtime'
 import {
   classifyViewportProximity,
   createRectBounds,
@@ -64,14 +65,6 @@ type ThumbnailImage = {
   isEmpty(): boolean
   resize(options: { width: number; height: number; quality: 'good' }): ThumbnailImage
   toJPEG(quality: number): ArrayBuffer
-}
-
-type NodeState = {
-  evaluated: boolean
-  cached: boolean
-  metadata: CacheMetadata | null
-  preparation: Promise<void> | null
-  activationHandlerAttached: boolean
 }
 
 type PluginData = {
@@ -136,9 +129,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   cacheDir = `${this.manifest.dir}/data/linkCache`
 
   private previewCache!: PreviewCache
-  private readonly nodeStates = new WeakMap<LinkNode, NodeState>()
-  private readonly requestedFrameModes = new WeakMap<LinkNode, FrameMode>()
-  private readonly pendingPlaceholders = new WeakMap<LinkNode, HTMLElement>()
+  private readonly nodeRuntime = new CanvasNodeRuntime()
 
   private readonly generationCoordinator = new GenerationCoordinator<GenerationJob>({
     getKey: job => job.node.id,
@@ -293,22 +284,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     console.log(`[${this.name}]`, msg)
   }
 
-  private getNodeState(node: LinkNode): NodeState {
-    const existing = this.nodeStates.get(node)
-
-    if (existing) return existing
-
-    const state: NodeState = {
-      evaluated: false,
-      cached: false,
-      metadata: null,
-      preparation: null,
-      activationHandlerAttached: false
-    }
-
-    this.nodeStates.set(node, state)
-
-    return state
+  private getNodeState(node: LinkNode): CanvasNodeState {
+    return this.nodeRuntime.getState(node)
   }
 
   private isNodeContentMounted(node: LinkNode): boolean {
@@ -530,7 +507,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private ensurePendingPlaceholder(node: LinkNode) {
     if (!this.isNodeContentMounted(node)) return
 
-    const current = this.pendingPlaceholders.get(node)
+    const current = this.nodeRuntime.getPlaceholder(node)
 
     if (current?.isConnected) return
 
@@ -554,23 +531,23 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     placeholder.append(hostname, status)
     node.contentEl.append(placeholder)
-    this.pendingPlaceholders.set(node, placeholder)
+    this.nodeRuntime.setPlaceholder(node, placeholder)
   }
 
   private removePendingPlaceholder(node: LinkNode) {
-    const placeholder = this.pendingPlaceholders.get(node)
+    const placeholder = this.nodeRuntime.getPlaceholder(node)
 
     if (placeholder?.isConnected) {
       placeholder.remove()
     }
 
-    this.pendingPlaceholders.delete(node)
+    this.nodeRuntime.clearPlaceholder(node)
   }
 
   private setPendingStatus(node: LinkNode, message: string) {
     this.ensurePendingPlaceholder(node)
 
-    const placeholder = this.pendingPlaceholders.get(node)
+    const placeholder = this.nodeRuntime.getPlaceholder(node)
     const status = placeholder?.querySelector<HTMLElement>('.canvas-web-pending-status')
 
     if (status) {
@@ -1517,7 +1494,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private requestNodeFrame(node: LinkNode, mode: FrameMode) {
-    this.requestedFrameModes.set(node, mode)
+    this.nodeRuntime.requestFrameMode(node, mode)
     node.recreateFrame()
 
     if (node.frameEl?.tagName === 'WEBVIEW') return
@@ -2084,13 +2061,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         })
       },
       consumeFrameMode: node => {
-        const mode = this.requestedFrameModes.get(node) ?? null
-
-        if (mode) {
-          this.requestedFrameModes.delete(node)
-        }
-
-        return mode
+        return this.nodeRuntime.consumeFrameMode(node)
       },
       onFrameCreated: (node, mode) => this.configureFrame(node, mode)
     })
