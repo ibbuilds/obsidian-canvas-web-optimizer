@@ -12,7 +12,8 @@ try {
       'tests/dynamic-priority-queue.test.ts',
       'tests/interactive-activation.test.ts',
       'tests/generation-coordinator.test.ts',
-      'tests/concurrency-tuner.test.ts'
+      'tests/concurrency-tuner.test.ts',
+      'tests/link-node-patcher.test.ts'
     ],
     bundle: true,
     platform: 'node',
@@ -32,7 +33,8 @@ try {
       `${outdir}/dynamic-priority-queue.test.mjs`,
       `${outdir}/interactive-activation.test.mjs`,
       `${outdir}/generation-coordinator.test.mjs`,
-      `${outdir}/concurrency-tuner.test.mjs`
+      `${outdir}/concurrency-tuner.test.mjs`,
+      `${outdir}/link-node-patcher.test.mjs`
     ],
     {
       stdio: 'inherit'
