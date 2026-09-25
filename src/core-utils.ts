@@ -76,6 +76,39 @@ export function pickPreferredConcurrency(
   return nearTop[0]?.concurrency ?? scored[0].concurrency
 }
 
+export type RectBounds = {
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+}
+
+export function classifyViewportProximity(node: RectBounds, viewport: RectBounds): 0 | 1 | 2 {
+  const intersects = (bounds: RectBounds) =>
+    node.maxX >= bounds.minX &&
+    node.minX <= bounds.maxX &&
+    node.maxY >= bounds.minY &&
+    node.minY <= bounds.maxY
+
+  if (intersects(viewport)) return 0
+
+  const marginX = viewport.maxX - viewport.minX
+  const marginY = viewport.maxY - viewport.minY
+
+  if (
+    intersects({
+      minX: viewport.minX - marginX,
+      minY: viewport.minY - marginY,
+      maxX: viewport.maxX + marginX,
+      maxY: viewport.maxY + marginY
+    })
+  ) {
+    return 1
+  }
+
+  return 2
+}
+
 export function extractCanvasNodeIds(content: string): string[] {
   const canvas = JSON.parse(content) as {
     nodes?: Array<{ id?: unknown }>
