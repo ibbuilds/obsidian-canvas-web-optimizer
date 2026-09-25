@@ -47,6 +47,16 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
+function isUnsupportedScreenshotSpeedOption(error: unknown): boolean {
+  const message = toError(error).message.toLowerCase()
+
+  return (
+    message.includes('optimizeforspeed') ||
+    message.includes('invalid parameter') ||
+    message.includes('invalid params')
+  )
+}
+
 export default class LocalBrowserRenderer {
   private readonly candidates = detectBrowserCandidates()
   private browser: BrowserRuntime | null = null
@@ -65,8 +75,13 @@ export default class LocalBrowserRenderer {
   private renderFailures = 0
   private renderTotalMs = 0
   private renderCount = 0
+  private setupTotalMs = 0
+  private setupCount = 0
   private navigationTotalMs = 0
+  private paintReadyTotalMs = 0
+  private paintReadyCount = 0
   private screenshotTotalMs = 0
+  private screenshotOptimizeForSpeed: boolean | null = null
 
   private readonly logicalCpuCount = Math.max(1, navigator.hardwareConcurrency || 4)
   private readonly totalMemoryGiB = totalmem() / 1024 ** 3
@@ -177,12 +192,29 @@ export default class LocalBrowserRenderer {
     return this.renderCount > 0 ? Math.round(this.renderTotalMs / this.renderCount) : 0
   }
 
+  get averageSetupMs(): number {
+    return this.setupCount > 0 ? Math.round(this.setupTotalMs / this.setupCount) : 0
+  }
+
   get averageNavigationMs(): number {
     return this.renderCount > 0 ? Math.round(this.navigationTotalMs / this.renderCount) : 0
   }
 
+  get averagePaintReadyMs(): number {
+    return this.paintReadyCount > 0
+      ? Math.round(this.paintReadyTotalMs / this.paintReadyCount)
+      : 0
+  }
+
   get averageScreenshotMs(): number {
     return this.renderCount > 0 ? Math.round(this.screenshotTotalMs / this.renderCount) : 0
+  }
+
+  get screenshotOptimizationStatus(): string {
+    if (this.screenshotOptimizeForSpeed === true) return 'optimizeForSpeed enabled'
+    if (this.screenshotOptimizeForSpeed === false) return 'optimizeForSpeed unsupported'
+
+    return 'optimizeForSpeed probing'
   }
 
   resetMetrics() {
@@ -193,7 +225,11 @@ export default class LocalBrowserRenderer {
     this.renderFailures = 0
     this.renderTotalMs = 0
     this.renderCount = 0
+    this.setupTotalMs = 0
+    this.setupCount = 0
     this.navigationTotalMs = 0
+    this.paintReadyTotalMs = 0
+    this.paintReadyCount = 0
     this.screenshotTotalMs = 0
   }
 
@@ -227,6 +263,7 @@ export default class LocalBrowserRenderer {
           throw new Error('Local browser render cancelled')
         }
 
+        const setupStartedAt = performance.now()
         const target = await runtime.connection.send<{ targetId: string }>('Target.createTarget', {
           url: 'about:blank'
         })
@@ -245,7 +282,6 @@ export default class LocalBrowserRenderer {
 
         await Promise.all([
           runtime.connection.send('Page.enable', {}, sessionId),
-          runtime.connection.send('Runtime.enable', {}, sessionId),
           runtime.connection.send(
             'Emulation.setDeviceMetricsOverride',
             {
@@ -267,6 +303,9 @@ export default class LocalBrowserRenderer {
             sessionId
           )
         ])
+
+        this.setupTotalMs += performance.now() - setupStartedAt
+        this.setupCount++
 
         const domReady = runtime.connection.waitForEvent(
           'Page.domContentEventFired',
@@ -293,28 +332,7 @@ export default class LocalBrowserRenderer {
 
         const navigationMs = performance.now() - navigationStartedAt
         const paintStartedAt = performance.now()
-
-        await Promise.race([
-          runtime.connection.send(
-            'Runtime.evaluate',
-            {
-              expression: LIGHT_THEME_SCRIPT,
-              awaitPromise: true,
-              returnByValue: true
-            },
-            sessionId,
-            PAINT_READY_TIMEOUT_MS + 100
-          ),
-          delay(PAINT_READY_TIMEOUT_MS)
-        ]).catch(() => {})
-
-        const paintReadyMs = performance.now() - paintStartedAt
-
-        if (cancelled) {
-          throw new Error('Local browser render cancelled')
-        }
-
-        const titleResponse = await runtime.connection
+        const themeAndTitle = runtime.connection
           .send<{
             result?: {
               value?: unknown
@@ -322,25 +340,33 @@ export default class LocalBrowserRenderer {
           }>(
             'Runtime.evaluate',
             {
-              expression: 'document.title || location.hostname || location.href',
+              expression: `(() => {
+                ${LIGHT_THEME_SCRIPT};
+                return document.title || location.hostname || location.href
+              })()`,
+              awaitPromise: true,
               returnByValue: true
             },
-            sessionId
+            sessionId,
+            PAINT_READY_TIMEOUT_MS + 100
           )
           .catch(() => ({ result: { value: '' } }))
 
+        await Promise.race([themeAndTitle.then(() => undefined), delay(PAINT_READY_TIMEOUT_MS)])
+
+        const paintReadyMs = performance.now() - paintStartedAt
+        this.paintReadyTotalMs += paintReadyMs
+        this.paintReadyCount++
+
+        if (cancelled) {
+          throw new Error('Local browser render cancelled')
+        }
+
         const screenshotStartedAt = performance.now()
-        const screenshot = await runtime.connection.send<{ data: string }>(
-          'Page.captureScreenshot',
-          {
-            format: 'jpeg',
-            quality: 76,
-            fromSurface: true,
-            captureBeyondViewport: false
-          },
-          sessionId,
-          CDP_COMMAND_TIMEOUT_MS
-        )
+        const [titleResponse, screenshot] = await Promise.all([
+          themeAndTitle,
+          this.captureScreenshot(runtime.connection, sessionId)
+        ])
         const screenshotMs = performance.now() - screenshotStartedAt
 
         const bytes = Buffer.from(screenshot.data, 'base64')
@@ -389,6 +415,51 @@ export default class LocalBrowserRenderer {
       promise,
       cancel
     }
+  }
+
+  private async captureScreenshot(
+    connection: CdpConnection,
+    sessionId: string
+  ): Promise<{ data: string }> {
+    const baseOptions = {
+      format: 'jpeg',
+      quality: 76,
+      fromSurface: true,
+      captureBeyondViewport: false
+    }
+
+    if (this.screenshotOptimizeForSpeed !== false) {
+      try {
+        const screenshot = await connection.send<{ data: string }>(
+          'Page.captureScreenshot',
+          {
+            ...baseOptions,
+            optimizeForSpeed: true
+          },
+          sessionId,
+          CDP_COMMAND_TIMEOUT_MS
+        )
+
+        this.screenshotOptimizeForSpeed = true
+        return screenshot
+      } catch (error) {
+        if (
+          this.screenshotOptimizeForSpeed !== null ||
+          !isUnsupportedScreenshotSpeedOption(error)
+        ) {
+          throw error
+        }
+
+        this.screenshotOptimizeForSpeed = false
+      }
+    }
+
+    return connection.send<{ data: string }>(
+      'Page.captureScreenshot',
+      baseOptions,
+      sessionId,
+      CDP_COMMAND_TIMEOUT_MS
+    )
   }
 
   dispose() {
