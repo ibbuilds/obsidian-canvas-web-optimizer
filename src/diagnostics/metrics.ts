@@ -102,4 +102,43 @@ export default class DiagnosticsMetrics {
     this.localTimeouts = 0
     this.batchStartedAt = batchStartedAt
   }
+  summary() {
+    const average = (total: number, count: number) => (count > 0 ? Math.round(total / count) : 0)
+    const lastBatchSeconds = this.lastBatchDurationMs / 1000
+
+    return {
+      averageGenerationMs: average(this.generationTotalMs, this.generationCompleted),
+      averageCaptureMs: average(this.captureTotalMs, this.generationCompleted),
+      averagePreloadReadyMs: average(
+        this.generationPreloadReadyTotalMs,
+        this.generationPreloadsReady
+      ),
+      averagePromotionWaitMs: average(
+        this.preloadPromotionWaitTotalMs,
+        this.preloadPromotionWaitCount
+      ),
+      averageColdGenerationMs: average(this.generationColdTotalMs, this.generationColdCount),
+      averagePreloadedGenerationMs: average(
+        this.generationPreloadedTotalMs,
+        this.generationPreloadedCount
+      ),
+      lastBatchThroughput:
+        lastBatchSeconds > 0 ? this.lastBatchCompleted / lastBatchSeconds : 0,
+      averageQueueWaitMs: average(this.queueWaitTotalMs, this.queueWaitCount),
+      averageFrameCreateMs: average(this.frameCreateTotalMs, this.frameCreateCount),
+      averageDomReadyMs: average(this.domReadyTotalMs, this.domReadyCount),
+      averageThemeMs: average(this.themeTotalMs, this.themeCount),
+      averagePaintReadyMs: average(this.paintReadyTotalMs, this.paintReadyCount),
+      averageCapturePageMs: average(this.capturePageTotalMs, this.capturePageCount),
+      averageEncodeMs: average(this.encodeTotalMs, this.encodeCount),
+      averageThumbnailWriteMs: average(this.thumbnailWriteTotalMs, this.thumbnailWriteCount),
+      averageMetadataWriteMs: average(this.metadataWriteTotalMs, this.metadataWriteCount),
+      averagePreviewReadyMs: average(this.previewReadyTotalMs, this.previewReadyCount),
+      averageLocalGenerationMs: average(
+        this.localGenerationTotalMs,
+        this.localGenerationCount
+      )
+    }
+  }
+
 }
