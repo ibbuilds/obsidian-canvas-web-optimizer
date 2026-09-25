@@ -7,7 +7,7 @@ import {
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
-import PreviewCache, { CACHE_METADATA_VERSION, type CacheMetadata } from './cache/preview-cache'
+import PreviewCache, { type CacheMetadata } from './cache/preview-cache'
 import { type FrameMode, installLinkNodePatches } from './canvas/link-node-patcher'
 import {
   classifyViewportProximity,
@@ -431,14 +431,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private async evaluateNodeCache(node: LinkNode, state: NodeState) {
     try {
-      const metadata = await this.previewCache.readMetadata(node.id)
+      const metadata = await this.previewCache.readValidMetadata(node.id, node.url)
 
-      if (metadata?.version !== CACHE_METADATA_VERSION || typeof metadata.title !== 'string') {
-        this.markNodeCacheMiss(node, state)
-        return
-      }
-
-      if (metadata.url && metadata.url !== node.url) {
+      if (!metadata) {
         this.markNodeCacheMiss(node, state)
         return
       }
