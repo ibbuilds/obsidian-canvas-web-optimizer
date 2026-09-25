@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.1
+
+### Changed
+
+- Split cache, diagnostics, generation scheduling, Canvas patching, interactive activation, Electron integration, and local-browser internals into focused modules without changing the stabilized Canvas workflow.
+- Reworked the generation queue around keyed entries, lazy priority refresh, and tombstone compaction to reduce repeated large-array shifts on web-heavy boards.
+- Prefer Canvas-coordinate viewport classification during cached-preview rehydration to avoid unnecessary DOM layout reads.
+- Enabled strict TypeScript checking and aligned TypeScript/esbuild targets on ES2020.
+- Upgraded development tooling to TypeScript 5.9.3, Node 22 typings, and esbuild 0.25.10.
+
+### Added
+
+- Architecture ownership documentation.
+- Expanded regression coverage for cache lifecycle, Canvas patching, activation transitions, generation coordination, adaptive concurrency, diagnostics formatting, and large generation queues.
+
 ## 0.2.0
 
 ### Added
