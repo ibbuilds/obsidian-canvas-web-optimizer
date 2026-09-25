@@ -103,6 +103,10 @@ styles.css
 
 Reload Obsidian and enable **Canvas Web Optimizer** under **Settings → Community plugins**.
 
+## Architecture
+
+The plugin is split into explicit cache, generation, interactive-webview, local-browser, diagnostics, and platform boundaries. The compatibility contracts and module ownership rules are documented in [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md).
+
 ## Development
 
 Install dependencies:
