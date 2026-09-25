@@ -10,6 +10,8 @@ import CdpConnection from './cdp-connection'
 const BROWSER_START_TIMEOUT_MS = 6000
 const CDP_COMMAND_TIMEOUT_MS = 3500
 const NAVIGATION_TIMEOUT_MS = 5000
+const DOCUMENT_READY_PROBE_INTERVAL_MS = 50
+const DOCUMENT_READY_PROBE_COMMAND_TIMEOUT_MS = 600
 const PAINT_READY_TIMEOUT_MS = 250
 const IDLE_SHUTDOWN_MS = 2500
 const MIN_SCREENSHOT_BYTES = 512
@@ -78,6 +80,7 @@ export default class LocalBrowserRenderer {
   private setupTotalMs = 0
   private setupCount = 0
   private navigationTotalMs = 0
+  private navigationReadinessProbeWins = 0
   private paintReadyTotalMs = 0
   private paintReadyCount = 0
   private screenshotTotalMs = 0
@@ -201,6 +204,10 @@ export default class LocalBrowserRenderer {
     return this.renderCount > 0 ? Math.round(this.navigationTotalMs / this.renderCount) : 0
   }
 
+  get readinessProbeWinCount(): number {
+    return this.navigationReadinessProbeWins
+  }
+
   get averagePaintReadyMs(): number {
     return this.paintReadyCount > 0 ? Math.round(this.paintReadyTotalMs / this.paintReadyCount) : 0
   }
@@ -231,6 +238,7 @@ export default class LocalBrowserRenderer {
     this.setupTotalMs = 0
     this.setupCount = 0
     this.navigationTotalMs = 0
+    this.navigationReadinessProbeWins = 0
     this.paintReadyTotalMs = 0
     this.paintReadyCount = 0
     this.screenshotTotalMs = 0
@@ -314,11 +322,9 @@ export default class LocalBrowserRenderer {
         this.setupCount++
 
         stage = 'navigation'
-        const domReady = runtime.connection.waitForEvent(
-          'Page.domContentEventFired',
-          sessionId,
-          NAVIGATION_TIMEOUT_MS
-        )
+        const domReady = runtime.connection
+          .waitForEvent('Page.domContentEventFired', sessionId, NAVIGATION_TIMEOUT_MS)
+          .then(() => 'event' as const)
         const navigationStartedAt = performance.now()
         const navigation = await runtime.connection.send<{ errorText?: string }>(
           'Page.navigate',
@@ -331,7 +337,14 @@ export default class LocalBrowserRenderer {
           throw new Error(`Local browser navigation failed: ${navigation.errorText}`)
         }
 
-        await domReady
+        const readinessSource = await Promise.race([
+          domReady,
+          this.waitForDocumentReady(runtime.connection, sessionId).then(() => 'probe' as const)
+        ])
+
+        if (readinessSource === 'probe') {
+          this.navigationReadinessProbeWins++
+        }
 
         if (cancelled) {
           throw new Error('Local browser render cancelled')
@@ -425,6 +438,65 @@ export default class LocalBrowserRenderer {
       promise,
       cancel
     }
+  }
+
+  private async waitForDocumentReady(
+    connection: CdpConnection,
+    sessionId: string
+  ): Promise<void> {
+    const deadline = performance.now() + NAVIGATION_TIMEOUT_MS
+    let lastError: Error | null = null
+
+    while (performance.now() < deadline) {
+      const remainingMs = Math.max(1, deadline - performance.now())
+
+      try {
+        const response = await connection.send<{
+          result?: {
+            value?: unknown
+          }
+        }>(
+          'Runtime.evaluate',
+          {
+            expression: `(() => ({
+              ready:
+                document.readyState === 'interactive' ||
+                document.readyState === 'complete',
+              href: location.href,
+              hasDocumentElement: Boolean(document.documentElement)
+            }))()`,
+            returnByValue: true
+          },
+          sessionId,
+          Math.min(DOCUMENT_READY_PROBE_COMMAND_TIMEOUT_MS, remainingMs)
+        )
+        const value = response.result?.value
+
+        if (
+          value &&
+          typeof value === 'object' &&
+          'ready' in value &&
+          value.ready === true &&
+          'href' in value &&
+          typeof value.href === 'string' &&
+          value.href !== 'about:blank' &&
+          'hasDocumentElement' in value &&
+          value.hasDocumentElement === true
+        ) {
+          return
+        }
+      } catch (error) {
+        lastError = toError(error)
+      }
+
+      await delay(Math.min(DOCUMENT_READY_PROBE_INTERVAL_MS, remainingMs))
+    }
+
+    throw new Error(
+      lastError
+        ? `Document readiness probe timed out: ${lastError.message}`
+        : 'Document readiness probe timed out'
+    )
   }
 
   private async captureScreenshot(
