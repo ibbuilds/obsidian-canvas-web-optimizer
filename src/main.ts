@@ -1,4 +1,3 @@
-import { around } from 'monkey-around'
 import {
   type Canvas,
   type CanvasLeaf,
@@ -8,6 +7,7 @@ import {
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
+import { installLinkNodePatches, type FrameMode } from './canvas/link-node-patcher'
 import PreviewCache, { CACHE_METADATA_VERSION, type CacheMetadata } from './cache/preview-cache'
 import {
   classifyViewportProximity,
@@ -60,7 +60,6 @@ type ThumbnailImage = {
   toJPEG(quality: number): ArrayBuffer
 }
 
-type FrameMode = 'generation' | 'preload' | 'interactive'
 type GenerationOutcome = 'success' | 'failure' | 'timeout' | 'preempted' | 'stale' | 'unmounted'
 
 type NodeState = {
@@ -2149,103 +2148,37 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   patchLinkNode(linkNodeConstructor: LinkNodeConstructor): boolean {
-    const thisPlugin = this
+    const uninstaller = installLinkNodePatches(linkNodeConstructor, {
+      saveThumbnail: node => this.saveThumbnail(node),
+      thumbnailPath: node => this.previewCache.thumbnailPath(node.id),
+      metadataPath: node => this.previewCache.metadataPath(node.id),
+      onMounted: node => this.onNodeMounted(node),
+      onBreakpoint: node => this.handleBreakpointUpdate(node),
+      onUrlChanged: node => this.handleNodeUrlChanged(node),
+      onInitialized: node => {
+        this.attachActivationHandler(node)
+        void this.prepareNode(node)
 
-    const uninstaller = around(linkNodeConstructor.prototype, {
-      _saveThumbnail: () =>
-        async function (this: LinkNode) {
-          return thisPlugin.saveThumbnail(this)
-        },
+        queueMicrotask(() => {
+          this.rehydrateCachedNode(node)
+        })
+      },
+      consumeFrameMode: node => {
+        const mode = this.requestedFrameModes.get(node) ?? null
 
-      _getThumbnailPath: () =>
-        function (this: LinkNode) {
-          return thisPlugin.previewCache.thumbnailPath(this.id)
-        },
-
-      _getMetadataPath: () =>
-        function (this: LinkNode) {
-          return thisPlugin.previewCache.metadataPath(this.id)
-        },
-
-      mountContent: (next: (...args: unknown[]) => unknown) =>
-        function (this: LinkNode, ...args: unknown[]) {
-          const result = next.call(this, ...args)
-
-          if (!this._initializing) {
-            thisPlugin.onNodeMounted(this)
-          }
-
-          return result
-        },
-
-      updateBreakpoint: (next: (...args: unknown[]) => unknown) =>
-        function (this: LinkNode, ...args: unknown[]) {
-          const result = next.call(this, ...args)
-
-          thisPlugin.handleBreakpointUpdate(this)
-
-          return result
-        },
-
-      setData: (next: (...args: unknown[]) => unknown) =>
-        function (this: LinkNode, ...args: unknown[]) {
-          const previousUrl = this.url
-          const result = next.call(this, ...args)
-
-          if (previousUrl && previousUrl !== this.url) {
-            thisPlugin.handleNodeUrlChanged(this)
-          }
-
-          return result
-        },
-
-      initialize: (next: (...args: unknown[]) => unknown) =>
-        function (this: LinkNode, ...args: unknown[]) {
-          this._initializing = true
-
-          let result: unknown
-
-          try {
-            result = next.call(this, ...args)
-          } finally {
-            this._initializing = false
-          }
-
-          thisPlugin.attachActivationHandler(this)
-          void thisPlugin.prepareNode(this)
-
-          queueMicrotask(() => {
-            thisPlugin.rehydrateCachedNode(this)
-          })
-
-          return result
-        },
-
-      recreateFrame: (next: (...args: unknown[]) => unknown) =>
-        function (this: LinkNode, ...args: unknown[]) {
-          if (this._initializing) return null
-
-          const mode = thisPlugin.requestedFrameModes.get(this)
-
-          if (!mode) {
-            thisPlugin.onNodeMounted(this)
-            return null
-          }
-
-          thisPlugin.requestedFrameModes.delete(this)
-
-          const result = next.call(this, ...args)
-
-          thisPlugin.configureFrame(this, mode)
-
-          return result
+        if (mode) {
+          this.requestedFrameModes.delete(node)
         }
+
+        return mode
+      },
+      onFrameCreated: (node, mode) => this.configureFrame(node, mode)
     })
 
     this.register(uninstaller)
 
-    thisPlugin.log('Canvas patched successfully')
-    thisPlugin.app.workspace.trigger(`${thisPlugin.manifest.id}:patched-canvas`)
+    this.log('Canvas patched successfully')
+    this.app.workspace.trigger(`${this.manifest.id}:patched-canvas`)
 
     return true
   }
