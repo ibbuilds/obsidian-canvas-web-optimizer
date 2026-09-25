@@ -122,8 +122,7 @@ export default class DiagnosticsMetrics {
         this.generationPreloadedTotalMs,
         this.generationPreloadedCount
       ),
-      lastBatchThroughput:
-        lastBatchSeconds > 0 ? this.lastBatchCompleted / lastBatchSeconds : 0,
+      lastBatchThroughput: lastBatchSeconds > 0 ? this.lastBatchCompleted / lastBatchSeconds : 0,
       averageQueueWaitMs: average(this.queueWaitTotalMs, this.queueWaitCount),
       averageFrameCreateMs: average(this.frameCreateTotalMs, this.frameCreateCount),
       averageDomReadyMs: average(this.domReadyTotalMs, this.domReadyCount),
@@ -134,11 +133,7 @@ export default class DiagnosticsMetrics {
       averageThumbnailWriteMs: average(this.thumbnailWriteTotalMs, this.thumbnailWriteCount),
       averageMetadataWriteMs: average(this.metadataWriteTotalMs, this.metadataWriteCount),
       averagePreviewReadyMs: average(this.previewReadyTotalMs, this.previewReadyCount),
-      averageLocalGenerationMs: average(
-        this.localGenerationTotalMs,
-        this.localGenerationCount
-      )
+      averageLocalGenerationMs: average(this.localGenerationTotalMs, this.localGenerationCount)
     }
   }
-
 }
