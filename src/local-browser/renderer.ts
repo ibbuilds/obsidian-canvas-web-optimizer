@@ -440,10 +440,7 @@ export default class LocalBrowserRenderer {
     }
   }
 
-  private async waitForDocumentReady(
-    connection: CdpConnection,
-    sessionId: string
-  ): Promise<void> {
+  private async waitForDocumentReady(connection: CdpConnection, sessionId: string): Promise<void> {
     const deadline = performance.now() + NAVIGATION_TIMEOUT_MS
     let lastError: Error | null = null
 
