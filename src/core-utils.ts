@@ -83,6 +83,51 @@ export type RectBounds = {
   maxY: number
 }
 
+export function createRectBounds(
+  x: number | undefined,
+  y: number | undefined,
+  width: number | undefined,
+  height: number | undefined
+): RectBounds | null {
+  if (
+    typeof x !== 'number' ||
+    typeof y !== 'number' ||
+    typeof width !== 'number' ||
+    typeof height !== 'number'
+  ) {
+    return null
+  }
+
+  return {
+    minX: x,
+    minY: y,
+    maxX: x + width,
+    maxY: y + height
+  }
+}
+
+export function fitRenderSize(
+  width: number,
+  height: number,
+  maxLongEdge: number,
+  minEdge = 64
+): { width: number; height: number } {
+  let fittedWidth = Math.max(minEdge, width)
+  let fittedHeight = Math.max(minEdge, height)
+  const longEdge = Math.max(fittedWidth, fittedHeight)
+
+  if (longEdge > maxLongEdge) {
+    const scale = maxLongEdge / longEdge
+    fittedWidth *= scale
+    fittedHeight *= scale
+  }
+
+  return {
+    width: Math.round(fittedWidth),
+    height: Math.round(fittedHeight)
+  }
+}
+
 export function classifyViewportProximity(node: RectBounds, viewport: RectBounds): 0 | 1 | 2 {
   const intersects = (bounds: RectBounds) =>
     node.maxX >= bounds.minX &&

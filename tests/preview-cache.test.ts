@@ -79,6 +79,33 @@ test('PreviewCache owns thumbnail and metadata index state', async () => {
   assert.equal(files.has('cache/node-a.metadata.json'), false)
 })
 
+test('PreviewCache validates schema and URL before returning metadata', async () => {
+  const { app } = createFakeApp()
+  const cache = new PreviewCache(app, 'cache', () => {})
+
+  await cache.initialize()
+
+  await cache.writeMetadata('valid', {
+    version: CACHE_METADATA_VERSION,
+    url: 'https://example.com',
+    title: 'Example'
+  })
+  await cache.writeMetadata('stale-url', {
+    version: CACHE_METADATA_VERSION,
+    url: 'https://old.example.com',
+    title: 'Old'
+  })
+  await cache.writeMetadata('old-schema', {
+    version: CACHE_METADATA_VERSION - 1,
+    url: 'https://example.com',
+    title: 'Old schema'
+  })
+
+  assert.equal((await cache.readValidMetadata('valid', 'https://example.com'))?.title, 'Example')
+  assert.equal(await cache.readValidMetadata('stale-url', 'https://example.com'), null)
+  assert.equal(await cache.readValidMetadata('old-schema', 'https://example.com'), null)
+})
+
 test('PreviewCache cleanup removes only unused node cache', async () => {
   const { app } = createFakeApp()
   const cache = new PreviewCache(app, 'cache', () => {})

@@ -9,25 +9,33 @@ import {
 import BackgroundExecutionController from './background-execution'
 import PreviewCache, { CACHE_METADATA_VERSION, type CacheMetadata } from './cache/preview-cache'
 import { type FrameMode, installLinkNodePatches } from './canvas/link-node-patcher'
+import CanvasNodeRuntime, { type CanvasNodeState } from './canvas/node-runtime'
 import {
   classifyViewportProximity,
+  createRectBounds,
   extractCanvasNodeIds,
+  fitRenderSize,
   isFatalLoadFailure,
   type RectBounds
 } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
 import { formatDiagnosticsReport } from './diagnostics/report'
 import AdaptiveConcurrencyTuner, {
-  type ConcurrencyCounters,
   type ConcurrencyTuningRecord
 } from './generation/concurrency-tuner'
 import GenerationCoordinator from './generation/coordinator'
+import type {
+  ActiveGeneration,
+  DidFailLoadEvent,
+  GenerationJob,
+  GenerationOutcome,
+  GenerationPreload,
+  LocalBatchTuningSnapshot,
+  LocalConcurrentGeneration
+} from './generation/types'
 import InteractiveActivationController from './interactive/activation-controller'
 import { forceGuestLightPreference } from './interactive/webview-light'
-import LocalBrowserRenderer, {
-  type LocalBrowserRenderResult,
-  type LocalBrowserRenderTask
-} from './local-browser-renderer'
+import LocalBrowserRenderer, { type LocalBrowserRenderResult } from './local-browser-renderer'
 import NetworkPreconnector from './network-preconnector'
 import { openExternalUrl } from './platform/electron-runtime'
 import { GENERATION_LIGHT_THEME_CSS, LIGHT_THEME_SCRIPT } from './web-theme'
@@ -61,71 +69,9 @@ type ThumbnailImage = {
   toJPEG(quality: number): ArrayBuffer
 }
 
-type GenerationOutcome = 'success' | 'failure' | 'timeout' | 'preempted' | 'stale' | 'unmounted'
-
-type NodeState = {
-  evaluated: boolean
-  cached: boolean
-  metadata: CacheMetadata | null
-  preparation: Promise<void> | null
-  activationHandlerAttached: boolean
-}
-
-type GenerationJob = {
-  node: LinkNode
-  attempt: number
-  enqueuedAt: number
-  forceNative: boolean
-}
-
-type LocalConcurrentGeneration = {
-  job: GenerationJob
-  node: LinkNode
-  url: string
-  startedAt: number
-  task: LocalBrowserRenderTask
-  requeue: boolean
-  completed: boolean
-  timeoutId: number
-}
-
 type PluginData = {
   localRendererTuning?: Record<string, ConcurrencyTuningRecord>
   [key: string]: unknown
-}
-
-type LocalBatchTuningSnapshot = ConcurrencyCounters & {
-  concurrency: number
-}
-
-type ActiveGeneration = {
-  node: LinkNode
-  url: string
-  startedAt: number
-  frameRequestedAt?: number
-  frameCreatedAt?: number
-  domReadyAt?: number
-  usedPreload?: boolean
-  preparedByPreload?: boolean
-  requeue: boolean
-  finish: (outcome: GenerationOutcome) => void
-}
-
-type GenerationPreload = {
-  node: LinkNode
-  startedAt: number
-  frameEl: NonNullable<LinkNode['frameEl']> | null
-  prepared: boolean
-  readyAt?: number
-  readyPromise: Promise<boolean>
-  resolveReady: (ready: boolean) => void
-  settled: boolean
-  cleanup: () => void
-}
-
-type DidFailLoadEvent = Event & {
-  errorCode?: number
-  isMainFrame?: boolean
 }
 
 function delay(ms: number): Promise<void> {
@@ -185,9 +131,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   cacheDir = `${this.manifest.dir}/data/linkCache`
 
   private previewCache!: PreviewCache
-  private readonly nodeStates = new WeakMap<LinkNode, NodeState>()
-  private readonly requestedFrameModes = new WeakMap<LinkNode, FrameMode>()
-  private readonly pendingPlaceholders = new WeakMap<LinkNode, HTMLElement>()
+  private readonly nodeRuntime = new CanvasNodeRuntime()
 
   private readonly generationCoordinator = new GenerationCoordinator<GenerationJob>({
     getKey: job => job.node.id,
@@ -342,22 +286,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     console.log(`[${this.name}]`, msg)
   }
 
-  private getNodeState(node: LinkNode): NodeState {
-    const existing = this.nodeStates.get(node)
-
-    if (existing) return existing
-
-    const state: NodeState = {
-      evaluated: false,
-      cached: false,
-      metadata: null,
-      preparation: null,
-      activationHandlerAttached: false
-    }
-
-    this.nodeStates.set(node, state)
-
-    return state
+  private getNodeState(node: LinkNode): CanvasNodeState {
+    return this.nodeRuntime.getState(node)
   }
 
   private isNodeContentMounted(node: LinkNode): boolean {
@@ -385,21 +315,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private getNodeCanvasBounds(node: LinkNode): RectBounds | null {
-    if (
-      typeof node.x !== 'number' ||
-      typeof node.y !== 'number' ||
-      typeof node.width !== 'number' ||
-      typeof node.height !== 'number'
-    ) {
-      return null
-    }
-
-    return {
-      minX: node.x,
-      minY: node.y,
-      maxX: node.x + node.width,
-      maxY: node.y + node.height
-    }
+    return createRectBounds(node.x, node.y, node.width, node.height)
   }
 
   private isNodeNearVisibleViewport(node: LinkNode): boolean {
@@ -492,16 +408,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     return state.preparation
   }
 
-  private async evaluateNodeCache(node: LinkNode, state: NodeState) {
+  private async evaluateNodeCache(node: LinkNode, state: CanvasNodeState) {
     try {
-      const metadata = await this.previewCache.readMetadata(node.id)
+      const metadata = await this.previewCache.readValidMetadata(node.id, node.url)
 
-      if (metadata?.version !== CACHE_METADATA_VERSION || typeof metadata.title !== 'string') {
-        this.markNodeCacheMiss(node, state)
-        return
-      }
-
-      if (metadata.url && metadata.url !== node.url) {
+      if (!metadata) {
         this.markNodeCacheMiss(node, state)
         return
       }
@@ -519,7 +430,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
   }
 
-  private markNodeCacheMiss(node: LinkNode, state: NodeState) {
+  private markNodeCacheMiss(node: LinkNode, state: CanvasNodeState) {
     state.evaluated = true
     state.cached = false
     state.metadata = null
@@ -530,7 +441,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.applyPreparedNodeState(node, state)
   }
 
-  private applyPreparedNodeState(node: LinkNode, state: NodeState) {
+  private applyPreparedNodeState(node: LinkNode, state: CanvasNodeState) {
     if (state.cached) {
       this.removePendingPlaceholder(node)
 
@@ -598,7 +509,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private ensurePendingPlaceholder(node: LinkNode) {
     if (!this.isNodeContentMounted(node)) return
 
-    const current = this.pendingPlaceholders.get(node)
+    const current = this.nodeRuntime.getPlaceholder(node)
 
     if (current?.isConnected) return
 
@@ -622,23 +533,23 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     placeholder.append(hostname, status)
     node.contentEl.append(placeholder)
-    this.pendingPlaceholders.set(node, placeholder)
+    this.nodeRuntime.setPlaceholder(node, placeholder)
   }
 
   private removePendingPlaceholder(node: LinkNode) {
-    const placeholder = this.pendingPlaceholders.get(node)
+    const placeholder = this.nodeRuntime.getPlaceholder(node)
 
     if (placeholder?.isConnected) {
       placeholder.remove()
     }
 
-    this.pendingPlaceholders.delete(node)
+    this.nodeRuntime.clearPlaceholder(node)
   }
 
   private setPendingStatus(node: LinkNode, message: string) {
     this.ensurePendingPlaceholder(node)
 
-    const placeholder = this.pendingPlaceholders.get(node)
+    const placeholder = this.nodeRuntime.getPlaceholder(node)
     const status = placeholder?.querySelector<HTMLElement>('.canvas-web-pending-status')
 
     if (status) {
@@ -1289,24 +1200,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private getLocalRenderSize(node: LinkNode): { width: number; height: number } {
-    let width = node.contentEl?.clientWidth || node.width || 640
-    let height = node.contentEl?.clientHeight || node.height || 360
-
-    width = Math.max(64, width)
-    height = Math.max(64, height)
-
-    const longEdge = Math.max(width, height)
-
-    if (longEdge > THUMBNAIL_MAX_LONG_EDGE) {
-      const scale = THUMBNAIL_MAX_LONG_EDGE / longEdge
-      width *= scale
-      height *= scale
-    }
-
-    return {
-      width: Math.round(width),
-      height: Math.round(height)
-    }
+    return fitRenderSize(
+      node.contentEl?.clientWidth || node.width || 640,
+      node.contentEl?.clientHeight || node.height || 360,
+      THUMBNAIL_MAX_LONG_EDGE
+    )
   }
 
   private async commitLocalThumbnail(
@@ -1598,7 +1496,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private requestNodeFrame(node: LinkNode, mode: FrameMode) {
-    this.requestedFrameModes.set(node, mode)
+    this.nodeRuntime.requestFrameMode(node, mode)
     node.recreateFrame()
 
     if (node.frameEl?.tagName === 'WEBVIEW') return
@@ -2165,13 +2063,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         })
       },
       consumeFrameMode: node => {
-        const mode = this.requestedFrameModes.get(node) ?? null
-
-        if (mode) {
-          this.requestedFrameModes.delete(node)
-        }
-
-        return mode
+        return this.nodeRuntime.consumeFrameMode(node)
       },
       onFrameCreated: (node, mode) => this.configureFrame(node, mode)
     })

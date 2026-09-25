@@ -59,6 +59,20 @@ export default class PreviewCache {
     return metadata
   }
 
+  async readValidMetadata(nodeId: string, url: string): Promise<CacheMetadata | null> {
+    const metadata = await this.readMetadata(nodeId)
+
+    if (metadata.version !== CACHE_METADATA_VERSION || typeof metadata.title !== 'string') {
+      return null
+    }
+
+    if (metadata.url && metadata.url !== url) {
+      return null
+    }
+
+    return metadata
+  }
+
   markPresent(nodeId: string, metadata: CacheMetadata) {
     this.thumbnailIds.add(nodeId)
     this.metadataIds.add(nodeId)

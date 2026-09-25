@@ -1,21 +1,17 @@
 import { spawnSync } from 'node:child_process'
-import { rmSync } from 'node:fs'
+import { readdirSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import esbuild from 'esbuild'
 
 const outdir = '.test-dist'
+const testFiles = readdirSync('tests')
+  .filter(name => name.endsWith('.test.ts'))
+  .sort()
+  .map(name => join('tests', name))
 
 try {
   await esbuild.build({
-    entryPoints: [
-      'tests/core-utils.test.ts',
-      'tests/preview-cache.test.ts',
-      'tests/dynamic-priority-queue.test.ts',
-      'tests/interactive-activation.test.ts',
-      'tests/generation-coordinator.test.ts',
-      'tests/concurrency-tuner.test.ts',
-      'tests/link-node-patcher.test.ts',
-      'tests/diagnostics-report.test.ts'
-    ],
+    entryPoints: testFiles,
     bundle: true,
     platform: 'node',
     format: 'esm',
@@ -25,23 +21,19 @@ try {
     logLevel: 'warning'
   })
 
-  const result = spawnSync(
-    process.execPath,
-    [
-      '--test',
-      `${outdir}/core-utils.test.mjs`,
-      `${outdir}/preview-cache.test.mjs`,
-      `${outdir}/dynamic-priority-queue.test.mjs`,
-      `${outdir}/interactive-activation.test.mjs`,
-      `${outdir}/generation-coordinator.test.mjs`,
-      `${outdir}/concurrency-tuner.test.mjs`,
-      `${outdir}/link-node-patcher.test.mjs`,
-      `${outdir}/diagnostics-report.test.mjs`
-    ],
-    {
-      stdio: 'inherit'
+  const compiledTests = testFiles.map(path => {
+    const name = path.split(/[\\/]/).at(-1)?.replace(/\.ts$/, '.mjs')
+
+    if (!name) {
+      throw new Error(`Unable to resolve compiled test path for ${path}`)
     }
-  )
+
+    return join(outdir, name)
+  })
+
+  const result = spawnSync(process.execPath, ['--test', ...compiledTests], {
+    stdio: 'inherit'
+  })
 
   if (result.error) {
     throw result.error

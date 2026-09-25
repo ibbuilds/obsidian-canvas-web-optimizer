@@ -4,7 +4,9 @@ import {
   buildTuningCandidates,
   calculateLivePoolSize,
   classifyViewportProximity,
+  createRectBounds,
   extractCanvasNodeIds,
+  fitRenderSize,
   isFatalLoadFailure,
   pickPreferredConcurrency
 } from '../src/core-utils'
@@ -48,6 +50,22 @@ test('viewport proximity classifies visible, nearby, and background nodes', () =
   assert.equal(classifyViewportProximity({ minX: 10, minY: 10, maxX: 20, maxY: 20 }, viewport), 0)
   assert.equal(classifyViewportProximity({ minX: 150, minY: 20, maxX: 170, maxY: 40 }, viewport), 1)
   assert.equal(classifyViewportProximity({ minX: 350, minY: 20, maxX: 370, maxY: 40 }, viewport), 2)
+})
+
+test('node geometry converts Canvas coordinates to bounds', () => {
+  assert.deepEqual(createRectBounds(10, 20, 300, 200), {
+    minX: 10,
+    minY: 20,
+    maxX: 310,
+    maxY: 220
+  })
+  assert.equal(createRectBounds(undefined, 20, 300, 200), null)
+})
+
+test('thumbnail render size clamps small cards and scales oversized cards', () => {
+  assert.deepEqual(fitRenderSize(40, 20, 896), { width: 64, height: 64 })
+  assert.deepEqual(fitRenderSize(640, 360, 896), { width: 640, height: 360 })
+  assert.deepEqual(fitRenderSize(1792, 896, 896), { width: 896, height: 448 })
 })
 
 test('Canvas cache cleanup extracts only valid string node ids', () => {
