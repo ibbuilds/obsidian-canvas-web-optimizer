@@ -19,17 +19,20 @@ import {
 } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
 import { formatDiagnosticsReport } from './diagnostics/report'
-import AdaptiveConcurrencyTuner, {
-  type ConcurrencyCounters,
-  type ConcurrencyTuningRecord
-} from './generation/concurrency-tuner'
+import AdaptiveConcurrencyTuner, { type ConcurrencyTuningRecord } from './generation/concurrency-tuner'
 import GenerationCoordinator from './generation/coordinator'
+import type {
+  ActiveGeneration,
+  DidFailLoadEvent,
+  GenerationJob,
+  GenerationOutcome,
+  GenerationPreload,
+  LocalBatchTuningSnapshot,
+  LocalConcurrentGeneration
+} from './generation/types'
 import InteractiveActivationController from './interactive/activation-controller'
 import { forceGuestLightPreference } from './interactive/webview-light'
-import LocalBrowserRenderer, {
-  type LocalBrowserRenderResult,
-  type LocalBrowserRenderTask
-} from './local-browser-renderer'
+import LocalBrowserRenderer, { type LocalBrowserRenderResult } from './local-browser-renderer'
 import NetworkPreconnector from './network-preconnector'
 import { openExternalUrl } from './platform/electron-runtime'
 import { GENERATION_LIGHT_THEME_CSS, LIGHT_THEME_SCRIPT } from './web-theme'
@@ -63,8 +66,6 @@ type ThumbnailImage = {
   toJPEG(quality: number): ArrayBuffer
 }
 
-type GenerationOutcome = 'success' | 'failure' | 'timeout' | 'preempted' | 'stale' | 'unmounted'
-
 type NodeState = {
   evaluated: boolean
   cached: boolean
@@ -73,61 +74,9 @@ type NodeState = {
   activationHandlerAttached: boolean
 }
 
-type GenerationJob = {
-  node: LinkNode
-  attempt: number
-  enqueuedAt: number
-  forceNative: boolean
-}
-
-type LocalConcurrentGeneration = {
-  job: GenerationJob
-  node: LinkNode
-  url: string
-  startedAt: number
-  task: LocalBrowserRenderTask
-  requeue: boolean
-  completed: boolean
-  timeoutId: number
-}
-
 type PluginData = {
   localRendererTuning?: Record<string, ConcurrencyTuningRecord>
   [key: string]: unknown
-}
-
-type LocalBatchTuningSnapshot = ConcurrencyCounters & {
-  concurrency: number
-}
-
-type ActiveGeneration = {
-  node: LinkNode
-  url: string
-  startedAt: number
-  frameRequestedAt?: number
-  frameCreatedAt?: number
-  domReadyAt?: number
-  usedPreload?: boolean
-  preparedByPreload?: boolean
-  requeue: boolean
-  finish: (outcome: GenerationOutcome) => void
-}
-
-type GenerationPreload = {
-  node: LinkNode
-  startedAt: number
-  frameEl: NonNullable<LinkNode['frameEl']> | null
-  prepared: boolean
-  readyAt?: number
-  readyPromise: Promise<boolean>
-  resolveReady: (ready: boolean) => void
-  settled: boolean
-  cleanup: () => void
-}
-
-type DidFailLoadEvent = Event & {
-  errorCode?: number
-  isMainFrame?: boolean
 }
 
 function delay(ms: number): Promise<void> {
