@@ -68,11 +68,17 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Interactive webview: ${context.interactiveWebviewActive ? 1 : 0}`,
     `Interactive light preference: ${context.interactiveLightPreferenceStatus}`,
     `Interactive matchMedia light: ${
-      context.interactiveMatchMediaLight === null ? 'not tested' : context.interactiveMatchMediaLight
+      context.interactiveMatchMediaLight === null
+        ? 'not tested'
+        : context.interactiveMatchMediaLight
     }`,
     `Background execution: ${context.backgroundExecutionActive ? 'on' : 'off'}`,
     `Network preconnect: ${
-      local.available ? 'standby (local browser preferred)' : network.preconnectActive ? 'on' : 'off'
+      local.available
+        ? 'standby (local browser preferred)'
+        : network.preconnectActive
+          ? 'on'
+          : 'off'
     } (${network.preconnectCount})`,
     `HTTP warm cache: ${
       local.available ? 'standby (local browser preferred)' : network.warmActive ? 'on' : 'off'
