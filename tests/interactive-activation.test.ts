@@ -55,8 +55,10 @@ test('interactive controller switches nodes and keeps the latest request', async
   await flush()
   controller.request(c)
 
-  assert.equal(typeof releaseDeactivate, 'function')
-  releaseDeactivate?.()
+  const release = releaseDeactivate as (() => void) | null
+
+  assert.ok(release)
+  release()
   await flush()
   await flush()
 
