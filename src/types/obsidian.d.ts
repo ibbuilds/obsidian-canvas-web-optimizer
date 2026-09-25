@@ -12,9 +12,22 @@ declare module 'obsidian' {
     rebuildView(): void
   }
 
+  interface CanvasUtilitiesEventDetail {
+    reason: string
+    nodeIds: string[]
+  }
+
   interface Workspace {
     trigger(name: string): void
     on(name: string, cb: () => unknown): EventRef
+    on(
+      name: 'canvas-utilities:batch-start' | 'canvas-utilities:batch-end',
+      cb: (canvas: Canvas, detail: CanvasUtilitiesEventDetail) => unknown
+    ): EventRef
+    on(
+      name: 'canvas-utilities:geometry-changed',
+      cb: (canvas: Canvas, detail: CanvasUtilitiesEventDetail) => unknown
+    ): EventRef
   }
 
   interface CanvasViewportBBox {
