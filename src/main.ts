@@ -8,6 +8,7 @@ import {
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
+import PreviewCache, { CACHE_METADATA_VERSION, type CacheMetadata } from './cache/preview-cache'
 import { extractCanvasNodeIds, isFatalLoadFailure, pickPreferredConcurrency } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
 import LocalBrowserRenderer, {
@@ -16,10 +17,6 @@ import LocalBrowserRenderer, {
 } from './local-browser-renderer'
 import NetworkPreconnector from './network-preconnector'
 import { GENERATION_LIGHT_THEME_CSS, LIGHT_THEME_SCRIPT } from './web-theme'
-
-const CACHE_METADATA_VERSION = 2
-const CACHE_SCHEMA_VERSION = 2
-const CACHE_SCHEMA_FILENAME = 'cache-schema.json'
 
 const THUMBNAIL_JPEG_QUALITY = 76
 const THUMBNAIL_MAX_LONG_EDGE = 896
@@ -72,13 +69,6 @@ type ElectronRemoteLike = {
 
 type FrameMode = 'generation' | 'preload' | 'interactive'
 type GenerationOutcome = 'success' | 'failure' | 'timeout' | 'preempted' | 'stale' | 'unmounted'
-
-type CacheMetadata = {
-  version?: number
-  url?: string
-  title: string
-  capturedAt?: number
-}
 
 type NodeState = {
   evaluated: boolean
@@ -298,9 +288,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   cacheDir = `${this.manifest.dir}/data/linkCache`
 
-  private readonly thumbnailCacheIds = new Set<string>()
-  private readonly metadataCacheIds = new Set<string>()
-  private readonly metadataMemory = new Map<string, CacheMetadata>()
+  private previewCache!: PreviewCache
   private readonly nodeStates = new WeakMap<LinkNode, NodeState>()
   private readonly requestedFrameModes = new WeakMap<LinkNode, FrameMode>()
   private readonly pendingPlaceholders = new WeakMap<LinkNode, HTMLElement>()
@@ -353,9 +341,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       })
     )
 
-    await this.app.vault.adapter.mkdir(this.cacheDir)
-    await this.ensureCacheSchema()
-    await this.buildCacheIndex()
+    this.previewCache = new PreviewCache(this.app, this.cacheDir, (message, debug) =>
+      this.log(message, debug)
+    )
+    await this.previewCache.initialize()
 
     const loadedData = await this.loadData()
 
@@ -459,65 +448,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     console.log(`[${this.name}]`, msg)
   }
 
-  private async ensureCacheSchema() {
-    const schemaPath = `${this.cacheDir}/${CACHE_SCHEMA_FILENAME}`
-    let currentVersion = 0
-
-    try {
-      if (await this.app.vault.adapter.exists(schemaPath)) {
-        const raw = await this.app.vault.adapter.read(schemaPath)
-        const parsed = JSON.parse(raw) as { version?: number }
-        currentVersion = parsed.version ?? 0
-      }
-    } catch (error) {
-      this.log(error, true)
-    }
-
-    if (currentVersion === CACHE_SCHEMA_VERSION) return
-
-    const listing = await this.app.vault.adapter.list(this.cacheDir)
-    const staleFiles = listing.files.filter(path =>
-      /(?:\.thumbnail\.jpg|\.metadata\.json|\/url-index\.json)$/.test(path)
-    )
-
-    await Promise.all(
-      staleFiles.map(async path => {
-        try {
-          await this.app.vault.adapter.remove(path)
-        } catch (error) {
-          this.log(error, true)
-        }
-      })
-    )
-
-    await this.app.vault.adapter.write(
-      schemaPath,
-      JSON.stringify({
-        version: CACHE_SCHEMA_VERSION,
-        migratedAt: Date.now()
-      })
-    )
-  }
-
-  private async buildCacheIndex() {
-    const listing = await this.app.vault.adapter.list(this.cacheDir)
-
-    for (const path of listing.files) {
-      const thumbnailMatch = path.match(/([^/]+)\.thumbnail\.jpg$/)
-
-      if (thumbnailMatch) {
-        this.thumbnailCacheIds.add(thumbnailMatch[1])
-        continue
-      }
-
-      const metadataMatch = path.match(/([^/]+)\.metadata\.json$/)
-
-      if (metadataMatch) {
-        this.metadataCacheIds.add(metadataMatch[1])
-      }
-    }
-  }
-
   private getNodeState(node: LinkNode): NodeState {
     const existing = this.nodeStates.get(node)
 
@@ -557,7 +487,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private hasIndexedCache(node: LinkNode): boolean {
-    return this.thumbnailCacheIds.has(node.id) && this.metadataCacheIds.has(node.id)
+    return this.previewCache.has(node.id)
   }
 
   private isNodeNearVisibleViewport(node: LinkNode): boolean {
@@ -647,13 +577,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private async evaluateNodeCache(node: LinkNode, state: NodeState) {
     try {
-      let metadata = this.metadataMemory.get(node.id)
-
-      if (!metadata) {
-        const raw = await this.app.vault.adapter.read(`${this.cacheDir}/${node.id}.metadata.json`)
-        metadata = JSON.parse(raw) as CacheMetadata
-        this.metadataMemory.set(node.id, metadata)
-      }
+      const metadata = await this.previewCache.readMetadata(node.id)
 
       if (metadata?.version !== CACHE_METADATA_VERSION || typeof metadata.title !== 'string') {
         this.markNodeCacheMiss(node, state)
@@ -683,9 +607,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     state.cached = false
     state.metadata = null
 
-    this.thumbnailCacheIds.delete(node.id)
-    this.metadataCacheIds.delete(node.id)
-    this.metadataMemory.delete(node.id)
+    this.previewCache.forget(node.id)
     this.metrics.cacheMisses++
 
     this.applyPreparedNodeState(node, state)
@@ -844,9 +766,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     preview.alt = 'Webpage thumbnail'
     preview.decoding = 'async'
     preview.draggable = false
-    const resourcePath = this.app.vault.adapter.getResourcePath(
-      `${this.cacheDir}/${node.id}.thumbnail.jpg`
-    )
+    const resourcePath = this.previewCache.resourcePath(node.id)
     const cacheVersion = this.getNodeState(node).metadata?.capturedAt
 
     if (cacheVersion) {
@@ -919,9 +839,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     state.cached = false
     state.metadata = null
 
-    this.thumbnailCacheIds.delete(node.id)
-    this.metadataCacheIds.delete(node.id)
-    this.metadataMemory.delete(node.id)
+    this.previewCache.forget(node.id)
     this.ensurePendingPlaceholder(node)
 
     if (this.activeGeneration?.node === node) {
@@ -1591,10 +1509,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     try {
       const thumbnailWriteStartedAt = performance.now()
-      await this.app.vault.adapter.writeBinary(
-        `${this.cacheDir}/${node.id}.thumbnail.jpg`,
-        result.jpeg
-      )
+      await this.previewCache.writeThumbnail(node.id, result.jpeg)
       this.metrics.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
       this.metrics.thumbnailWriteCount++
       this.metrics.captureTotalMs += performance.now() - captureStartedAt
@@ -1632,10 +1547,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     try {
       const metadataWriteStartedAt = performance.now()
 
-      await this.app.vault.adapter.write(
-        `${this.cacheDir}/${node.id}.metadata.json`,
-        JSON.stringify(metadata)
-      )
+      await this.previewCache.writeMetadata(node.id, metadata)
 
       this.metrics.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
       this.metrics.metadataWriteCount++
@@ -1650,10 +1562,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     state.evaluated = true
     state.cached = true
     state.metadata = metadata
-
-    this.thumbnailCacheIds.add(node.id)
-    this.metadataCacheIds.add(node.id)
-    this.metadataMemory.set(node.id, metadata)
 
     node.updateNodeLabel(title)
 
@@ -1671,14 +1579,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       failedState.cached = false
       failedState.metadata = null
 
-      this.thumbnailCacheIds.delete(node.id)
-      this.metadataCacheIds.delete(node.id)
-      this.metadataMemory.delete(node.id)
-
-      await Promise.allSettled([
-        this.app.vault.adapter.remove(`${this.cacheDir}/${node.id}.thumbnail.jpg`),
-        this.app.vault.adapter.remove(`${this.cacheDir}/${node.id}.metadata.json`)
-      ])
+      await this.previewCache.remove(node.id)
 
       this.finishLocalGeneration(generation, 'fallback')
       return
@@ -2482,10 +2383,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     try {
       const metadataWriteStartedAt = performance.now()
 
-      await this.app.vault.adapter.write(
-        `${this.cacheDir}/${node.id}.metadata.json`,
-        JSON.stringify(metadata)
-      )
+      await this.previewCache.writeMetadata(node.id, metadata)
 
       this.metrics.metadataWriteTotalMs += performance.now() - metadataWriteStartedAt
       this.metrics.metadataWriteCount++
@@ -2501,10 +2399,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     state.evaluated = true
     state.cached = true
     state.metadata = metadata
-
-    this.thumbnailCacheIds.add(node.id)
-    this.metadataCacheIds.add(node.id)
-    this.metadataMemory.set(node.id, metadata)
 
     node.updateNodeLabel(title)
 
@@ -2566,7 +2460,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.metrics.encodeCount++
 
       const thumbnailWriteStartedAt = performance.now()
-      await this.app.vault.adapter.writeBinary(`${this.cacheDir}/${node.id}.thumbnail.jpg`, jpeg)
+      await this.previewCache.writeThumbnail(node.id, jpeg)
       this.metrics.thumbnailWriteTotalMs += performance.now() - thumbnailWriteStartedAt
       this.metrics.thumbnailWriteCount++
 
@@ -2605,12 +2499,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       _getThumbnailPath: () =>
         function () {
-          return `${thisPlugin.cacheDir}/${this.id}.thumbnail.jpg`
+          return thisPlugin.previewCache.thumbnailPath(this.id)
         },
 
       _getMetadataPath: () =>
         function () {
-          return `${thisPlugin.cacheDir}/${this.id}.metadata.json`
+          return thisPlugin.previewCache.metadataPath(this.id)
         },
 
       mountContent: (next: (...args: unknown[]) => unknown) =>
@@ -2851,18 +2745,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   async cleanupThumbnails() {
-    const thumbnails = await this.app.vault.adapter.list(this.cacheDir)
-
-    const cachedNodeIds = new Set<string>()
-
-    for (const file of thumbnails.files) {
-      const match = file.match(/([^/]+)\.(?:thumbnail\.jpg|metadata\.json)$/)
-
-      if (match) {
-        cachedNodeIds.add(match[1])
-      }
-    }
-
     const canvasFiles = this.app.vault.getFiles().filter(file => file.path.endsWith('.canvas'))
     const usedNodeIds = new Set<string>()
 
@@ -2875,29 +2757,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       })
     }
 
-    const unusedNodeIds = [...cachedNodeIds].filter(nodeId => !usedNodeIds.has(nodeId))
+    const removed = await this.previewCache.cleanupUnused(usedNodeIds)
 
-    for (const nodeId of unusedNodeIds) {
-      this.log(`Removing cache for missing node ${nodeId}`)
-
-      const thumbnailFile = `${this.cacheDir}/${nodeId}.thumbnail.jpg`
-      const metadataFile = `${this.cacheDir}/${nodeId}.metadata.json`
-
-      const removeFile = async (path: string) => {
-        if (await this.app.vault.adapter.exists(path)) {
-          await this.app.vault.adapter.remove(path)
-        }
-      }
-
-      await removeFile(thumbnailFile)
-      await removeFile(metadataFile)
-
-      this.thumbnailCacheIds.delete(nodeId)
-      this.metadataCacheIds.delete(nodeId)
-      this.metadataMemory.delete(nodeId)
-    }
-
-    new Notice(`${unusedNodeIds.length} Unused thumbnails cleaned up!`)
+    new Notice(`${removed} Unused thumbnails cleaned up!`)
   }
 
   extractNodeIdsFromCanvas(content: string): string[] {
