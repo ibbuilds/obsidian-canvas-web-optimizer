@@ -8,11 +8,7 @@ import {
   Plugin
 } from 'obsidian'
 import BackgroundExecutionController from './background-execution'
-import {
-  extractCanvasNodeIds,
-  isFatalLoadFailure,
-  pickPreferredConcurrency
-} from './core-utils'
+import { extractCanvasNodeIds, isFatalLoadFailure, pickPreferredConcurrency } from './core-utils'
 import LocalBrowserRenderer, {
   type LocalBrowserRenderResult,
   type LocalBrowserRenderTask
