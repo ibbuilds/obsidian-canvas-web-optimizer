@@ -4,6 +4,9 @@
   "private": true,
   "description": "Optimize web pages in Obsidian Canvas with cached previews and smarter webview resource management.",
   "main": "main.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "format": "biome format --write src tests test-runner.mjs package.json manifest.json",
@@ -25,10 +28,10 @@
   "license": "MIT",
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
-    "@types/node": "^16.11.6",
-    "esbuild": "0.17.3",
+    "@types/node": "22",
+    "esbuild": "0.25.10",
     "obsidian": "latest",
-    "typescript": "4.7.4"
+    "typescript": "5.9.3"
   },
   "dependencies": {
     "monkey-around": "^3.0.0"
