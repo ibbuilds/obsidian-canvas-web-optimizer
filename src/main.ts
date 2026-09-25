@@ -150,6 +150,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private pluginData: PluginData = {}
   private localBatchTuning: LocalBatchTuningSnapshot | null = null
   private concurrencyTuner: AdaptiveConcurrencyTuner | null = null
+  private canvasUtilitiesBatchDepth = 0
 
   private readonly interactiveActivation = new InteractiveActivationController<LinkNode>({
     isAvailable: node => this.isNodeContentMounted(node),
@@ -200,6 +201,24 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       })
     )
 
+    this.registerEvent(
+      this.app.workspace.on('canvas-utilities:batch-start', () => {
+        this.beginCanvasUtilitiesBatch()
+      })
+    )
+
+    this.registerEvent(
+      this.app.workspace.on('canvas-utilities:batch-end', () => {
+        this.endCanvasUtilitiesBatch()
+      })
+    )
+
+    this.registerEvent(
+      this.app.workspace.on('canvas-utilities:geometry-changed', () => {
+        this.handleCanvasUtilitiesGeometryChanged()
+      })
+    )
+
     this.previewCache = new PreviewCache(this.app, this.cacheDir, (message, debug) =>
       this.log(message, debug)
     )
@@ -242,6 +261,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   onunload() {
     this.log('Unloading plugin')
 
+    this.canvasUtilitiesBatchDepth = 0
     this.generationCoordinator.clear()
     this.interactiveActivation.cancelPending()
     this.abortActiveGeneration(false)
@@ -262,6 +282,31 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.app.workspace.getLeavesOfType('canvas').forEach(leaf => {
       leaf.rebuildView()
     })
+  }
+
+  private beginCanvasUtilitiesBatch() {
+    this.canvasUtilitiesBatchDepth++
+    this.generationCoordinator.markPrioritiesDirty()
+  }
+
+  private endCanvasUtilitiesBatch() {
+    if (this.canvasUtilitiesBatchDepth > 0) {
+      this.canvasUtilitiesBatchDepth--
+    }
+
+    this.generationCoordinator.markPrioritiesDirty()
+
+    if (this.canvasUtilitiesBatchDepth === 0) {
+      this.scheduleThumbnailQueue()
+    }
+  }
+
+  private handleCanvasUtilitiesGeometryChanged() {
+    this.generationCoordinator.markPrioritiesDirty()
+
+    if (this.canvasUtilitiesBatchDepth === 0) {
+      this.scheduleThumbnailQueue()
+    }
   }
 
   private getWebviewPartition(): string | null {
@@ -740,6 +785,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private scheduleThumbnailQueue() {
     this.pruneDetachedActiveResources()
 
+    if (this.canvasUtilitiesBatchDepth > 0) {
+      this.releaseBackgroundExecutionIfIdle()
+      return
+    }
+
     if (
       this.activeInteractiveNode ||
       this.generationCoordinator.isScheduled ||
@@ -761,7 +811,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private async processThumbnailQueue() {
-    if (this.activeInteractiveNode) return
+    if (this.activeInteractiveNode || this.canvasUtilitiesBatchDepth > 0) return
 
     const renderer = this.localBrowserRenderer
 
@@ -853,6 +903,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private startNextGenerationPreload() {
     if (
       this.localBrowserRenderer?.available ||
+      this.canvasUtilitiesBatchDepth > 0 ||
       this.generationPreloadDisabled ||
       this.generationPreload ||
       !this.activeGeneration ||
