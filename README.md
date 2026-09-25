@@ -137,6 +137,17 @@ pnpm run dev
 
 Pull requests run the regression suite, Biome checks, TypeScript validation, and a production build in CI.
 
+## Releases
+
+Release tags use the format `v<manifest-version>`. Pushing a matching tag runs the release workflow, rebuilds the plugin from a clean checkout, and publishes `main.js`, `manifest.json`, and `styles.css` as GitHub release assets.
+
+Example:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
 ## Platform notes
 
 The plugin is desktop-only because its optimization path depends on Electron/Node capabilities.
