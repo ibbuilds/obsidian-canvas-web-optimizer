@@ -2066,6 +2066,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (this.activeGeneration !== session) return
 
+    if (!this.isThumbnailViewportCurrent(node, session.viewportWidth, session.viewportHeight)) {
+      this.removeNodeFrame(node)
+      session.finish('stale')
+      return
+    }
+
     if (node.frameEl !== frameEl || !frameEl.isConnected) {
       session.finish('failure')
       return
@@ -2101,11 +2107,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    if (!this.isThumbnailViewportCurrent(node, session.viewportWidth, session.viewportHeight)) {
+      this.removeNodeFrame(node)
+      session.finish('stale')
+      return
+    }
+
     const metadata: CacheMetadata = {
       version: CACHE_METADATA_VERSION,
       url: session.url,
       title,
-      capturedAt: Date.now()
+      capturedAt: Date.now(),
+      viewportWidth: session.viewportWidth,
+      viewportHeight: session.viewportHeight
     }
 
     try {
