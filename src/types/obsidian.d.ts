@@ -39,6 +39,7 @@ declare module 'obsidian' {
 
   interface Canvas {
     wrapperEl: HTMLElement
+    nodes?: Map<string, LinkNode>
     initialize(...args: unknown[]): unknown
     recreateFrame(...args: unknown[]): unknown
     createLinkNode(...args: unknown[]): LinkNode

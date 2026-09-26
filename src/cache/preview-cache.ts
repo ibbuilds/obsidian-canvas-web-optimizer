@@ -1,14 +1,21 @@
 import type { App } from 'obsidian'
 
-export const CACHE_METADATA_VERSION = 2
+export const CACHE_METADATA_VERSION = 3
 const CACHE_SCHEMA_VERSION = 2
 const CACHE_SCHEMA_FILENAME = 'cache-schema.json'
+
+export type CacheViewport = {
+  width: number
+  height: number
+}
 
 export type CacheMetadata = {
   version?: number
   url?: string
   title: string
   capturedAt?: number
+  viewportWidth?: number
+  viewportHeight?: number
 }
 
 type Log = (message: unknown, debug?: boolean) => void
@@ -59,7 +66,11 @@ export default class PreviewCache {
     return metadata
   }
 
-  async readValidMetadata(nodeId: string, url: string): Promise<CacheMetadata | null> {
+  async readValidMetadata(
+    nodeId: string,
+    url: string,
+    viewport?: CacheViewport
+  ): Promise<CacheMetadata | null> {
     const metadata = await this.readMetadata(nodeId)
 
     if (metadata.version !== CACHE_METADATA_VERSION || typeof metadata.title !== 'string') {
@@ -67,6 +78,13 @@ export default class PreviewCache {
     }
 
     if (metadata.url && metadata.url !== url) {
+      return null
+    }
+
+    if (
+      viewport &&
+      (metadata.viewportWidth !== viewport.width || metadata.viewportHeight !== viewport.height)
+    ) {
       return null
     }
 

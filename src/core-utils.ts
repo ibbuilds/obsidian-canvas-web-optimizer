@@ -106,6 +106,39 @@ export function createRectBounds(
   }
 }
 
+export type ThumbnailCaptureGeometry = {
+  viewportWidth: number
+  viewportHeight: number
+  captureScale: number
+  outputWidth: number
+  outputHeight: number
+}
+
+export function createThumbnailCaptureGeometry(
+  width: number,
+  height: number,
+  maxOutputLongEdge: number,
+  maxViewportLongEdge = 4096,
+  minEdge = 64
+): ThumbnailCaptureGeometry {
+  const viewport = fitRenderSize(
+    Number.isFinite(width) ? width : minEdge,
+    Number.isFinite(height) ? height : minEdge,
+    maxViewportLongEdge,
+    minEdge
+  )
+  const viewportLongEdge = Math.max(viewport.width, viewport.height)
+  const captureScale = Math.min(1, maxOutputLongEdge / viewportLongEdge)
+
+  return {
+    viewportWidth: viewport.width,
+    viewportHeight: viewport.height,
+    captureScale,
+    outputWidth: Math.max(1, Math.round(viewport.width * captureScale)),
+    outputHeight: Math.max(1, Math.round(viewport.height * captureScale))
+  }
+}
+
 export function fitRenderSize(
   width: number,
   height: number,

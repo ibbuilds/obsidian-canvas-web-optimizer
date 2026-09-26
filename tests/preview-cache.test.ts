@@ -13,7 +13,9 @@ test('PreviewCache owns thumbnail and metadata index state', async () => {
     version: CACHE_METADATA_VERSION,
     url: 'https://example.com',
     title: 'Example',
-    capturedAt: 1
+    capturedAt: 1,
+    viewportWidth: 800,
+    viewportHeight: 500
   }
 
   await cache.writeThumbnail('node-a', new Uint8Array([1, 2, 3]).buffer)
@@ -41,22 +43,44 @@ test('PreviewCache validates schema and URL before returning metadata', async ()
   await cache.writeMetadata('valid', {
     version: CACHE_METADATA_VERSION,
     url: 'https://example.com',
-    title: 'Example'
+    title: 'Example',
+    viewportWidth: 800,
+    viewportHeight: 500
   })
   await cache.writeMetadata('stale-url', {
     version: CACHE_METADATA_VERSION,
     url: 'https://old.example.com',
-    title: 'Old'
+    title: 'Old',
+    viewportWidth: 800,
+    viewportHeight: 500
   })
   await cache.writeMetadata('old-schema', {
     version: CACHE_METADATA_VERSION - 1,
     url: 'https://example.com',
-    title: 'Old schema'
+    title: 'Old schema',
+    viewportWidth: 800,
+    viewportHeight: 500
+  })
+  await cache.writeMetadata('stale-viewport', {
+    version: CACHE_METADATA_VERSION,
+    url: 'https://example.com',
+    title: 'Wrong size',
+    viewportWidth: 1664,
+    viewportHeight: 500
   })
 
-  assert.equal((await cache.readValidMetadata('valid', 'https://example.com'))?.title, 'Example')
-  assert.equal(await cache.readValidMetadata('stale-url', 'https://example.com'), null)
-  assert.equal(await cache.readValidMetadata('old-schema', 'https://example.com'), null)
+  const viewport = { width: 800, height: 500 }
+
+  assert.equal(
+    (await cache.readValidMetadata('valid', 'https://example.com', viewport))?.title,
+    'Example'
+  )
+  assert.equal(await cache.readValidMetadata('stale-url', 'https://example.com', viewport), null)
+  assert.equal(await cache.readValidMetadata('old-schema', 'https://example.com', viewport), null)
+  assert.equal(
+    await cache.readValidMetadata('stale-viewport', 'https://example.com', viewport),
+    null
+  )
 })
 
 test('PreviewCache cleanup removes only unused node cache', async () => {

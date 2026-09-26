@@ -245,7 +245,7 @@ export default class LocalBrowserRenderer {
     this.lastRenderFailure = 'none'
   }
 
-  render(url: string, width: number, height: number): LocalBrowserRenderTask {
+  render(url: string, width: number, height: number, captureScale = 1): LocalBrowserRenderTask {
     const startedAt = performance.now()
     let cancelled = false
     let targetId: string | null = null
@@ -293,6 +293,7 @@ export default class LocalBrowserRenderer {
         const sessionId = attached.sessionId
         const safeWidth = Math.max(64, Math.round(width))
         const safeHeight = Math.max(64, Math.round(height))
+        const safeCaptureScale = Math.max(0.1, Math.min(1, captureScale))
 
         await Promise.all([
           runtime.connection.send('Page.enable', {}, sessionId),
@@ -388,7 +389,13 @@ export default class LocalBrowserRenderer {
         const screenshotStartedAt = performance.now()
         const [titleResponse, screenshot] = await Promise.all([
           themeAndTitle,
-          this.captureScreenshot(runtime.connection, sessionId)
+          this.captureScreenshot(
+            runtime.connection,
+            sessionId,
+            safeWidth,
+            safeHeight,
+            safeCaptureScale
+          )
         ])
         const screenshotMs = performance.now() - screenshotStartedAt
 
@@ -535,13 +542,23 @@ export default class LocalBrowserRenderer {
 
   private async captureScreenshot(
     connection: CdpConnection,
-    sessionId: string
+    sessionId: string,
+    viewportWidth: number,
+    viewportHeight: number,
+    captureScale: number
   ): Promise<{ data: string }> {
     const baseOptions = {
       format: 'jpeg',
       quality: 76,
       fromSurface: true,
-      captureBeyondViewport: false
+      captureBeyondViewport: false,
+      clip: {
+        x: 0,
+        y: 0,
+        width: viewportWidth,
+        height: viewportHeight,
+        scale: captureScale
+      }
     }
 
     if (this.screenshotOptimizeForSpeed !== false) {

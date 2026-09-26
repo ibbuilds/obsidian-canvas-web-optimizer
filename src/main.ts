@@ -13,10 +13,11 @@ import CanvasNodeRuntime, { type CanvasNodeState } from './canvas/node-runtime'
 import {
   classifyViewportProximity,
   createRectBounds,
+  createThumbnailCaptureGeometry,
   extractCanvasNodeIds,
-  fitRenderSize,
   isFatalLoadFailure,
-  type RectBounds
+  type RectBounds,
+  type ThumbnailCaptureGeometry
 } from './core-utils'
 import DiagnosticsMetrics from './diagnostics/metrics'
 import { formatDiagnosticsReport } from './diagnostics/report'
@@ -42,6 +43,7 @@ import { GENERATION_LIGHT_THEME_CSS, LIGHT_THEME_SCRIPT } from './web-theme'
 
 const THUMBNAIL_JPEG_QUALITY = 76
 const THUMBNAIL_MAX_LONG_EDGE = 896
+const THUMBNAIL_MAX_VIEWPORT_LONG_EDGE = 4096
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
 const PREVIEW_LOAD_TIMEOUT_MS = 1000
@@ -214,8 +216,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     )
 
     this.registerEvent(
-      this.app.workspace.on('canvas-utilities:geometry-changed', () => {
-        this.handleCanvasUtilitiesGeometryChanged()
+      this.app.workspace.on('canvas-utilities:geometry-changed', (canvas, detail) => {
+        this.handleCanvasUtilitiesGeometryChanged(canvas, detail)
       })
     )
 
@@ -301,12 +303,77 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
   }
 
-  private handleCanvasUtilitiesGeometryChanged() {
+  private handleCanvasUtilitiesGeometryChanged(
+    canvas: Canvas,
+    detail: { reason: string; nodeIds: string[] }
+  ) {
     this.generationCoordinator.markPrioritiesDirty()
+
+    if (this.canvasUtilitiesReasonChangesCardSize(detail.reason)) {
+      for (const nodeId of detail.nodeIds) {
+        const node = canvas.nodes?.get(nodeId)
+
+        if (node) {
+          this.invalidateThumbnailGeometry(node)
+        }
+      }
+    }
 
     if (this.canvasUtilitiesBatchDepth === 0) {
       this.scheduleThumbnailQueue()
     }
+  }
+
+  private canvasUtilitiesReasonChangesCardSize(reason: string): boolean {
+    return reason === 'layout:bento' || reason === 'match-size' || reason === 'size-preset'
+  }
+
+  private invalidateThumbnailGeometry(node: LinkNode) {
+    const state = this.getNodeState(node)
+    const geometry = this.getThumbnailCaptureGeometry(node)
+
+    if (
+      state.cached &&
+      state.metadata?.viewportWidth === geometry.viewportWidth &&
+      state.metadata?.viewportHeight === geometry.viewportHeight
+    ) {
+      return
+    }
+
+    const preview = node._previewImageEl
+
+    if (preview?.isConnected) {
+      preview.remove()
+    }
+
+    node._previewImageEl = null
+    state.evaluated = true
+    state.cached = false
+    state.metadata = null
+    state.preparation = null
+    this.previewCache.forget(node.id)
+    this.removeQueuedGeneration(node)
+
+    if (this.generationPreload?.node === node) {
+      this.cancelGenerationPreload(true)
+    }
+
+    this.abortLocalGenerationForNode(node, 'stale', true)
+
+    const session = this.activeGeneration
+
+    if (session?.node === node) {
+      session.requeue = true
+      this.removeNodeFrame(node)
+      session.finish('stale')
+    }
+
+    if (this.activeInteractiveNode === node) {
+      return
+    }
+
+    this.ensurePendingPlaceholder(node)
+    this.enqueueThumbnailGeneration(node, true)
   }
 
   private getWebviewPartition(): string | null {
@@ -361,6 +428,25 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private getNodeCanvasBounds(node: LinkNode): RectBounds | null {
     return createRectBounds(node.x, node.y, node.width, node.height)
+  }
+
+  private getThumbnailCaptureGeometry(node: LinkNode): ThumbnailCaptureGeometry {
+    return createThumbnailCaptureGeometry(
+      node.width || node.contentEl?.clientWidth || 640,
+      node.height || node.contentEl?.clientHeight || 360,
+      THUMBNAIL_MAX_LONG_EDGE,
+      THUMBNAIL_MAX_VIEWPORT_LONG_EDGE
+    )
+  }
+
+  private isThumbnailViewportCurrent(
+    node: LinkNode,
+    viewportWidth: number,
+    viewportHeight: number
+  ): boolean {
+    const geometry = this.getThumbnailCaptureGeometry(node)
+
+    return geometry.viewportWidth === viewportWidth && geometry.viewportHeight === viewportHeight
   }
 
   private isNodeNearVisibleViewport(node: LinkNode): boolean {
@@ -455,7 +541,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private async evaluateNodeCache(node: LinkNode, state: CanvasNodeState) {
     try {
-      const metadata = await this.previewCache.readValidMetadata(node.id, node.url)
+      const geometry = this.getThumbnailCaptureGeometry(node)
+      const metadata = await this.previewCache.readValidMetadata(node.id, node.url, {
+        width: geometry.viewportWidth,
+        height: geometry.viewportHeight
+      })
 
       if (!metadata) {
         this.markNodeCacheMiss(node, state)
@@ -1002,6 +1092,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private generateQueuedThumbnail(job: GenerationJob): Promise<void> {
     const { node } = job
+    const geometry = this.getThumbnailCaptureGeometry(node)
 
     return new Promise(resolve => {
       let completed = false
@@ -1010,6 +1101,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         node,
         url: node.url,
         startedAt: performance.now(),
+        viewportWidth: geometry.viewportWidth,
+        viewportHeight: geometry.viewportHeight,
         requeue: false,
         finish: () => {}
       }
@@ -1140,13 +1233,21 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private startLocalGeneration(job: GenerationJob, renderer: LocalBrowserRenderer) {
     const { node } = job
-    const size = this.getLocalRenderSize(node)
-    const task = renderer.render(node.url, size.width, size.height)
+    const geometry = this.getThumbnailCaptureGeometry(node)
+    const task = renderer.render(
+      node.url,
+      geometry.viewportWidth,
+      geometry.viewportHeight,
+      geometry.captureScale
+    )
     const generation: LocalConcurrentGeneration = {
       job,
       node,
       url: node.url,
       startedAt: performance.now(),
+      viewportWidth: geometry.viewportWidth,
+      viewportHeight: geometry.viewportHeight,
+      captureScale: geometry.captureScale,
       task,
       requeue: false,
       completed: false,
@@ -1250,14 +1351,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.finishLocalGeneration(generation, outcome)
   }
 
-  private getLocalRenderSize(node: LinkNode): { width: number; height: number } {
-    return fitRenderSize(
-      node.contentEl?.clientWidth || node.width || 640,
-      node.contentEl?.clientHeight || node.height || 360,
-      THUMBNAIL_MAX_LONG_EDGE
-    )
-  }
-
   private async commitLocalThumbnail(
     node: LinkNode,
     generation: LocalConcurrentGeneration,
@@ -1266,6 +1359,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (!this.isCurrentLocalGeneration(generation)) return
 
     if (node.url !== generation.url) {
+      this.finishLocalGeneration(generation, 'stale')
+      return
+    }
+
+    if (
+      !this.isThumbnailViewportCurrent(node, generation.viewportWidth, generation.viewportHeight)
+    ) {
+      generation.requeue = true
       this.finishLocalGeneration(generation, 'stale')
       return
     }
@@ -1292,6 +1393,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    if (
+      !this.isThumbnailViewportCurrent(node, generation.viewportWidth, generation.viewportHeight)
+    ) {
+      generation.requeue = true
+      this.finishLocalGeneration(generation, 'stale')
+      return
+    }
+
     let title = result.title
 
     if (!title) {
@@ -1306,7 +1415,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       version: CACHE_METADATA_VERSION,
       url: generation.url,
       title,
-      capturedAt: Date.now()
+      capturedAt: Date.now(),
+      viewportWidth: generation.viewportWidth,
+      viewportHeight: generation.viewportHeight
     }
 
     try {
@@ -1947,6 +2058,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (this.activeGeneration !== session) return
 
+    if (!this.isThumbnailViewportCurrent(node, session.viewportWidth, session.viewportHeight)) {
+      this.removeNodeFrame(node)
+      session.finish('stale')
+      return
+    }
+
     if (node.frameEl !== frameEl || !frameEl.isConnected) {
       session.finish('failure')
       return
@@ -1982,11 +2099,19 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    if (!this.isThumbnailViewportCurrent(node, session.viewportWidth, session.viewportHeight)) {
+      this.removeNodeFrame(node)
+      session.finish('stale')
+      return
+    }
+
     const metadata: CacheMetadata = {
       version: CACHE_METADATA_VERSION,
       url: session.url,
       title,
-      capturedAt: Date.now()
+      capturedAt: Date.now(),
+      viewportWidth: session.viewportWidth,
+      viewportHeight: session.viewportHeight
     }
 
     try {
