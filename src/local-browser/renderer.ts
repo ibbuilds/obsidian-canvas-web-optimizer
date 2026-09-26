@@ -650,6 +650,32 @@ export default class LocalBrowserRenderer {
           this.visualSettleMaxOuts++
         }
 
+        const lateCleanupResponse = await runtime.connection
+          .send<{
+            result?: {
+              value?: unknown
+            }
+          }>(
+            'Runtime.evaluate',
+            {
+              expression: COOKIE_CLEANUP_SCRIPT,
+              returnByValue: true
+            },
+            sessionId,
+            PAINT_READY_TIMEOUT_MS + 100
+          )
+          .catch(() => ({ result: { value: 0 } }))
+        const lateCleanupActions =
+          typeof lateCleanupResponse.result?.value === 'number'
+            ? lateCleanupResponse.result.value
+            : 0
+
+        this.cookieCleanupActions += lateCleanupActions
+
+        if (lateCleanupActions > 0) {
+          await delay(180)
+        }
+
         if (cancelled) {
           throw new Error('Local browser render cancelled')
         }
