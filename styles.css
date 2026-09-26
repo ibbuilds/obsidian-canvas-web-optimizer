@@ -89,3 +89,44 @@
 .canvas-web-pending-status {
   font-size: 0.8em;
 }
+
+
+.canvas-web-pending-preview::before {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      110deg,
+      transparent 20%,
+      color-mix(in srgb, var(--text-muted) 8%, transparent) 45%,
+      transparent 70%
+    );
+  background-size: 220% 100%;
+  content: '';
+  opacity: 0.75;
+  animation: canvas-web-preview-shimmer 1.35s ease-in-out infinite;
+}
+
+.canvas-web-pending-preview > * {
+  position: relative;
+  z-index: 1;
+}
+
+.canvas-web-pending-preview.canvas-web-preview-ready::before {
+  opacity: 0.22;
+  animation-duration: 2.2s;
+}
+
+.canvas-web-pending-preview.canvas-web-preview-ready .canvas-web-pending-status {
+  color: var(--text-normal);
+}
+
+@keyframes canvas-web-preview-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+
+  to {
+    background-position: -120% 0;
+  }
+}
