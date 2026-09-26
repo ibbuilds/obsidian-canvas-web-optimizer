@@ -1364,11 +1364,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     if (
-      !this.isThumbnailViewportCurrent(
-        node,
-        generation.viewportWidth,
-        generation.viewportHeight
-      )
+      !this.isThumbnailViewportCurrent(node, generation.viewportWidth, generation.viewportHeight)
     ) {
       generation.requeue = true
       this.finishLocalGeneration(generation, 'stale')
@@ -1398,11 +1394,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     if (
-      !this.isThumbnailViewportCurrent(
-        node,
-        generation.viewportWidth,
-        generation.viewportHeight
-      )
+      !this.isThumbnailViewportCurrent(node, generation.viewportWidth, generation.viewportHeight)
     ) {
       generation.requeue = true
       this.finishLocalGeneration(generation, 'stale')
