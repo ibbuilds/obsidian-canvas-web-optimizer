@@ -23,6 +23,10 @@ export type LocalBrowserDiagnostics = {
   visualSettleMaxOuts: number
   visualSettleComplexPages: number
   visualSettleCommandFailures: number
+  fastPathCaptures: number
+  visualStabilityChecks: number
+  visualStabilityPasses: number
+  visualStabilityExtraWaits: number
   loaderBypasses: number
   cookieCleanupActions: number
   cookieGuardActions: number
@@ -53,6 +57,7 @@ export type DiagnosticsReportContext = {
   queued: number
   stagedPreviews: number
   previewRevealActive: boolean
+  sharedLocalRenderHits: number
   interactiveWebviewActive: boolean
   interactiveLightPreferenceStatus: string
   interactiveMatchMediaLight: boolean | null
@@ -79,6 +84,7 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Queued: ${context.queued}`,
     `Staged previews: ${context.stagedPreviews}`,
     `Preview reveal: ${context.previewRevealActive ? 'active' : 'idle'}`,
+    `Shared local render hits: ${context.sharedLocalRenderHits}`,
     `Generation engine: ${generationEngine}`,
     `Local browser: ${local.status}`,
     `Local browser unavailable reason: ${local.unavailableReason}`,
@@ -125,6 +131,9 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser visual settle max-outs: ${local.visualSettleMaxOuts}`,
     `Local browser complex settles: ${local.visualSettleComplexPages}`,
     `Local browser visual settle command failures: ${local.visualSettleCommandFailures}`,
+    `Local browser fast-path captures: ${local.fastPathCaptures}`,
+    `Visual stability checks/passes: ${local.visualStabilityChecks}/${local.visualStabilityPasses}`,
+    `Visual stability extra waits: ${local.visualStabilityExtraWaits}`,
     `Local browser loader bypasses: ${local.loaderBypasses}`,
     `Cookie cleanup actions: ${local.cookieCleanupActions}`,
     `Cookie guard actions: ${local.cookieGuardActions}`,
