@@ -47,8 +47,8 @@ const THUMBNAIL_MAX_VIEWPORT_LONG_EDGE = 4096
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
 const PREVIEW_LOAD_TIMEOUT_MS = 1000
-const PREVIEW_REVEAL_LEAD_IN_MS = 90
-const PREVIEW_REVEAL_STAGGER_MS = 45
+const PREVIEW_REVEAL_LEAD_IN_MS = 110
+const PREVIEW_REVEAL_STAGGER_MS = 32
 const INTERACTIVE_PAINT_SETTLE_MS = 50
 const GENERATION_PAINT_TIMEOUT_MS = 120
 const GENERATION_JOB_TIMEOUT_MS = 5000
@@ -106,9 +106,25 @@ function afterTransition(element: HTMLElement, callback: () => void) {
   timeoutId = window.setTimeout(finish, PREVIEW_TRANSITION_FALLBACK_MS)
 }
 
+async function decodeLoadedImage(image: HTMLImageElement): Promise<boolean> {
+  if (image.naturalWidth <= 0) return false
+
+  if (typeof image.decode !== 'function') {
+    return true
+  }
+
+  try {
+    await image.decode()
+  } catch {
+    // A decoded local thumbnail can still be displayable even if decode() rejects.
+  }
+
+  return image.naturalWidth > 0
+}
+
 function waitForImage(image: HTMLImageElement): Promise<boolean> {
   if (image.complete) {
-    return Promise.resolve(image.naturalWidth > 0)
+    return decodeLoadedImage(image)
   }
 
   return new Promise(resolve => {
@@ -124,7 +140,9 @@ function waitForImage(image: HTMLImageElement): Promise<boolean> {
       resolve(loaded)
     }
 
-    const onLoad = () => finish(image.naturalWidth > 0)
+    const onLoad = () => {
+      void decodeLoadedImage(image).then(finish)
+    }
     const onError = () => finish(false)
 
     const timeoutId = window.setTimeout(() => finish(false), PREVIEW_LOAD_TIMEOUT_MS)
@@ -162,6 +180,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private canvasUtilitiesBatchDepth = 0
   private readonly stagedPreviews = new Map<string, StagedPreview>()
   private readonly pendingPreviewPresentation = new Set<string>()
+  private readonly generationRetryTimers = new Set<number>()
   private previewRevealPromise: Promise<void> | null = null
 
   private readonly interactiveActivation = new InteractiveActivationController<LinkNode>({
@@ -278,6 +297,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.stagedPreviews.clear()
     this.pendingPreviewPresentation.clear()
     this.previewRevealPromise = null
+
+    for (const retryTimer of this.generationRetryTimers) {
+      window.clearTimeout(retryTimer)
+    }
+
+    this.generationRetryTimers.clear()
     this.generationCoordinator.clear()
     this.interactiveActivation.cancelPending()
     this.abortActiveGeneration(false)
@@ -813,8 +838,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     this.stagedPreviews.set(node.id, { node, preview })
-    this.setPendingStatus(node, 'Ready')
-    this.scheduleStagedPreviewReveal()
+
+    const placeholder = this.nodeRuntime.getPlaceholder(node)
+    placeholder?.classList.add('canvas-web-preview-ready')
 
     return true
   }
@@ -824,16 +850,35 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.pendingPreviewPresentation.delete(node.id)
   }
 
+  private isGenerationBatchIdle(): boolean {
+    return (
+      !this.activeGeneration &&
+      this.localGenerations.size === 0 &&
+      this.generationCoordinator.length === 0 &&
+      this.generationRetryTimers.size === 0 &&
+      !this.generationPreload
+    )
+  }
+
   private scheduleStagedPreviewReveal() {
-    if (this.previewRevealPromise || this.stagedPreviews.size === 0) return
+    if (
+      this.previewRevealPromise ||
+      this.stagedPreviews.size === 0 ||
+      !this.isGenerationBatchIdle()
+    ) {
+      return
+    }
 
     this.previewRevealPromise = (async () => {
       await delay(PREVIEW_REVEAL_LEAD_IN_MS)
+
+      if (!this.isGenerationBatchIdle()) return
+
       await this.revealStagedPreviews()
     })().finally(() => {
       this.previewRevealPromise = null
 
-      if (this.stagedPreviews.size > 0) {
+      if (this.stagedPreviews.size > 0 && this.isGenerationBatchIdle()) {
         this.scheduleStagedPreviewReveal()
       }
     })
@@ -847,6 +892,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
       return (left.node.x ?? 0) - (right.node.x ?? 0)
     })
+    const transitions: Promise<void>[] = []
 
     for (const entry of staged) {
       const { node, preview } = entry
@@ -888,31 +934,32 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       node.contentEl.append(preview)
       node._previewImageEl = preview
 
-      await new Promise<void>(resolve => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            preview.classList.remove('link-thumbnail-enter')
+      // Establish opacity: 0 before starting the transition. This keeps the
+      // whole batch decoded in memory, then releases it as one visual sweep.
+      void preview.offsetWidth
+      preview.classList.remove('link-thumbnail-enter')
+
+      transitions.push(
+        new Promise<void>(resolve => {
+          afterTransition(preview, () => {
+            if (placeholder?.isConnected) {
+              placeholder.remove()
+            }
+
+            if (this.nodeRuntime.getPlaceholder(node) === placeholder) {
+              this.nodeRuntime.clearPlaceholder(node)
+            }
+
+            this.pendingPreviewPresentation.delete(node.id)
             resolve()
           })
         })
-      })
-
-      await new Promise<void>(resolve => {
-        afterTransition(preview, resolve)
-      })
-
-      if (placeholder?.isConnected) {
-        placeholder.remove()
-      }
-
-      if (this.nodeRuntime.getPlaceholder(node) === placeholder) {
-        this.nodeRuntime.clearPlaceholder(node)
-      }
-
-      this.pendingPreviewPresentation.delete(node.id)
+      )
 
       await delay(PREVIEW_REVEAL_STAGGER_MS)
     }
+
+    await Promise.all(transitions)
   }
 
   private async showPreviewOverFrame(node: LinkNode, animate = true): Promise<boolean> {
@@ -1335,9 +1382,12 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
             `Retrying preview (${job.attempt + 2}/${GENERATION_MAX_ATTEMPTS})`
           )
 
-          window.setTimeout(() => {
+          const retryTimer = window.setTimeout(() => {
+            this.generationRetryTimers.delete(retryTimer)
             this.enqueueThumbnailGeneration(node, true, job.attempt + 1, job.forceNative)
           }, GENERATION_RETRY_DELAY_MS)
+
+          this.generationRetryTimers.add(retryTimer)
         } else {
           if ((outcome === 'failure' || outcome === 'timeout') && !this.getNodeState(node).cached) {
             this.setPendingStatus(node, 'Click to load live')
@@ -1643,11 +1693,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private releaseBackgroundExecutionIfIdle() {
-    if (
-      this.activeGeneration ||
-      this.localGenerations.size > 0 ||
-      this.generationCoordinator.length > 0
-    ) {
+    if (!this.isGenerationBatchIdle()) {
       return
     }
 
