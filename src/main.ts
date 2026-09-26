@@ -1092,6 +1092,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private generateQueuedThumbnail(job: GenerationJob): Promise<void> {
     const { node } = job
+    const geometry = this.getThumbnailCaptureGeometry(node)
 
     return new Promise(resolve => {
       let completed = false
@@ -1100,6 +1101,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         node,
         url: node.url,
         startedAt: performance.now(),
+        viewportWidth: geometry.viewportWidth,
+        viewportHeight: geometry.viewportHeight,
         requeue: false,
         finish: () => {}
       }
@@ -1230,13 +1233,21 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private startLocalGeneration(job: GenerationJob, renderer: LocalBrowserRenderer) {
     const { node } = job
-    const size = this.getLocalRenderSize(node)
-    const task = renderer.render(node.url, size.width, size.height)
+    const geometry = this.getThumbnailCaptureGeometry(node)
+    const task = renderer.render(
+      node.url,
+      geometry.viewportWidth,
+      geometry.viewportHeight,
+      geometry.captureScale
+    )
     const generation: LocalConcurrentGeneration = {
       job,
       node,
       url: node.url,
       startedAt: performance.now(),
+      viewportWidth: geometry.viewportWidth,
+      viewportHeight: geometry.viewportHeight,
+      captureScale: geometry.captureScale,
       task,
       requeue: false,
       completed: false,
@@ -1338,14 +1349,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     generation.requeue = requeue
     this.finishLocalGeneration(generation, outcome)
-  }
-
-  private getLocalRenderSize(node: LinkNode): { width: number; height: number } {
-    return fitRenderSize(
-      node.contentEl?.clientWidth || node.width || 640,
-      node.contentEl?.clientHeight || node.height || 360,
-      THUMBNAIL_MAX_LONG_EDGE
-    )
   }
 
   private async commitLocalThumbnail(
