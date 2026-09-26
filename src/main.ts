@@ -1172,6 +1172,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.localGenerations.size === 0 &&
       this.generationCoordinator.length === 0
     ) {
+      this.sharedLocalRenders.clear()
       this.metrics.batchStartedAt = performance.now()
       this.metrics.batchCompleted = 0
 
@@ -1232,12 +1233,13 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const renderer = this.localBrowserRenderer
 
     if (renderer?.available) {
-      while (
-        renderer.available &&
-        !this.activeInteractiveNode &&
-        this.localGenerations.size < renderer.poolSize
-      ) {
-        const localJob = this.dequeueNextGenerationJob(job => !job.forceNative)
+      while (renderer.available && !this.activeInteractiveNode) {
+        const hasWorkerCapacity = renderer.activeCount < renderer.poolSize
+        const localJob = this.dequeueNextGenerationJob(
+          job =>
+            !job.forceNative &&
+            (hasWorkerCapacity || this.sharedLocalRenders.has(this.getLocalRenderKey(job.node)))
+        )
 
         if (!localJob) break
 
@@ -1824,6 +1826,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       }
     }
 
+    this.sharedLocalRenders.clear()
     this.releaseBackgroundExecution()
     this.scheduleStagedPreviewReveal()
   }
@@ -2611,6 +2614,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         : null
 
     this.metrics.reset(batchStartedAt)
+    this.sharedLocalRenderHits = 0
     this.interactiveLightPreferenceStatus = 'not attempted'
     this.interactiveMatchMediaLight = null
     this.localBrowserRenderer?.resetMetrics()
@@ -2653,6 +2657,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       queued: this.generationCoordinator.length,
       stagedPreviews: this.stagedPreviews.size,
       previewRevealActive: this.previewRevealPromise !== null,
+      sharedLocalRenderHits: this.sharedLocalRenderHits,
       interactiveWebviewActive: Boolean(this.activeInteractiveNode),
       interactiveLightPreferenceStatus: this.interactiveLightPreferenceStatus,
       interactiveMatchMediaLight: this.interactiveMatchMediaLight,
