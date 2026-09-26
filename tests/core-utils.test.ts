@@ -4,6 +4,7 @@ import {
   buildTuningCandidates,
   calculateLivePoolSize,
   classifyViewportProximity,
+  createThumbnailCaptureGeometry,
   createRectBounds,
   extractCanvasNodeIds,
   fitRenderSize,
@@ -66,6 +67,50 @@ test('thumbnail render size clamps small cards and scales oversized cards', () =
   assert.deepEqual(fitRenderSize(40, 20, 896), { width: 64, height: 64 })
   assert.deepEqual(fitRenderSize(640, 360, 896), { width: 640, height: 360 })
   assert.deepEqual(fitRenderSize(1792, 896, 896), { width: 896, height: 448 })
+})
+
+test('thumbnail capture geometry preserves Canvas card layout while bounding JPEG output', () => {
+  assert.deepEqual(createThumbnailCaptureGeometry(800, 500, 896), {
+    viewportWidth: 800,
+    viewportHeight: 500,
+    captureScale: 1,
+    outputWidth: 800,
+    outputHeight: 500
+  })
+
+  const wide = createThumbnailCaptureGeometry(2528, 500, 896)
+
+  assert.equal(wide.viewportWidth, 2528)
+  assert.equal(wide.viewportHeight, 500)
+  assert.equal(wide.outputWidth, 896)
+  assert.equal(wide.outputHeight, 177)
+  assert.ok(wide.captureScale < 1)
+
+  const tall = createThumbnailCaptureGeometry(800, 1628, 896)
+
+  assert.equal(tall.viewportWidth, 800)
+  assert.equal(tall.viewportHeight, 1628)
+  assert.equal(tall.outputWidth, 440)
+  assert.equal(tall.outputHeight, 896)
+})
+
+test('thumbnail capture geometry caps pathological Canvas sizes without changing normal Bento sizes', () => {
+  const geometry = createThumbnailCaptureGeometry(8000, 4000, 896, 4096)
+
+  assert.deepEqual(
+    {
+      viewportWidth: geometry.viewportWidth,
+      viewportHeight: geometry.viewportHeight,
+      outputWidth: geometry.outputWidth,
+      outputHeight: geometry.outputHeight
+    },
+    {
+      viewportWidth: 4096,
+      viewportHeight: 2048,
+      outputWidth: 896,
+      outputHeight: 448
+    }
+  )
 })
 
 test('Canvas cache cleanup extracts only valid string node ids', () => {
