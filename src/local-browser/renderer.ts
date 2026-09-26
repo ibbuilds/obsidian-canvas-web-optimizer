@@ -67,7 +67,7 @@ function isUnsupportedScreenshotSpeedOption(error: unknown): boolean {
   )
 }
 
-const COOKIE_CLEANUP_SCRIPT = `
+const COOKIE_CLEANUP_SCRIPT = String.raw`
   (() => {
     const rejectSelectors = [
       '#onetrust-reject-all-handler',
@@ -201,7 +201,7 @@ const COOKIE_CLEANUP_SCRIPT = `
   })()
 `
 
-const VISUAL_SETTLE_SCRIPT = `
+const VISUAL_SETTLE_SCRIPT = String.raw`
   new Promise(resolve => {
     const startedAt = performance.now()
     let lastActivityAt = startedAt
@@ -466,7 +466,7 @@ const VISUAL_SETTLE_SCRIPT = `
   })
 `
 
-const CAPTURE_HEALTH_SCRIPT = `
+const CAPTURE_HEALTH_SCRIPT = String.raw`
   (() => {
     const reasons = []
     let score = 0
@@ -700,7 +700,7 @@ const CAPTURE_HEALTH_SCRIPT = `
   })()
 `
 
-const CAPTURE_RECOVERY_SCRIPT = `
+const CAPTURE_RECOVERY_SCRIPT = String.raw`
   (() => {
     let actions = 0
     const viewportArea = Math.max(innerWidth * innerHeight, 1)
