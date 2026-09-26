@@ -797,6 +797,16 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (!loaded || !this.getNodeState(node).cached) {
       this.pendingPreviewPresentation.delete(node.id)
+
+      if (!loaded) {
+        const state = this.getNodeState(node)
+
+        state.evaluated = true
+        state.cached = false
+        state.metadata = null
+        await this.previewCache.remove(node.id)
+      }
+
       return false
     }
 
