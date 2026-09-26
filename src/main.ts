@@ -2684,6 +2684,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         averageSetupMs: this.localBrowserRenderer?.averageSetupMs ?? 0,
         averageNavigationMs: this.localBrowserRenderer?.averageNavigationMs ?? 0,
         readinessProbeWins: this.localBrowserRenderer?.readinessProbeWinCount ?? 0,
+        softReadinessWins: this.localBrowserRenderer?.softReadinessWinCount ?? 0,
         averagePaintReadyMs: this.localBrowserRenderer?.averagePaintReadyMs ?? 0,
         averageVisualSettleMs: this.localBrowserRenderer?.averageVisualSettleMs ?? 0,
         visualSettleMaxOuts: this.localBrowserRenderer?.visualSettleMaxOutCount ?? 0,
