@@ -13,10 +13,12 @@ const NAVIGATION_TIMEOUT_MS = 5000
 const DOCUMENT_READY_PROBE_INTERVAL_MS = 50
 const DOCUMENT_READY_PROBE_COMMAND_TIMEOUT_MS = 600
 const PAINT_READY_TIMEOUT_MS = 250
-const VISUAL_SETTLE_MIN_MS = 280
-const VISUAL_SETTLE_QUIET_MS = 140
-const VISUAL_SETTLE_MAX_MS = 900
-const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 1400
+const VISUAL_SETTLE_MIN_MS = 260
+const VISUAL_SETTLE_COMPLEX_MIN_MS = 520
+const VISUAL_SETTLE_QUIET_MS = 120
+const VISUAL_SETTLE_MAX_MS = 850
+const VISUAL_SETTLE_COMPLEX_MAX_MS = 1800
+const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 2400
 const IDLE_SHUTDOWN_MS = 2500
 const MIN_SCREENSHOT_BYTES = 512
 const LOCAL_BROWSER_MAX_WORKERS = 8
@@ -86,6 +88,22 @@ const COOKIE_CLEANUP_SCRIPT = `
       '#usercentrics-root',
       '.iubenda-cs-container'
     ]
+    const semanticContainers = [
+      '[role="dialog"][id*="cookie" i]',
+      '[role="dialog"][class*="cookie" i]',
+      '[role="dialog"][id*="consent" i]',
+      '[role="dialog"][class*="consent" i]',
+      '[aria-label*="cookie" i]',
+      '[aria-label*="consent" i]',
+      '[data-testid*="cookie" i]',
+      '[data-testid*="consent" i]',
+      '[id*="cookie" i][class]',
+      '[class*="cookie" i]',
+      '[id*="consent" i][class]',
+      '[class*="consent" i]'
+    ]
+    const rejectText =
+      /reject|decline|deny|essential only|necessary only|continue without|do not accept|no thanks/i
     let actions = 0
 
     for (const selector of rejectSelectors) {
@@ -98,44 +116,89 @@ const COOKIE_CLEANUP_SCRIPT = `
       }
     }
 
+    const hideContainer = element => {
+      if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) return false
+
+      element.style.setProperty('display', 'none', 'important')
+      element.style.setProperty('visibility', 'hidden', 'important')
+      element.style.setProperty('pointer-events', 'none', 'important')
+      actions++
+      return true
+    }
+
     if (actions === 0) {
       for (const selector of knownContainers) {
         for (const element of document.querySelectorAll(selector)) {
-          if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) continue
+          hideContainer(element)
+        }
+      }
+    }
 
-          element.style.setProperty('display', 'none', 'important')
-          element.style.setProperty('visibility', 'hidden', 'important')
-          actions++
+    if (actions === 0) {
+      const containers = new Set()
+
+      for (const selector of semanticContainers) {
+        for (const element of document.querySelectorAll(selector)) {
+          containers.add(element)
         }
       }
 
-      const genericDialogs = document.querySelectorAll(
-        '[role="dialog"][id*="cookie" i], [role="dialog"][class*="cookie" i], ' +
-          '[role="dialog"][id*="consent" i], [role="dialog"][class*="consent" i]'
-      )
-
-      for (const element of genericDialogs) {
+      for (const element of containers) {
         if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) continue
 
         const style = getComputedStyle(element)
+        const rect = element.getBoundingClientRect()
+        const viewportArea = Math.max(innerWidth * innerHeight, 1)
+        const areaRatio = Math.max(rect.width * rect.height, 0) / viewportArea
+        const text = element.textContent?.trim() ?? ''
+        const looksLikeConsent =
+          /cookie|consent|privacy|tracking|gdpr/i.test(text) ||
+          /cookie|consent/i.test(element.id + ' ' + element.className)
 
-        if (style.position !== 'fixed' && style.position !== 'sticky') continue
-        if ((element.textContent?.length ?? 0) > 5000) continue
+        if (!looksLikeConsent) continue
+        if (
+          style.position !== 'fixed' &&
+          style.position !== 'sticky' &&
+          areaRatio < 0.08
+        ) {
+          continue
+        }
 
-        element.style.setProperty('display', 'none', 'important')
-        element.style.setProperty('visibility', 'hidden', 'important')
-        actions++
+        const controls = element.querySelectorAll('button, [role="button"], a')
+
+        for (const control of controls) {
+          const label = control.textContent?.trim() ?? ''
+
+          if (
+            rejectText.test(label) &&
+            control instanceof HTMLElement &&
+            control.getClientRects().length > 0
+          ) {
+            control.click()
+            actions++
+            break
+          }
+        }
+
+        if (actions === 0) {
+          hideContainer(element)
+        }
+
+        if (actions > 0) break
       }
     }
 
     if (actions > 0) {
       document.documentElement.style.removeProperty('overflow')
       document.body?.style.removeProperty('overflow')
+      document.documentElement.style.removeProperty('position')
+      document.body?.style.removeProperty('position')
     }
 
     return actions
   })()
 `
+
 
 const VISUAL_SETTLE_SCRIPT = `
   new Promise(resolve => {
@@ -158,22 +221,47 @@ const VISUAL_SETTLE_SCRIPT = `
 
     addEventListener('load', markActivity, true)
 
+    const intersectsViewport = rect =>
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.bottom > 0 &&
+      rect.right > 0 &&
+      rect.top < innerHeight &&
+      rect.left < innerWidth
+
+    const isVisibleElement = element => {
+      if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false
+
+      const rect = element.getBoundingClientRect()
+
+      if (!intersectsViewport(rect)) return false
+
+      const style = getComputedStyle(element)
+
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.05
+      )
+    }
+
     const visibleImagesReady = () => {
       for (const image of document.images) {
-        const rect = image.getBoundingClientRect()
-
-        if (
-          rect.bottom < 0 ||
-          rect.right < 0 ||
-          rect.top > innerHeight ||
-          rect.left > innerWidth ||
-          rect.width <= 0 ||
-          rect.height <= 0
-        ) {
-          continue
-        }
+        if (!isVisibleElement(image)) continue
 
         if (!image.complete || image.naturalWidth <= 0) {
+          return false
+        }
+      }
+
+      return true
+    }
+
+    const visibleVideosReady = () => {
+      for (const video of document.querySelectorAll('video')) {
+        if (!isVisibleElement(video)) continue
+
+        if (video.readyState < 2) {
           return false
         }
       }
@@ -196,32 +284,115 @@ const VISUAL_SETTLE_SCRIPT = `
       })
     }
 
-    const finish = maxedOut => {
+    const getLoaderOverlays = () => {
+      const selectors = [
+        '[id*="preloader" i]',
+        '[class*="preloader" i]',
+        '[id*="page-loader" i]',
+        '[class*="page-loader" i]',
+        '[id="loader"]',
+        '[class~="loader"]',
+        '[aria-busy="true"]'
+      ]
+      const results = new Set()
+
+      for (const selector of selectors) {
+        for (const element of document.querySelectorAll(selector)) {
+          if (!(element instanceof HTMLElement) || !isVisibleElement(element)) continue
+
+          const rect = element.getBoundingClientRect()
+          const style = getComputedStyle(element)
+          const viewportArea = Math.max(innerWidth * innerHeight, 1)
+          const areaRatio = (rect.width * rect.height) / viewportArea
+          const text = element.textContent?.trim() ?? ''
+          const name = (element.id + ' ' + element.className).toLowerCase()
+          const looksLikeLoader =
+            /loader|preloader|loading/.test(name) ||
+            /loading|please wait|enter site/i.test(text)
+
+          if (!looksLikeLoader) continue
+
+          if (
+            areaRatio >= 0.32 ||
+            style.position === 'fixed' ||
+            style.position === 'sticky'
+          ) {
+            results.add(element)
+          }
+        }
+      }
+
+      return [...results]
+    }
+
+    const primaryHeadingHidden = () => {
+      const heading = document.querySelector('h1')
+
+      if (!(heading instanceof HTMLElement)) return false
+
+      const style = getComputedStyle(heading)
+
+      if (heading.offsetTop > innerHeight * 1.5) return false
+
+      return (
+        style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        Number.parseFloat(style.opacity || '1') <= 0.08
+      )
+    }
+
+    const dynamicSurfaceVisible = () => {
+      for (const element of document.querySelectorAll('canvas, video')) {
+        if (isVisibleElement(element)) return true
+      }
+
+      return false
+    }
+
+    const finishAnimations = () => {
+      if (typeof document.getAnimations !== 'function') return
+
+      for (const animation of document.getAnimations()) {
+        try {
+          if (animation.playState !== 'running') continue
+
+          const timing = animation.effect?.getComputedTiming()
+
+          if (timing && Number.isFinite(timing.endTime) && timing.endTime > 0) {
+            animation.finish()
+          } else {
+            animation.pause()
+          }
+        } catch {
+          try {
+            animation.pause()
+          } catch {}
+        }
+      }
+    }
+
+    const hideStuckLoaders = () => {
+      let hidden = 0
+
+      for (const element of getLoaderOverlays()) {
+        element.style.setProperty('display', 'none', 'important')
+        element.style.setProperty('visibility', 'hidden', 'important')
+        element.style.setProperty('pointer-events', 'none', 'important')
+        hidden++
+      }
+
+      return hidden
+    }
+
+    const finish = (maxedOut, complex) => {
       if (finished) return
 
       finished = true
       observer.disconnect()
       removeEventListener('load', markActivity, true)
 
-      if (typeof document.getAnimations === 'function') {
-        for (const animation of document.getAnimations()) {
-          try {
-            if (animation.playState !== 'running') continue
-
-            const timing = animation.effect?.getComputedTiming()
-
-            if (timing && Number.isFinite(timing.endTime) && timing.endTime > 0) {
-              animation.finish()
-            } else {
-              animation.pause()
-            }
-          } catch {
-            try {
-              animation.pause()
-            } catch {}
-          }
-        }
-      }
+      finishAnimations()
+      const loaderBypasses = maxedOut ? hideStuckLoaders() : 0
 
       let freezeStyle = document.getElementById('canvas-web-optimizer-capture-freeze')
 
@@ -236,10 +407,16 @@ const VISUAL_SETTLE_SCRIPT = `
         document.head?.appendChild(freezeStyle)
       }
 
-      resolve({
-        waitedMs: performance.now() - startedAt,
-        maxedOut,
-        title: document.title || location.hostname || location.href
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          resolve({
+            waitedMs: performance.now() - startedAt,
+            maxedOut,
+            complex,
+            loaderBypasses,
+            title: document.title || location.hostname || location.href
+          })
+        })
       })
     }
 
@@ -247,21 +424,34 @@ const VISUAL_SETTLE_SCRIPT = `
       const now = performance.now()
       const elapsed = now - startedAt
       const quietFor = now - lastActivityAt
+      const loaderVisible = getLoaderOverlays().length > 0
+      const hiddenHeading = primaryHeadingHidden()
+      const dynamicSurface = dynamicSurfaceVisible()
+      const complex = loaderVisible || hiddenHeading || dynamicSurface
+      const minimumWait = complex
+        ? ${VISUAL_SETTLE_COMPLEX_MIN_MS}
+        : ${VISUAL_SETTLE_MIN_MS}
+      const maximumWait = complex
+        ? ${VISUAL_SETTLE_COMPLEX_MAX_MS}
+        : ${VISUAL_SETTLE_MAX_MS}
       const fontsReady = !document.fonts || document.fonts.status !== 'loading'
       const ready =
-        elapsed >= ${VISUAL_SETTLE_MIN_MS} &&
+        elapsed >= minimumWait &&
         quietFor >= ${VISUAL_SETTLE_QUIET_MS} &&
         fontsReady &&
         visibleImagesReady() &&
-        !finiteAnimationsRunning()
+        visibleVideosReady() &&
+        !finiteAnimationsRunning() &&
+        !loaderVisible &&
+        !hiddenHeading
 
       if (ready) {
-        finish(false)
+        finish(false, complex)
         return
       }
 
-      if (elapsed >= ${VISUAL_SETTLE_MAX_MS}) {
-        finish(true)
+      if (elapsed >= maximumWait) {
+        finish(true, complex)
         return
       }
 
@@ -548,10 +738,7 @@ export default class LocalBrowserRenderer {
             'Emulation.setEmulatedMedia',
             {
               media: 'screen',
-              features: [
-                { name: 'prefers-color-scheme', value: 'light' },
-                { name: 'prefers-reduced-motion', value: 'reduce' }
-              ]
+              features: [{ name: 'prefers-color-scheme', value: 'light' }]
             },
             sessionId
           )
@@ -603,6 +790,8 @@ export default class LocalBrowserRenderer {
             {
               expression: `(() => {
                 ${LIGHT_THEME_SCRIPT};
+                scrollTo(0, 0);
+                dispatchEvent(new Event('resize'));
                 return ${COOKIE_CLEANUP_SCRIPT}
               })()`,
               returnByValue: true
@@ -652,7 +841,12 @@ export default class LocalBrowserRenderer {
         const settleValue = settleResponse.result?.value
         const settleRecord =
           settleValue && typeof settleValue === 'object'
-            ? (settleValue as { maxedOut?: unknown; title?: unknown })
+            ? (settleValue as {
+                maxedOut?: unknown
+                complex?: unknown
+                loaderBypasses?: unknown
+                title?: unknown
+              })
             : null
 
         this.visualSettleTotalMs += visualSettleMs
@@ -987,6 +1181,7 @@ export default class LocalBrowserRenderer {
       '--disable-renderer-backgrounding',
       '--hide-scrollbars',
       '--mute-audio',
+      '--autoplay-policy=no-user-gesture-required',
       '--window-size=896,896',
       'about:blank'
     ]
