@@ -781,7 +781,7 @@ const CAPTURE_RECOVERY_SCRIPT = `
     const heading = document.querySelector('h1, [role="heading"][aria-level="1"]')
 
     if (heading instanceof HTMLElement && heading.offsetTop < innerHeight * 1.5) {
-      const candidates = [heading]
+      const candidates = [heading, ...heading.querySelectorAll('*')]
       let parent = heading.parentElement
 
       for (let depth = 0; depth < 3 && parent; depth++) {
@@ -790,24 +790,124 @@ const CAPTURE_RECOVERY_SCRIPT = `
       }
 
       for (const element of candidates) {
+        if (!(element instanceof HTMLElement || element instanceof SVGElement)) continue
+
         const style = getComputedStyle(element)
         const opacity = Number.parseFloat(style.opacity || '1')
         const blurMatch = (style.filter || '').match(/blur\(([-\d.]+)px\)/i)
         const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+        const rect = element.getBoundingClientRect()
+        let transformLooksTransient = false
+
+        if (style.transform && style.transform !== 'none') {
+          try {
+            const matrix = new DOMMatrixReadOnly(style.transform)
+            const scaleX = Math.hypot(matrix.a, matrix.b)
+            const scaleY = Math.hypot(matrix.c, matrix.d)
+
+            transformLooksTransient =
+              scaleX < 0.72 ||
+              scaleY < 0.72 ||
+              Math.abs(matrix.e) > Math.max(rect.width, 1) * 0.45 ||
+              Math.abs(matrix.f) > Math.max(rect.height, 1) * 0.9
+          } catch {}
+        }
+
+        const clipLooksTransient =
+          Boolean(style.clipPath) &&
+          style.clipPath !== 'none' &&
+          style.clipPath !== 'inset(0px)'
+        const maskLooksTransient =
+          Boolean(style.maskImage) && style.maskImage !== 'none'
 
         if (
           style.visibility === 'hidden' ||
-          opacity <= 0.12 ||
-          (Number.isFinite(blur) && blur >= 1.5)
+          opacity <= 0.2 ||
+          (Number.isFinite(blur) && blur >= 1.5) ||
+          clipLooksTransient ||
+          maskLooksTransient ||
+          transformLooksTransient
         ) {
           element.style.setProperty('visibility', 'visible', 'important')
           element.style.setProperty('opacity', '1', 'important')
           element.style.setProperty('filter', 'none', 'important')
           element.style.setProperty('transform', 'none', 'important')
           element.style.setProperty('clip-path', 'none', 'important')
+          element.style.setProperty('mask-image', 'none', 'important')
           actions++
         }
       }
+    }
+
+    const visibleElements = document.body?.querySelectorAll('*') ?? []
+
+    for (let index = 0; index < Math.min(visibleElements.length, 900); index++) {
+      const element = visibleElements[index]
+
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const ownText = [...element.childNodes]
+        .filter(node => node.nodeType === Node.TEXT_NODE)
+        .map(node => node.textContent?.trim() ?? '')
+        .join(' ')
+        .replace(/ +/g, ' ')
+        .trim()
+
+      if (
+        ownText.length === 0 ||
+        ownText.length > 120 ||
+        !/^(?:loading|please wait|initializing|preparing|entering|[0-9]{1,3}%)(?:\s|:|\.|[0-9]|%|$)/i.test(
+          ownText
+        )
+      ) {
+        continue
+      }
+
+      let candidate = element
+      let parent = element.parentElement
+
+      for (let depth = 0; depth < 5 && parent; depth++) {
+        const style = getComputedStyle(parent)
+        const rect = parent.getBoundingClientRect()
+        const areaRatio = Math.max(rect.width * rect.height, 0) / viewportArea
+
+        if (
+          areaRatio >= 0.08 &&
+          (style.position === 'fixed' ||
+            style.position === 'absolute' ||
+            style.position === 'sticky')
+        ) {
+          candidate = parent
+        }
+
+        parent = parent.parentElement
+      }
+
+      hide(candidate)
+      break
+    }
+
+    const main = document.querySelector('main, [role="main"], #main, [data-main]')
+    let centerCover = document.elementFromPoint(innerWidth / 2, innerHeight / 2)
+
+    for (let depth = 0; depth < 6 && centerCover instanceof HTMLElement; depth++) {
+      const style = getComputedStyle(centerCover)
+      const rect = centerCover.getBoundingClientRect()
+      const areaRatio = Math.max(rect.width * rect.height, 0) / viewportArea
+
+      if (
+        main instanceof HTMLElement &&
+        !centerCover.contains(main) &&
+        areaRatio >= 0.72 &&
+        (style.position === 'fixed' || style.position === 'absolute') &&
+        centerCover !== document.body &&
+        centerCover !== document.documentElement
+      ) {
+        hide(centerCover)
+        break
+      }
+
+      centerCover = centerCover.parentElement
     }
 
     if (typeof document.getAnimations === 'function') {
