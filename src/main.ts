@@ -47,6 +47,8 @@ const THUMBNAIL_MAX_VIEWPORT_LONG_EDGE = 4096
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
 const PREVIEW_LOAD_TIMEOUT_MS = 1000
+const PREVIEW_REVEAL_LEAD_IN_MS = 140
+const PREVIEW_REVEAL_STAGGER_MS = 55
 const INTERACTIVE_PAINT_SETTLE_MS = 50
 const GENERATION_PAINT_TIMEOUT_MS = 120
 const GENERATION_JOB_TIMEOUT_MS = 5000
@@ -69,6 +71,11 @@ type ThumbnailImage = {
   isEmpty(): boolean
   resize(options: { width: number; height: number; quality: 'good' }): ThumbnailImage
   toJPEG(quality: number): ArrayBuffer
+}
+
+type StagedPreview = {
+  node: LinkNode
+  preview: HTMLImageElement
 }
 
 type PluginData = {
@@ -153,6 +160,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private localBatchTuning: LocalBatchTuningSnapshot | null = null
   private concurrencyTuner: AdaptiveConcurrencyTuner | null = null
   private canvasUtilitiesBatchDepth = 0
+  private readonly stagedPreviews = new Map<string, StagedPreview>()
+  private readonly pendingPreviewPresentation = new Set<string>()
+  private previewRevealPromise: Promise<void> | null = null
 
   private readonly interactiveActivation = new InteractiveActivationController<LinkNode>({
     isAvailable: node => this.isNodeContentMounted(node),
@@ -264,6 +274,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.log('Unloading plugin')
 
     this.canvasUtilitiesBatchDepth = 0
+    this.stagedPreviews.clear()
+    this.pendingPreviewPresentation.clear()
+    this.previewRevealPromise = null
     this.generationCoordinator.clear()
     this.interactiveActivation.cancelPending()
     this.abortActiveGeneration(false)
