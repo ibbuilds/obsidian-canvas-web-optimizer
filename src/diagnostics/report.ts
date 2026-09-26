@@ -18,6 +18,7 @@ export type LocalBrowserDiagnostics = {
   averageSetupMs: number
   averageNavigationMs: number
   readinessProbeWins: number
+  softReadinessWins: number
   averagePaintReadyMs: number
   averageVisualSettleMs: number
   visualSettleMaxOuts: number
@@ -126,6 +127,7 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser average setup: ${local.averageSetupMs} ms`,
     `Local browser average navigation: ${local.averageNavigationMs} ms`,
     `Local browser readiness probe wins: ${local.readinessProbeWins}`,
+    `Local browser soft readiness wins: ${local.softReadinessWins}`,
     `Local browser average paint ready: ${local.averagePaintReadyMs} ms`,
     `Local browser average visual settle: ${local.averageVisualSettleMs} ms`,
     `Local browser visual settle max-outs: ${local.visualSettleMaxOuts}`,
