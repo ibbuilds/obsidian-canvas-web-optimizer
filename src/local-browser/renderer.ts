@@ -2035,57 +2035,80 @@ export default class LocalBrowserRenderer {
           throw new Error('Local browser render cancelled')
         }
 
-        stage = 'visual settle'
-        const visualSettleStartedAt = performance.now()
-        let visualSettleCommandFailed = false
-        const settleResponse = await runtime.connection
-          .send<{
-            result?: {
-              value?: unknown
-            }
-          }>(
-            'Runtime.evaluate',
-            {
-              expression: VISUAL_SETTLE_SCRIPT,
-              awaitPromise: true,
-              returnByValue: true
-            },
-            sessionId,
-            VISUAL_SETTLE_COMMAND_TIMEOUT_MS
-          )
-          .catch(() => {
-            visualSettleCommandFailed = true
-            return { result: { value: null } }
-          })
-        const visualSettleMs = performance.now() - visualSettleStartedAt
-        const settleValue = settleResponse.result?.value
-        const settleRecord =
-          settleValue && typeof settleValue === 'object'
-            ? (settleValue as {
-                maxedOut?: unknown
-                complex?: unknown
-                loaderBypasses?: unknown
-                title?: unknown
-              })
-            : null
+        const fastPathDelay =
+          FAST_PATH_MIN_FROM_NAVIGATION_MS - (performance.now() - navigationStartedAt)
 
-        this.visualSettleTotalMs += visualSettleMs
-        this.visualSettleCount++
-
-        if (visualSettleCommandFailed) {
-          this.visualSettleCommandFailures++
+        if (fastPathDelay > 0) {
+          await delay(fastPathDelay)
         }
 
-        if (settleRecord?.maxedOut === true) {
-          this.visualSettleMaxOuts++
-        }
+        stage = 'capture health'
+        let healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
+        let pageWasSuspicious = healthRecord?.suspicious === true
+        let usedFastPath = healthRecord?.readyForFastCapture === true
+        let settleRecord: {
+          maxedOut?: unknown
+          complex?: unknown
+          loaderBypasses?: unknown
+          title?: unknown
+        } | null = null
 
-        if (settleRecord?.complex === true) {
-          this.visualSettleComplexCount++
-        }
+        if (usedFastPath) {
+          this.fastPathCaptures++
+        } else {
+          stage = 'visual settle'
+          const visualSettleStartedAt = performance.now()
+          let visualSettleCommandFailed = false
+          const settleResponse = await runtime.connection
+            .send<{
+              result?: {
+                value?: unknown
+              }
+            }>(
+              'Runtime.evaluate',
+              {
+                expression: VISUAL_SETTLE_SCRIPT,
+                awaitPromise: true,
+                returnByValue: true
+              },
+              sessionId,
+              VISUAL_SETTLE_COMMAND_TIMEOUT_MS
+            )
+            .catch(() => {
+              visualSettleCommandFailed = true
+              return { result: { value: null } }
+            })
+          const visualSettleMs = performance.now() - visualSettleStartedAt
+          const settleValue = settleResponse.result?.value
 
-        if (typeof settleRecord?.loaderBypasses === 'number') {
-          this.loaderBypasses += settleRecord.loaderBypasses
+          settleRecord =
+            settleValue && typeof settleValue === 'object'
+              ? (settleValue as {
+                  maxedOut?: unknown
+                  complex?: unknown
+                  loaderBypasses?: unknown
+                  title?: unknown
+                })
+              : null
+
+          this.visualSettleTotalMs += visualSettleMs
+          this.visualSettleCount++
+
+          if (visualSettleCommandFailed) {
+            this.visualSettleCommandFailures++
+          }
+
+          if (settleRecord?.maxedOut === true) {
+            this.visualSettleMaxOuts++
+          }
+
+          if (settleRecord?.complex === true) {
+            this.visualSettleComplexCount++
+          }
+
+          if (typeof settleRecord?.loaderBypasses === 'number') {
+            this.loaderBypasses += settleRecord.loaderBypasses
+          }
         }
 
         const lateCleanupResponse = await runtime.connection
@@ -2146,8 +2169,12 @@ export default class LocalBrowserRenderer {
           throw new Error('Local browser render cancelled')
         }
 
-        stage = 'capture health'
-        let healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
+        if (!usedFastPath || lateCleanupActions > 0 || guardActions > 0) {
+          stage = 'capture health'
+          healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
+          pageWasSuspicious = pageWasSuspicious || healthRecord?.suspicious === true
+          usedFastPath = false
+        }
 
         if (healthRecord?.suspicious === true && this.shouldWaitForNaturalIntro(healthRecord)) {
           stage = 'intro wait'
@@ -2166,6 +2193,8 @@ export default class LocalBrowserRenderer {
           if (healthRecord?.suspicious !== true) {
             this.introNaturalResolutions++
           }
+
+          pageWasSuspicious = true
         }
 
         if (healthRecord?.suspicious === true) {
@@ -2195,6 +2224,13 @@ export default class LocalBrowserRenderer {
           if (healthRecord?.suspicious === true) {
             this.unresolvedSuspiciousCaptures++
           }
+
+          pageWasSuspicious = true
+        }
+
+        if (pageWasSuspicious) {
+          stage = 'visual stability'
+          await this.waitForVisualStability(runtime.connection, sessionId)
         }
 
         if (cancelled) {
@@ -2211,7 +2247,12 @@ export default class LocalBrowserRenderer {
           safeCaptureScale
         )
         const screenshotMs = performance.now() - screenshotStartedAt
-        const settledTitle = typeof settleRecord?.title === 'string' ? settleRecord.title : ''
+        const settledTitle =
+          typeof settleRecord?.title === 'string'
+            ? settleRecord.title
+            : typeof healthRecord?.title === 'string'
+              ? healthRecord.title
+              : ''
 
         const bytes = Buffer.from(screenshot.data, 'base64')
 
