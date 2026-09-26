@@ -883,10 +883,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         { once: true }
       )
 
-      this.removePendingPlaceholder(node)
+      const placeholder = this.nodeRuntime.getPlaceholder(node)
+
       node.contentEl.append(preview)
       node._previewImageEl = preview
-      this.pendingPreviewPresentation.delete(node.id)
 
       await new Promise<void>(resolve => {
         requestAnimationFrame(() => {
@@ -896,6 +896,20 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           })
         })
       })
+
+      await new Promise<void>(resolve => {
+        afterTransition(preview, resolve)
+      })
+
+      if (placeholder?.isConnected) {
+        placeholder.remove()
+      }
+
+      if (this.nodeRuntime.getPlaceholder(node) === placeholder) {
+        this.nodeRuntime.clearPlaceholder(node)
+      }
+
+      this.pendingPreviewPresentation.delete(node.id)
 
       await delay(PREVIEW_REVEAL_STAGGER_MS)
     }
