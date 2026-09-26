@@ -88,7 +88,7 @@ function isUnsupportedScreenshotSpeedOption(error: unknown): boolean {
   )
 }
 
-const COOKIE_GUARD_BOOTSTRAP_SCRIPT = String.raw`
+const COOKIE_GUARD_BOOTSTRAP_SCRIPT = `
   (() => {
     if (globalThis.__canvasWebOptimizerCookieGuard) return
 
@@ -416,8 +416,7 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = String.raw`
   })()
 `
 
-const COOKIE_GUARD_STATUS_SCRIPT =
-  'globalThis.__canvasWebOptimizerCookieGuard?.actions ?? 0'
+const COOKIE_GUARD_STATUS_SCRIPT = 'globalThis.__canvasWebOptimizerCookieGuard?.actions ?? 0'
 
 const COOKIE_CLEANUP_SCRIPT = `
   (() => {
