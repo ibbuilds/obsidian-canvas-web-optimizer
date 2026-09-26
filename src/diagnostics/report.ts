@@ -19,6 +19,9 @@ export type LocalBrowserDiagnostics = {
   averageNavigationMs: number
   readinessProbeWins: number
   averagePaintReadyMs: number
+  averageVisualSettleMs: number
+  visualSettleMaxOuts: number
+  cookieCleanupActions: number
   averageScreenshotMs: number
   screenshotOptimizationStatus: string
   lastFailureSummary: string
@@ -39,6 +42,8 @@ export type DiagnosticsReportContext = {
   liveWebviews: number
   generatingThumbnails: number
   queued: number
+  stagedPreviews: number
+  previewRevealActive: boolean
   interactiveWebviewActive: boolean
   interactiveLightPreferenceStatus: string
   interactiveMatchMediaLight: boolean | null
@@ -63,6 +68,8 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Live webviews: ${context.liveWebviews}`,
     `Generating thumbnails: ${context.generatingThumbnails}`,
     `Queued: ${context.queued}`,
+    `Staged previews: ${context.stagedPreviews}`,
+    `Preview reveal: ${context.previewRevealActive ? 'active' : 'idle'}`,
     `Generation engine: ${generationEngine}`,
     `Local browser: ${local.status}`,
     `Local browser unavailable reason: ${local.unavailableReason}`,
@@ -105,6 +112,9 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser average navigation: ${local.averageNavigationMs} ms`,
     `Local browser readiness probe wins: ${local.readinessProbeWins}`,
     `Local browser average paint ready: ${local.averagePaintReadyMs} ms`,
+    `Local browser average visual settle: ${local.averageVisualSettleMs} ms`,
+    `Local browser visual settle max-outs: ${local.visualSettleMaxOuts}`,
+    `Cookie cleanup actions: ${local.cookieCleanupActions}`,
     `Local browser average screenshot: ${local.averageScreenshotMs} ms`,
     `Average local generation: ${summary.averageLocalGenerationMs} ms`,
     `Generation preload: ${context.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
