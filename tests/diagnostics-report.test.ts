@@ -51,6 +51,7 @@ test('diagnostics report preserves core runtime lines', () => {
       visualSettleCommandFailures: 2,
       loaderBypasses: 2,
       cookieCleanupActions: 3,
+      cookieGuardActions: 7,
       captureRecoveries: 5,
       unresolvedSuspiciousCaptures: 1,
       introWaits: 3,
@@ -86,6 +87,7 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Local browser visual settle command failures: 2/)
   assert.match(report, /Local browser loader bypasses: 2/)
   assert.match(report, /Cookie cleanup actions: 3/)
+  assert.match(report, /Cookie guard actions: 7/)
   assert.match(report, /Suspicious capture recoveries: 5/)
   assert.match(report, /Unresolved suspicious captures: 1/)
   assert.match(report, /Long intro waits: 3/)
