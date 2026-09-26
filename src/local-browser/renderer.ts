@@ -13,10 +13,10 @@ const NAVIGATION_TIMEOUT_MS = 5000
 const DOCUMENT_READY_PROBE_INTERVAL_MS = 50
 const DOCUMENT_READY_PROBE_COMMAND_TIMEOUT_MS = 600
 const PAINT_READY_TIMEOUT_MS = 250
-const VISUAL_SETTLE_MIN_MS = 450
-const VISUAL_SETTLE_QUIET_MS = 220
-const VISUAL_SETTLE_MAX_MS = 1600
-const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 2200
+const VISUAL_SETTLE_MIN_MS = 280
+const VISUAL_SETTLE_QUIET_MS = 140
+const VISUAL_SETTLE_MAX_MS = 900
+const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 1400
 const IDLE_SHUTDOWN_MS = 2500
 const MIN_SCREENSHOT_BYTES = 512
 const LOCAL_BROWSER_MAX_WORKERS = 8
@@ -152,7 +152,7 @@ const VISUAL_SETTLE_SCRIPT = `
       observer.observe(root, {
         subtree: true,
         childList: true,
-        attributes: true
+        characterData: true
       })
     } catch {}
 
@@ -206,10 +206,20 @@ const VISUAL_SETTLE_SCRIPT = `
       if (typeof document.getAnimations === 'function') {
         for (const animation of document.getAnimations()) {
           try {
-            if (animation.playState === 'running') {
+            if (animation.playState !== 'running') continue
+
+            const timing = animation.effect?.getComputedTiming()
+
+            if (timing && Number.isFinite(timing.endTime) && timing.endTime > 0) {
+              animation.finish()
+            } else {
               animation.pause()
             }
-          } catch {}
+          } catch {
+            try {
+              animation.pause()
+            } catch {}
+          }
         }
       }
 
@@ -538,7 +548,10 @@ export default class LocalBrowserRenderer {
             'Emulation.setEmulatedMedia',
             {
               media: 'screen',
-              features: [{ name: 'prefers-color-scheme', value: 'light' }]
+              features: [
+                { name: 'prefers-color-scheme', value: 'light' },
+                { name: 'prefers-reduced-motion', value: 'reduce' }
+              ]
             },
             sessionId
           )
