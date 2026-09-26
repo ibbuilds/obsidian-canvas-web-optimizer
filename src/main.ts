@@ -711,6 +711,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (status) {
       status.textContent = message
     }
+
+    placeholder?.classList.toggle('canvas-web-preview-ready', message === 'Ready')
   }
 
   private getPreviewResourceUrl(node: LinkNode): string {
