@@ -499,6 +499,102 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     )
   }
 
+  private normalizeRenderUrl(url: string): string {
+    try {
+      const normalized = new URL(url)
+      normalized.hash = ''
+      return normalized.href
+    } catch {
+      return url
+    }
+  }
+
+  private getLocalRenderKey(node: LinkNode): string {
+    const geometry = this.getThumbnailCaptureGeometry(node)
+
+    return [
+      this.normalizeRenderUrl(node.url),
+      geometry.viewportWidth,
+      geometry.viewportHeight,
+      geometry.captureScale.toFixed(4)
+    ].join('|')
+  }
+
+  private acquireSharedLocalRender(
+    node: LinkNode,
+    renderer: LocalBrowserRenderer
+  ): { key: string; task: LocalBrowserRenderTask } {
+    const geometry = this.getThumbnailCaptureGeometry(node)
+    const key = [
+      this.normalizeRenderUrl(node.url),
+      geometry.viewportWidth,
+      geometry.viewportHeight,
+      geometry.captureScale.toFixed(4)
+    ].join('|')
+    const existing = this.sharedLocalRenders.get(key)
+
+    if (existing && existing.status !== 'failure') {
+      existing.consumers++
+      this.sharedLocalRenderHits++
+      return { key, task: existing.task }
+    }
+
+    const task = renderer.render(
+      node.url,
+      geometry.viewportWidth,
+      geometry.viewportHeight,
+      geometry.captureScale
+    )
+    const shared: SharedLocalRender = {
+      task,
+      consumers: 1,
+      status: 'pending'
+    }
+
+    this.sharedLocalRenders.set(key, shared)
+
+    void task.promise
+      .then(
+        () => {
+          if (this.sharedLocalRenders.get(key) === shared) {
+            shared.status = 'success'
+          }
+        },
+        () => {
+          if (this.sharedLocalRenders.get(key) === shared) {
+            shared.status = 'failure'
+
+            if (shared.consumers === 0) {
+              this.sharedLocalRenders.delete(key)
+            }
+          }
+        }
+      )
+      .catch(() => {})
+
+    return { key, task }
+  }
+
+  private releaseSharedLocalRender(renderKey: string, cancelIfUnused: boolean) {
+    const shared = this.sharedLocalRenders.get(renderKey)
+
+    if (!shared) return
+
+    shared.consumers = Math.max(0, shared.consumers - 1)
+
+    if (shared.consumers > 0) return
+
+    if (shared.status === 'pending' && cancelIfUnused) {
+      shared.task.cancel()
+      this.sharedLocalRenders.delete(renderKey)
+      return
+    }
+
+    if (shared.status === 'failure') {
+      this.sharedLocalRenders.delete(renderKey)
+    }
+  }
+
   private isThumbnailViewportCurrent(
     node: LinkNode,
     viewportWidth: number,
