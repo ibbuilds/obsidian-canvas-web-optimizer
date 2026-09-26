@@ -25,6 +25,7 @@ export type LocalBrowserDiagnostics = {
   visualSettleCommandFailures: number
   loaderBypasses: number
   cookieCleanupActions: number
+  cookieGuardActions: number
   captureRecoveries: number
   unresolvedSuspiciousCaptures: number
   introWaits: number
@@ -126,6 +127,7 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser visual settle command failures: ${local.visualSettleCommandFailures}`,
     `Local browser loader bypasses: ${local.loaderBypasses}`,
     `Cookie cleanup actions: ${local.cookieCleanupActions}`,
+    `Cookie guard actions: ${local.cookieGuardActions}`,
     `Suspicious capture recoveries: ${local.captureRecoveries}`,
     `Unresolved suspicious captures: ${local.unresolvedSuspiciousCaptures}`,
     `Long intro waits: ${local.introWaits}`,
