@@ -468,7 +468,6 @@ const VISUAL_SETTLE_SCRIPT = `
   })
 `
 
-
 const CAPTURE_HEALTH_SCRIPT = `
   (() => {
     const reasons = []
@@ -539,7 +538,7 @@ const CAPTURE_HEALTH_SCRIPT = `
       }
 
       if (ownText.length > 0 && ownText.length <= 120) {
-        const normalized = ownText.replace(/\s+/g, ' ').trim()
+        const normalized = ownText.replaceAll('\n', ' ').replaceAll('\t', ' ').replace(/ +/g, ' ').trim()
 
         if (
           /^(loading|loading\s*\d{1,3}%|please wait|initializing|preparing|entering|\d{1,3}%$)/i.test(
@@ -710,7 +709,7 @@ const CAPTURE_RECOVERY_SCRIPT = `
         const name = (element.id + ' ' + element.className).toLowerCase()
         const looksLikeLoader =
           /loader|preloader|loading|splash|curtain|transition/.test(name) ||
-          /loading|please wait|initializing|preparing|\d{1,3}%/i.test(text)
+          /loading|please wait|initializing|preparing|[0-9]{1,3}%/i.test(text)
 
         if (
           looksLikeLoader &&
