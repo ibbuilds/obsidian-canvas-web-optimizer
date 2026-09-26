@@ -36,7 +36,10 @@ import type {
 } from './generation/types'
 import InteractiveActivationController from './interactive/activation-controller'
 import { forceGuestLightPreference } from './interactive/webview-light'
-import LocalBrowserRenderer, { type LocalBrowserRenderResult } from './local-browser-renderer'
+import LocalBrowserRenderer, {
+  type LocalBrowserRenderResult,
+  type LocalBrowserRenderTask
+} from './local-browser-renderer'
 import NetworkPreconnector from './network-preconnector'
 import { openExternalUrl } from './platform/electron-runtime'
 import { GENERATION_LIGHT_THEME_CSS, LIGHT_THEME_SCRIPT } from './web-theme'
@@ -76,6 +79,12 @@ type ThumbnailImage = {
 type StagedPreview = {
   node: LinkNode
   preview: HTMLImageElement
+}
+
+type SharedLocalRender = {
+  task: LocalBrowserRenderTask
+  consumers: number
+  status: 'pending' | 'success' | 'failure'
 }
 
 type PluginData = {
@@ -181,6 +190,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly stagedPreviews = new Map<string, StagedPreview>()
   private readonly pendingPreviewPresentation = new Set<string>()
   private readonly generationRetryTimers = new Set<number>()
+  private readonly sharedLocalRenders = new Map<string, SharedLocalRender>()
+  private sharedLocalRenderHits = 0
   private previewRevealPromise: Promise<void> | null = null
 
   private readonly interactiveActivation = new InteractiveActivationController<LinkNode>({
@@ -303,6 +314,14 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     this.generationRetryTimers.clear()
+
+    for (const shared of this.sharedLocalRenders.values()) {
+      if (shared.status === 'pending') {
+        shared.task.cancel()
+      }
+    }
+
+    this.sharedLocalRenders.clear()
     this.generationCoordinator.clear()
     this.interactiveActivation.cancelPending()
     this.abortActiveGeneration(false)
