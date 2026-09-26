@@ -22,6 +22,9 @@ export type LocalConcurrentGeneration = {
   node: LinkNode
   url: string
   startedAt: number
+  viewportWidth: number
+  viewportHeight: number
+  captureScale: number
   task: LocalBrowserRenderTask
   requeue: boolean
   completed: boolean
@@ -36,6 +39,8 @@ export type ActiveGeneration = {
   node: LinkNode
   url: string
   startedAt: number
+  viewportWidth: number
+  viewportHeight: number
   frameRequestedAt?: number
   frameCreatedAt?: number
   domReadyAt?: number
