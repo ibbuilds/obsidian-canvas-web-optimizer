@@ -1009,6 +1009,7 @@ export default class LocalBrowserRenderer {
   private visualSettleCount = 0
   private visualSettleMaxOuts = 0
   private visualSettleComplexCount = 0
+  private visualSettleCommandFailures = 0
   private loaderBypasses = 0
   private cookieCleanupActions = 0
   private captureRecoveries = 0
@@ -1156,6 +1157,10 @@ export default class LocalBrowserRenderer {
     return this.visualSettleComplexCount
   }
 
+  get visualSettleCommandFailureCount(): number {
+    return this.visualSettleCommandFailures
+  }
+
   get loaderBypassCount(): number {
     return this.loaderBypasses
   }
@@ -1205,6 +1210,7 @@ export default class LocalBrowserRenderer {
     this.visualSettleCount = 0
     this.visualSettleMaxOuts = 0
     this.visualSettleComplexCount = 0
+    this.visualSettleCommandFailures = 0
     this.loaderBypasses = 0
     this.cookieCleanupActions = 0
     this.captureRecoveries = 0
@@ -1365,6 +1371,7 @@ export default class LocalBrowserRenderer {
 
         stage = 'visual settle'
         const visualSettleStartedAt = performance.now()
+        let visualSettleCommandFailed = false
         const settleResponse = await runtime.connection
           .send<{
             result?: {
@@ -1380,7 +1387,10 @@ export default class LocalBrowserRenderer {
             sessionId,
             VISUAL_SETTLE_COMMAND_TIMEOUT_MS
           )
-          .catch(() => ({ result: { value: null } }))
+          .catch(() => {
+            visualSettleCommandFailed = true
+            return { result: { value: null } }
+          })
         const visualSettleMs = performance.now() - visualSettleStartedAt
         const settleValue = settleResponse.result?.value
         const settleRecord =
@@ -1395,6 +1405,10 @@ export default class LocalBrowserRenderer {
 
         this.visualSettleTotalMs += visualSettleMs
         this.visualSettleCount++
+
+        if (visualSettleCommandFailed) {
+          this.visualSettleCommandFailures++
+        }
 
         if (settleRecord?.maxedOut === true) {
           this.visualSettleMaxOuts++
