@@ -25,6 +25,7 @@ export type LocalConcurrentGeneration = {
   viewportWidth: number
   viewportHeight: number
   captureScale: number
+  renderKey: string
   task: LocalBrowserRenderTask
   requeue: boolean
   completed: boolean
