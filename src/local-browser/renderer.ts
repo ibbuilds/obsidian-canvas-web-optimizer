@@ -13,6 +13,10 @@ const NAVIGATION_TIMEOUT_MS = 5000
 const DOCUMENT_READY_PROBE_INTERVAL_MS = 50
 const DOCUMENT_READY_PROBE_COMMAND_TIMEOUT_MS = 600
 const PAINT_READY_TIMEOUT_MS = 250
+const VISUAL_SETTLE_MIN_MS = 450
+const VISUAL_SETTLE_QUIET_MS = 220
+const VISUAL_SETTLE_MAX_MS = 1600
+const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 2200
 const IDLE_SHUTDOWN_MS = 2500
 const MIN_SCREENSHOT_BYTES = 512
 const LOCAL_BROWSER_MAX_WORKERS = 8
@@ -59,6 +63,207 @@ function isUnsupportedScreenshotSpeedOption(error: unknown): boolean {
   )
 }
 
+
+const COOKIE_CLEANUP_SCRIPT = `
+  (() => {
+    const rejectSelectors = [
+      '#onetrust-reject-all-handler',
+      '#CybotCookiebotDialogBodyButtonDecline',
+      '#CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll',
+      '#didomi-notice-disagree-button',
+      '.didomi-continue-without-agreeing',
+      '#uc-btn-deny-banner',
+      '[data-testid="uc-deny-all-button"]',
+      '.iubenda-cs-reject-btn'
+    ]
+    const knownContainers = [
+      '#onetrust-banner-sdk',
+      '#onetrust-consent-sdk',
+      '#CybotCookiebotDialog',
+      '#CybotCookiebotDialogBodyUnderlay',
+      '#didomi-host',
+      '.qc-cmp2-container',
+      '.truste_popframe',
+      '#usercentrics-root',
+      '.iubenda-cs-container'
+    ]
+    let actions = 0
+
+    for (const selector of rejectSelectors) {
+      const element = document.querySelector(selector)
+
+      if (element instanceof HTMLElement && element.getClientRects().length > 0) {
+        element.click()
+        actions++
+        break
+      }
+    }
+
+    if (actions === 0) {
+      for (const selector of knownContainers) {
+        for (const element of document.querySelectorAll(selector)) {
+          if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) continue
+
+          element.style.setProperty('display', 'none', 'important')
+          element.style.setProperty('visibility', 'hidden', 'important')
+          actions++
+        }
+      }
+
+      const genericDialogs = document.querySelectorAll(
+        '[role="dialog"][id*="cookie" i], [role="dialog"][class*="cookie" i], ' +
+          '[role="dialog"][id*="consent" i], [role="dialog"][class*="consent" i]'
+      )
+
+      for (const element of genericDialogs) {
+        if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) continue
+
+        const style = getComputedStyle(element)
+
+        if (style.position !== 'fixed' && style.position !== 'sticky') continue
+        if ((element.textContent?.length ?? 0) > 5000) continue
+
+        element.style.setProperty('display', 'none', 'important')
+        element.style.setProperty('visibility', 'hidden', 'important')
+        actions++
+      }
+    }
+
+    if (actions > 0) {
+      document.documentElement.style.removeProperty('overflow')
+      document.body?.style.removeProperty('overflow')
+    }
+
+    return actions
+  })()
+`
+
+const VISUAL_SETTLE_SCRIPT = `
+  new Promise(resolve => {
+    const startedAt = performance.now()
+    let lastActivityAt = startedAt
+    let finished = false
+    const root = document.documentElement || document
+    const markActivity = () => {
+      lastActivityAt = performance.now()
+    }
+    const observer = new MutationObserver(markActivity)
+
+    try {
+      observer.observe(root, {
+        subtree: true,
+        childList: true,
+        attributes: true
+      })
+    } catch {}
+
+    addEventListener('load', markActivity, true)
+
+    const visibleImagesReady = () => {
+      for (const image of document.images) {
+        const rect = image.getBoundingClientRect()
+
+        if (
+          rect.bottom < 0 ||
+          rect.right < 0 ||
+          rect.top > innerHeight ||
+          rect.left > innerWidth ||
+          rect.width <= 0 ||
+          rect.height <= 0
+        ) {
+          continue
+        }
+
+        if (!image.complete || image.naturalWidth <= 0) {
+          return false
+        }
+      }
+
+      return true
+    }
+
+    const finiteAnimationsRunning = () => {
+      if (typeof document.getAnimations !== 'function') return false
+
+      return document.getAnimations().some(animation => {
+        if (animation.playState !== 'running') return false
+
+        try {
+          const timing = animation.effect?.getComputedTiming()
+          return Boolean(timing && Number.isFinite(timing.endTime) && timing.endTime > 0)
+        } catch {
+          return false
+        }
+      })
+    }
+
+    const finish = maxedOut => {
+      if (finished) return
+
+      finished = true
+      observer.disconnect()
+      removeEventListener('load', markActivity, true)
+
+      if (typeof document.getAnimations === 'function') {
+        for (const animation of document.getAnimations()) {
+          try {
+            if (animation.playState === 'running') {
+              animation.pause()
+            }
+          } catch {}
+        }
+      }
+
+      let freezeStyle = document.getElementById('canvas-web-optimizer-capture-freeze')
+
+      if (!(freezeStyle instanceof HTMLStyleElement)) {
+        freezeStyle = document.createElement('style')
+        freezeStyle.id = 'canvas-web-optimizer-capture-freeze'
+        freezeStyle.textContent = `
+          *, *::before, *::after {
+            transition-property: none !important;
+            caret-color: transparent !important;
+          }
+        `
+        document.head?.appendChild(freezeStyle)
+      }
+
+      resolve({
+        waitedMs: performance.now() - startedAt,
+        maxedOut,
+        title: document.title || location.hostname || location.href
+      })
+    }
+
+    const tick = () => {
+      const now = performance.now()
+      const elapsed = now - startedAt
+      const quietFor = now - lastActivityAt
+      const fontsReady = !document.fonts || document.fonts.status !== 'loading'
+      const ready =
+        elapsed >= 450 &&
+        quietFor >= 220 &&
+        fontsReady &&
+        visibleImagesReady() &&
+        !finiteAnimationsRunning()
+
+      if (ready) {
+        finish(false)
+        return
+      }
+
+      if (elapsed >= 1600) {
+        finish(true)
+        return
+      }
+
+      requestAnimationFrame(tick)
+    }
+
+    requestAnimationFrame(tick)
+  })
+`
+
 export default class LocalBrowserRenderer {
   private readonly candidates = detectBrowserCandidates()
   private browser: BrowserRuntime | null = null
@@ -83,6 +288,10 @@ export default class LocalBrowserRenderer {
   private navigationReadinessProbeWins = 0
   private paintReadyTotalMs = 0
   private paintReadyCount = 0
+  private visualSettleTotalMs = 0
+  private visualSettleCount = 0
+  private visualSettleMaxOuts = 0
+  private cookieCleanupActions = 0
   private screenshotTotalMs = 0
   private screenshotOptimizeForSpeed: boolean | null = null
   private lastRenderFailure = 'none'
@@ -212,6 +421,20 @@ export default class LocalBrowserRenderer {
     return this.paintReadyCount > 0 ? Math.round(this.paintReadyTotalMs / this.paintReadyCount) : 0
   }
 
+  get averageVisualSettleMs(): number {
+    return this.visualSettleCount > 0
+      ? Math.round(this.visualSettleTotalMs / this.visualSettleCount)
+      : 0
+  }
+
+  get visualSettleMaxOutCount(): number {
+    return this.visualSettleMaxOuts
+  }
+
+  get cookieCleanupActionCount(): number {
+    return this.cookieCleanupActions
+  }
+
   get averageScreenshotMs(): number {
     return this.renderCount > 0 ? Math.round(this.screenshotTotalMs / this.renderCount) : 0
   }
@@ -241,6 +464,10 @@ export default class LocalBrowserRenderer {
     this.navigationReadinessProbeWins = 0
     this.paintReadyTotalMs = 0
     this.paintReadyCount = 0
+    this.visualSettleTotalMs = 0
+    this.visualSettleCount = 0
+    this.visualSettleMaxOuts = 0
+    this.cookieCleanupActions = 0
     this.screenshotTotalMs = 0
     this.lastRenderFailure = 'none'
   }
@@ -355,7 +582,7 @@ export default class LocalBrowserRenderer {
         const navigationMs = performance.now() - navigationStartedAt
         stage = 'paint/theme'
         const paintStartedAt = performance.now()
-        const themeAndTitle = runtime.connection
+        const preparation = runtime.connection
           .send<{
             result?: {
               value?: unknown
@@ -365,21 +592,64 @@ export default class LocalBrowserRenderer {
             {
               expression: `(() => {
                 ${LIGHT_THEME_SCRIPT};
-                return document.title || location.hostname || location.href
+                return ${COOKIE_CLEANUP_SCRIPT}
               })()`,
-              awaitPromise: true,
               returnByValue: true
             },
             sessionId,
             PAINT_READY_TIMEOUT_MS + 100
           )
-          .catch(() => ({ result: { value: '' } }))
+          .catch(() => ({ result: { value: 0 } }))
 
-        await Promise.race([themeAndTitle.then(() => undefined), delay(PAINT_READY_TIMEOUT_MS)])
+        await Promise.race([preparation.then(() => undefined), delay(PAINT_READY_TIMEOUT_MS)])
 
         const paintReadyMs = performance.now() - paintStartedAt
         this.paintReadyTotalMs += paintReadyMs
         this.paintReadyCount++
+
+        const preparationResponse = await preparation
+        const cleanupActions =
+          typeof preparationResponse.result?.value === 'number'
+            ? preparationResponse.result.value
+            : 0
+
+        this.cookieCleanupActions += cleanupActions
+
+        if (cancelled) {
+          throw new Error('Local browser render cancelled')
+        }
+
+        stage = 'visual settle'
+        const visualSettleStartedAt = performance.now()
+        const settleResponse = await runtime.connection
+          .send<{
+            result?: {
+              value?: unknown
+            }
+          }>(
+            'Runtime.evaluate',
+            {
+              expression: VISUAL_SETTLE_SCRIPT,
+              awaitPromise: true,
+              returnByValue: true
+            },
+            sessionId,
+            VISUAL_SETTLE_COMMAND_TIMEOUT_MS
+          )
+          .catch(() => ({ result: { value: null } }))
+        const visualSettleMs = performance.now() - visualSettleStartedAt
+        const settleValue = settleResponse.result?.value
+        const settleRecord =
+          settleValue && typeof settleValue === 'object'
+            ? (settleValue as { maxedOut?: unknown; title?: unknown })
+            : null
+
+        this.visualSettleTotalMs += visualSettleMs
+        this.visualSettleCount++
+
+        if (settleRecord?.maxedOut === true) {
+          this.visualSettleMaxOuts++
+        }
 
         if (cancelled) {
           throw new Error('Local browser render cancelled')
@@ -387,17 +657,16 @@ export default class LocalBrowserRenderer {
 
         stage = 'screenshot'
         const screenshotStartedAt = performance.now()
-        const [titleResponse, screenshot] = await Promise.all([
-          themeAndTitle,
-          this.captureScreenshot(
-            runtime.connection,
-            sessionId,
-            safeWidth,
-            safeHeight,
-            safeCaptureScale
-          )
-        ])
+        const screenshot = await this.captureScreenshot(
+          runtime.connection,
+          sessionId,
+          safeWidth,
+          safeHeight,
+          safeCaptureScale
+        )
         const screenshotMs = performance.now() - screenshotStartedAt
+        const settledTitle =
+          typeof settleRecord?.title === 'string' ? settleRecord.title : ''
 
         const bytes = Buffer.from(screenshot.data, 'base64')
 
@@ -415,7 +684,7 @@ export default class LocalBrowserRenderer {
 
         return {
           jpeg,
-          title: typeof titleResponse.result?.value === 'string' ? titleResponse.result.value : '',
+          title: settledTitle,
           totalMs,
           navigationMs,
           paintReadyMs,
