@@ -47,6 +47,8 @@ test('diagnostics report preserves core runtime lines', () => {
       averagePaintReadyMs: 10,
       averageVisualSettleMs: 620,
       visualSettleMaxOuts: 1,
+      visualSettleComplexPages: 4,
+      loaderBypasses: 2,
       cookieCleanupActions: 3,
       averageScreenshotMs: 50,
       screenshotOptimizationStatus: 'optimizeForSpeed enabled',
@@ -74,6 +76,8 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Local browser readiness probe wins: 2/)
   assert.match(report, /Local browser average paint ready: 10 ms/)
   assert.match(report, /Local browser average visual settle: 620 ms/)
+  assert.match(report, /Local browser complex settles: 4/)
+  assert.match(report, /Local browser loader bypasses: 2/)
   assert.match(report, /Cookie cleanup actions: 3/)
   assert.match(report, /Last batch throughput: 2\.00 cards\/s/)
 })
