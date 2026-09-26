@@ -19,6 +19,8 @@ const VISUAL_SETTLE_QUIET_MS = 120
 const VISUAL_SETTLE_MAX_MS = 850
 const VISUAL_SETTLE_COMPLEX_MAX_MS = 1800
 const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 2400
+const CAPTURE_HEALTH_COMMAND_TIMEOUT_MS = 900
+const CAPTURE_RECOVERY_WAIT_MS = 280
 const IDLE_SHUTDOWN_MS = 2500
 const MIN_SCREENSHOT_BYTES = 512
 const LOCAL_BROWSER_MAX_WORKERS = 8
@@ -466,6 +468,362 @@ const VISUAL_SETTLE_SCRIPT = `
   })
 `
 
+
+const CAPTURE_HEALTH_SCRIPT = `
+  (() => {
+    const reasons = []
+    let score = 0
+    const viewportArea = Math.max(innerWidth * innerHeight, 1)
+
+    const isVisible = element => {
+      if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false
+
+      const rect = element.getBoundingClientRect()
+
+      if (
+        rect.width <= 0 ||
+        rect.height <= 0 ||
+        rect.bottom <= 0 ||
+        rect.right <= 0 ||
+        rect.top >= innerHeight ||
+        rect.left >= innerWidth
+      ) {
+        return false
+      }
+
+      const style = getComputedStyle(element)
+
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.04
+      )
+    }
+
+    const add = (reason, weight) => {
+      if (!reasons.includes(reason)) {
+        reasons.push(reason)
+      }
+
+      score += weight
+    }
+
+    const progressNodes = document.querySelectorAll(
+      'progress, [role="progressbar"], [aria-busy="true"]'
+    )
+
+    for (const element of progressNodes) {
+      if (isVisible(element)) {
+        add('progress-visible', 4)
+        break
+      }
+    }
+
+    const elements = document.body?.getElementsByTagName('*')
+    const elementCount = elements?.length ?? 0
+    let visibleTextLength = 0
+
+    for (let index = 0; index < Math.min(elementCount, 700); index++) {
+      const element = elements?.item(index)
+
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const ownText = [...element.childNodes]
+        .filter(node => node.nodeType === Node.TEXT_NODE)
+        .map(node => node.textContent?.trim() ?? '')
+        .join(' ')
+        .trim()
+
+      if (ownText) {
+        visibleTextLength += ownText.length
+      }
+
+      if (ownText.length > 0 && ownText.length <= 120) {
+        const normalized = ownText.replace(/\s+/g, ' ').trim()
+
+        if (
+          /^(loading|loading\s*\d{1,3}%|please wait|initializing|preparing|entering|\d{1,3}%$)/i.test(
+            normalized
+          )
+        ) {
+          add('loading-text', 4)
+          break
+        }
+      }
+    }
+
+    const heading = document.querySelector('h1, [role="heading"][aria-level="1"]')
+
+    if (heading instanceof HTMLElement && heading.offsetTop < innerHeight * 1.5) {
+      const style = getComputedStyle(heading)
+      const opacity = Number.parseFloat(style.opacity || '1')
+      const filter = style.filter || ''
+      const rect = heading.getBoundingClientRect()
+
+      if (style.display === 'none' || style.visibility === 'hidden' || opacity <= 0.08) {
+        add('hero-hidden', 4)
+      }
+
+      const blurMatch = filter.match(/blur\(([-\d.]+)px\)/i)
+      const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+
+      if (Number.isFinite(blur) && blur >= 1.5) {
+        add('hero-blurred', 3)
+      }
+
+      if (style.transform && style.transform !== 'none') {
+        try {
+          const matrix = new DOMMatrixReadOnly(style.transform)
+          const scaleX = Math.hypot(matrix.a, matrix.b)
+          const scaleY = Math.hypot(matrix.c, matrix.d)
+          const translatedFar =
+            Math.abs(matrix.e) > Math.max(rect.width, 1) * 0.45 ||
+            Math.abs(matrix.f) > Math.max(rect.height, 1) * 0.9
+
+          if (scaleX < 0.72 || scaleY < 0.72 || translatedFar) {
+            add('hero-transform', 2)
+          }
+        } catch {}
+      }
+    }
+
+    const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"]')
+
+    for (const element of dialogs) {
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const rect = element.getBoundingClientRect()
+      const areaRatio = (rect.width * rect.height) / viewportArea
+
+      if (areaRatio >= 0.18) {
+        add('large-dialog', 2)
+        break
+      }
+    }
+
+    const fixedCandidates = document.querySelectorAll('body *')
+
+    for (let index = 0; index < Math.min(fixedCandidates.length, 450); index++) {
+      const element = fixedCandidates[index]
+
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const style = getComputedStyle(element)
+
+      if (style.position !== 'fixed' && style.position !== 'sticky') continue
+
+      const rect = element.getBoundingClientRect()
+      const areaRatio = (rect.width * rect.height) / viewportArea
+
+      if (areaRatio < 0.4) continue
+
+      const text = element.textContent?.trim() ?? ''
+      const hasControls = Boolean(element.querySelector('button, [role="button"], input, form'))
+      const looksTransient =
+        /loading|please wait|cookie|consent|privacy|subscribe|sign up|join|member/i.test(text)
+
+      if (hasControls || looksTransient) {
+        add('large-overlay', 2)
+        break
+      }
+    }
+
+    const bodyTextLength = (document.body?.innerText ?? '').trim().length
+
+    if (bodyTextLength > 500 && visibleTextLength < 24) {
+      add('content-mostly-hidden', 2)
+    }
+
+    return {
+      suspicious: score >= 2,
+      score,
+      reasons,
+      visibleTextLength,
+      bodyTextLength
+    }
+  })()
+`
+
+const CAPTURE_RECOVERY_SCRIPT = `
+  (() => {
+    let actions = 0
+    const viewportArea = Math.max(innerWidth * innerHeight, 1)
+
+    const isVisible = element => {
+      if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false
+
+      const rect = element.getBoundingClientRect()
+
+      if (
+        rect.width <= 0 ||
+        rect.height <= 0 ||
+        rect.bottom <= 0 ||
+        rect.right <= 0 ||
+        rect.top >= innerHeight ||
+        rect.left >= innerWidth
+      ) {
+        return false
+      }
+
+      const style = getComputedStyle(element)
+
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.04
+      )
+    }
+
+    const hide = element => {
+      if (!(element instanceof HTMLElement)) return
+
+      element.style.setProperty('display', 'none', 'important')
+      element.style.setProperty('visibility', 'hidden', 'important')
+      element.style.setProperty('pointer-events', 'none', 'important')
+      actions++
+    }
+
+    const loaderSelectors = [
+      '[id*="loader" i]',
+      '[class*="loader" i]',
+      '[id*="preloader" i]',
+      '[class*="preloader" i]',
+      '[id*="splash" i]',
+      '[class*="splash" i]',
+      '[id*="curtain" i]',
+      '[class*="curtain" i]',
+      '[id*="transition" i]',
+      '[class*="transition" i]',
+      'progress',
+      '[role="progressbar"]',
+      '[aria-busy="true"]'
+    ]
+
+    for (const selector of loaderSelectors) {
+      for (const element of document.querySelectorAll(selector)) {
+        if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+        const rect = element.getBoundingClientRect()
+        const style = getComputedStyle(element)
+        const areaRatio = (rect.width * rect.height) / viewportArea
+        const text = element.textContent?.trim() ?? ''
+        const name = (element.id + ' ' + element.className).toLowerCase()
+        const looksLikeLoader =
+          /loader|preloader|loading|splash|curtain|transition/.test(name) ||
+          /loading|please wait|initializing|preparing|\d{1,3}%/i.test(text)
+
+        if (
+          looksLikeLoader &&
+          (areaRatio >= 0.08 || style.position === 'fixed' || style.position === 'sticky')
+        ) {
+          hide(element)
+        }
+      }
+    }
+
+    const heading = document.querySelector('h1, [role="heading"][aria-level="1"]')
+
+    if (heading instanceof HTMLElement && heading.offsetTop < innerHeight * 1.5) {
+      const candidates = [heading]
+      let parent = heading.parentElement
+
+      for (let depth = 0; depth < 3 && parent; depth++) {
+        candidates.push(parent)
+        parent = parent.parentElement
+      }
+
+      for (const element of candidates) {
+        const style = getComputedStyle(element)
+        const opacity = Number.parseFloat(style.opacity || '1')
+        const blurMatch = (style.filter || '').match(/blur\(([-\d.]+)px\)/i)
+        const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+
+        if (
+          style.visibility === 'hidden' ||
+          opacity <= 0.12 ||
+          (Number.isFinite(blur) && blur >= 1.5)
+        ) {
+          element.style.setProperty('visibility', 'visible', 'important')
+          element.style.setProperty('opacity', '1', 'important')
+          element.style.setProperty('filter', 'none', 'important')
+          element.style.setProperty('transform', 'none', 'important')
+          element.style.setProperty('clip-path', 'none', 'important')
+          actions++
+        }
+      }
+    }
+
+    if (typeof document.getAnimations === 'function') {
+      for (const animation of document.getAnimations()) {
+        try {
+          if (animation.playState !== 'running') continue
+
+          const timing = animation.effect?.getComputedTiming()
+
+          if (timing && Number.isFinite(timing.endTime) && timing.endTime > 0) {
+            animation.finish()
+          } else {
+            animation.pause()
+          }
+
+          actions++
+        } catch {}
+      }
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      if (!isVisible(video)) continue
+
+      try {
+        video.muted = true
+        void video.play().catch(() => {})
+      } catch {}
+    }
+
+    const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"]')
+
+    for (const element of dialogs) {
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const rect = element.getBoundingClientRect()
+      const areaRatio = (rect.width * rect.height) / viewportArea
+
+      if (areaRatio < 0.18) continue
+
+      const buttons = element.querySelectorAll('button, [role="button"], a')
+      let dismissed = false
+
+      for (const button of buttons) {
+        const label =
+          (button.getAttribute('aria-label') ?? '') + ' ' + (button.textContent?.trim() ?? '')
+
+        if (/close|dismiss|no thanks|skip|not now|decline|reject/i.test(label)) {
+          if (button instanceof HTMLElement && isVisible(button)) {
+            button.click()
+            actions++
+            dismissed = true
+            break
+          }
+        }
+      }
+
+      if (!dismissed) {
+        const text = element.textContent?.trim() ?? ''
+
+        if (/cookie|consent|privacy|subscribe|sign up|join|member/i.test(text)) {
+          hide(element)
+        }
+      }
+    }
+
+    scrollTo(0, 0)
+    dispatchEvent(new Event('resize'))
+    dispatchEvent(new Event('scroll'))
+
+    return actions
+  })()
+`
+
 export default class LocalBrowserRenderer {
   private readonly candidates = detectBrowserCandidates()
   private browser: BrowserRuntime | null = null
@@ -496,6 +854,8 @@ export default class LocalBrowserRenderer {
   private visualSettleComplexCount = 0
   private loaderBypasses = 0
   private cookieCleanupActions = 0
+  private captureRecoveries = 0
+  private unresolvedSuspiciousCaptures = 0
   private screenshotTotalMs = 0
   private screenshotOptimizeForSpeed: boolean | null = null
   private lastRenderFailure = 'none'
@@ -647,6 +1007,14 @@ export default class LocalBrowserRenderer {
     return this.cookieCleanupActions
   }
 
+  get captureRecoveryCount(): number {
+    return this.captureRecoveries
+  }
+
+  get unresolvedSuspiciousCaptureCount(): number {
+    return this.unresolvedSuspiciousCaptures
+  }
+
   get averageScreenshotMs(): number {
     return this.renderCount > 0 ? Math.round(this.screenshotTotalMs / this.renderCount) : 0
   }
@@ -682,6 +1050,8 @@ export default class LocalBrowserRenderer {
     this.visualSettleComplexCount = 0
     this.loaderBypasses = 0
     this.cookieCleanupActions = 0
+    this.captureRecoveries = 0
+    this.unresolvedSuspiciousCaptures = 0
     this.screenshotTotalMs = 0
     this.lastRenderFailure = 'none'
   }
