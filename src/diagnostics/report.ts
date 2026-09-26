@@ -24,6 +24,8 @@ export type LocalBrowserDiagnostics = {
   visualSettleComplexPages: number
   loaderBypasses: number
   cookieCleanupActions: number
+  captureRecoveries: number
+  unresolvedSuspiciousCaptures: number
   averageScreenshotMs: number
   screenshotOptimizationStatus: string
   lastFailureSummary: string
@@ -119,6 +121,8 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser complex settles: ${local.visualSettleComplexPages}`,
     `Local browser loader bypasses: ${local.loaderBypasses}`,
     `Cookie cleanup actions: ${local.cookieCleanupActions}`,
+    `Suspicious capture recoveries: ${local.captureRecoveries}`,
+    `Unresolved suspicious captures: ${local.unresolvedSuspiciousCaptures}`,
     `Local browser average screenshot: ${local.averageScreenshotMs} ms`,
     `Average local generation: ${summary.averageLocalGenerationMs} ms`,
     `Generation preload: ${context.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
