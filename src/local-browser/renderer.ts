@@ -88,6 +88,335 @@ function isUnsupportedScreenshotSpeedOption(error: unknown): boolean {
   )
 }
 
+const COOKIE_GUARD_BOOTSTRAP_SCRIPT = String.raw\`
+  (() => {
+    if (globalThis.__canvasWebOptimizerCookieGuard) return
+
+    const state = {
+      actions: 0,
+      clicks: 0,
+      hides: 0,
+      scans: 0
+    }
+
+    Object.defineProperty(globalThis, '__canvasWebOptimizerCookieGuard', {
+      value: state,
+      configurable: true
+    })
+
+    try {
+      Object.defineProperty(Navigator.prototype, 'globalPrivacyControl', {
+        configurable: true,
+        get: () => true
+      })
+    } catch {}
+
+    try {
+      Object.defineProperty(Navigator.prototype, 'doNotTrack', {
+        configurable: true,
+        get: () => '1'
+      })
+    } catch {}
+
+    const styleId = 'canvas-web-optimizer-cookie-guard'
+    const knownSelectors = [
+      '#onetrust-banner-sdk',
+      '#onetrust-consent-sdk',
+      '#CybotCookiebotDialog',
+      '#CybotCookiebotDialogBodyUnderlay',
+      '#didomi-host',
+      '.qc-cmp2-container',
+      '.qc-cmp-cleanslate',
+      '.truste_popframe',
+      '#usercentrics-root',
+      '.iubenda-cs-container',
+      '[id*="cookie-banner" i]',
+      '[class*="cookie-banner" i]',
+      '[id*="cookie-consent" i]',
+      '[class*="cookie-consent" i]',
+      '[id*="consent-banner" i]',
+      '[class*="consent-banner" i]',
+      '[data-testid*="cookie-banner" i]',
+      '[data-testid*="cookie-consent" i]'
+    ]
+    const candidateSelectors = [
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      '[id*="cookie" i]',
+      '[class*="cookie" i]',
+      '[id*="consent" i]',
+      '[class*="consent" i]',
+      '[id*="gdpr" i]',
+      '[class*="gdpr" i]',
+      '[id*="cmp" i]',
+      '[class*="cmp" i]',
+      '[data-testid*="cookie" i]',
+      '[data-testid*="consent" i]'
+    ]
+    const consentText =
+      /cookie|consent|privacy preferences|tracking|gdpr|personal data|data partners/i
+    const rejectText =
+      /reject|decline|deny|essential only|necessary only|continue without|do not accept|no thanks|only necessary/i
+    let observer = null
+    let scheduled = false
+    let interval = 0
+
+    const ensureStyle = () => {
+      if (document.getElementById(styleId)) return
+
+      const style = document.createElement('style')
+      style.id = styleId
+      style.textContent =
+        knownSelectors.join(',') +
+        '{display:none!important;visibility:hidden!important;opacity:0!important;' +
+        'pointer-events:none!important;}'
+
+      ;(document.head || document.documentElement)?.appendChild(style)
+    }
+
+    const isVisible = element => {
+      if (!(element instanceof HTMLElement)) return false
+
+      const rect = element.getBoundingClientRect()
+
+      if (rect.width <= 0 || rect.height <= 0) return false
+
+      const style = getComputedStyle(element)
+
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.02
+      )
+    }
+
+    const restoreScrolling = () => {
+      for (const element of [document.documentElement, document.body]) {
+        if (!(element instanceof HTMLElement)) continue
+
+        element.style.setProperty('overflow', 'auto', 'important')
+        element.style.removeProperty('position')
+        element.style.removeProperty('inset')
+        element.style.removeProperty('height')
+      }
+    }
+
+    const hide = element => {
+      if (!(element instanceof HTMLElement)) return false
+
+      element.style.setProperty('display', 'none', 'important')
+      element.style.setProperty('visibility', 'hidden', 'important')
+      element.style.setProperty('opacity', '0', 'important')
+      element.style.setProperty('pointer-events', 'none', 'important')
+      state.actions++
+      state.hides++
+      return true
+    }
+
+    const findRejectControl = root => {
+      const controls = root.querySelectorAll(
+        'button, [role="button"], input[type="button"], input[type="submit"], a'
+      )
+
+      for (const control of controls) {
+        if (!(control instanceof HTMLElement) || !isVisible(control)) continue
+
+        const label = [
+          control.getAttribute('aria-label') || '',
+          control.getAttribute('title') || '',
+          control instanceof HTMLInputElement ? control.value : '',
+          control.textContent || ''
+        ]
+          .join(' ')
+          .replace(/ +/g, ' ')
+          .trim()
+
+        if (rejectText.test(label)) {
+          return control
+        }
+      }
+
+      return null
+    }
+
+    const looksLikeConsent = element => {
+      if (!(element instanceof HTMLElement)) return false
+
+      const text = (element.innerText || element.textContent || '').trim()
+      const semanticName = [
+        element.id,
+        typeof element.className === 'string' ? element.className : '',
+        element.getAttribute('aria-label') || '',
+        element.getAttribute('data-testid') || ''
+      ].join(' ')
+
+      return consentText.test(text) || /cookie|consent|gdpr|cmp/i.test(semanticName)
+    }
+
+    const candidateRoots = () => {
+      const roots = new Set()
+
+      for (const selector of candidateSelectors) {
+        for (const element of document.querySelectorAll(selector)) {
+          roots.add(element)
+        }
+      }
+
+      const points = [
+        [innerWidth / 2, innerHeight - 12],
+        [12, innerHeight - 12],
+        [innerWidth - 12, innerHeight - 12],
+        [innerWidth / 2, innerHeight / 2]
+      ]
+
+      for (const [x, y] of points) {
+        for (const hit of document.elementsFromPoint(x, y)) {
+          let current = hit
+
+          for (let depth = 0; depth < 5 && current instanceof HTMLElement; depth++) {
+            roots.add(current)
+            current = current.parentElement
+          }
+        }
+      }
+
+      return roots
+    }
+
+    const hideBackdropAfterConsent = () => {
+      const center = document.elementFromPoint(innerWidth / 2, innerHeight / 2)
+
+      if (!(center instanceof HTMLElement)) return
+
+      let current = center
+
+      for (let depth = 0; depth < 5 && current; depth++) {
+        const style = getComputedStyle(current)
+        const rect = current.getBoundingClientRect()
+        const viewportArea = Math.max(innerWidth * innerHeight, 1)
+        const areaRatio = (rect.width * rect.height) / viewportArea
+        const name = (current.id + ' ' + current.className).toLowerCase()
+
+        if (
+          areaRatio >= 0.72 &&
+          (style.position === 'fixed' || style.position === 'absolute') &&
+          /backdrop|overlay|modal|consent|cookie|cmp/.test(name)
+        ) {
+          hide(current)
+          return
+        }
+
+        current = current.parentElement
+      }
+    }
+
+    const clean = () => {
+      scheduled = false
+      state.scans++
+      ensureStyle()
+
+      let changed = false
+
+      for (const root of candidateRoots()) {
+        if (!(root instanceof HTMLElement) || !isVisible(root)) continue
+        if (!looksLikeConsent(root)) continue
+
+        const style = getComputedStyle(root)
+        const rect = root.getBoundingClientRect()
+        const viewportArea = Math.max(innerWidth * innerHeight, 1)
+        const areaRatio = (rect.width * rect.height) / viewportArea
+        const roleDialog =
+          root.getAttribute('role') === 'dialog' || root.getAttribute('aria-modal') === 'true'
+
+        if (
+          !roleDialog &&
+          style.position !== 'fixed' &&
+          style.position !== 'sticky' &&
+          areaRatio < 0.025
+        ) {
+          continue
+        }
+
+        const reject = findRejectControl(root)
+
+        if (reject) {
+          try {
+            reject.click()
+            state.actions++
+            state.clicks++
+            changed = true
+          } catch {
+            changed = hide(root) || changed
+          }
+        } else {
+          changed = hide(root) || changed
+        }
+      }
+
+      if (changed) {
+        restoreScrolling()
+        hideBackdropAfterConsent()
+      }
+    }
+
+    const scheduleClean = () => {
+      if (scheduled) return
+
+      scheduled = true
+      queueMicrotask(clean)
+    }
+
+    const installObserver = () => {
+      if (observer || !document.documentElement) return
+
+      observer = new MutationObserver(scheduleClean)
+      observer.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ['class', 'id', 'style', 'role', 'aria-modal', 'aria-label']
+      })
+    }
+
+    const start = () => {
+      ensureStyle()
+      installObserver()
+      clean()
+
+      if (!interval) {
+        interval = setInterval(clean, 180)
+
+        setTimeout(() => {
+          clearInterval(interval)
+          interval = 0
+        }, 12000)
+      }
+    }
+
+    if (document.documentElement) {
+      start()
+    } else {
+      const bootstrapObserver = new MutationObserver(() => {
+        if (!document.documentElement) return
+
+        bootstrapObserver.disconnect()
+        start()
+      })
+
+      bootstrapObserver.observe(document, {
+        subtree: true,
+        childList: true
+      })
+    }
+
+    addEventListener('DOMContentLoaded', start, { once: true })
+    addEventListener('load', clean, { once: true })
+  })()
+\`
+
+const COOKIE_GUARD_STATUS_SCRIPT =
+  'globalThis.__canvasWebOptimizerCookieGuard?.actions ?? 0'
+
 const COOKIE_CLEANUP_SCRIPT = `
   (() => {
     const rejectSelectors = [
@@ -1032,6 +1361,7 @@ export default class LocalBrowserRenderer {
   private visualSettleCommandFailures = 0
   private loaderBypasses = 0
   private cookieCleanupActions = 0
+  private cookieGuardActions = 0
   private captureRecoveries = 0
   private unresolvedSuspiciousCaptures = 0
   private introWaits = 0
@@ -1192,6 +1522,10 @@ export default class LocalBrowserRenderer {
     return this.cookieCleanupActions
   }
 
+  get cookieGuardActionCount(): number {
+    return this.cookieGuardActions
+  }
+
   get captureRecoveryCount(): number {
     return this.captureRecoveries
   }
@@ -1248,6 +1582,7 @@ export default class LocalBrowserRenderer {
     this.visualSettleCommandFailures = 0
     this.loaderBypasses = 0
     this.cookieCleanupActions = 0
+    this.cookieGuardActions = 0
     this.captureRecoveries = 0
     this.unresolvedSuspiciousCaptures = 0
     this.introWaits = 0
@@ -1326,6 +1661,13 @@ export default class LocalBrowserRenderer {
             {
               media: 'screen',
               features: [{ name: 'prefers-color-scheme', value: 'light' }]
+            },
+            sessionId
+          ),
+          runtime.connection.send(
+            'Page.addScriptToEvaluateOnNewDocument',
+            {
+              source: COOKIE_GUARD_BOOTSTRAP_SCRIPT
             },
             sessionId
           )
@@ -1481,6 +1823,28 @@ export default class LocalBrowserRenderer {
             : 0
 
         this.cookieCleanupActions += lateCleanupActions
+
+        const guardStatusResponse = await runtime.connection
+          .send<{
+            result?: {
+              value?: unknown
+            }
+          }>(
+            'Runtime.evaluate',
+            {
+              expression: COOKIE_GUARD_STATUS_SCRIPT,
+              returnByValue: true
+            },
+            sessionId,
+            PAINT_READY_TIMEOUT_MS + 100
+          )
+          .catch(() => ({ result: { value: 0 } }))
+        const guardActions =
+          typeof guardStatusResponse.result?.value === 'number'
+            ? guardStatusResponse.result.value
+            : 0
+
+        this.cookieGuardActions += guardActions
 
         const settleNeedsRepaint =
           settleRecord?.maxedOut === true ||
