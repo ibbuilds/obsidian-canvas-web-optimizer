@@ -45,6 +45,7 @@ test('diagnostics report preserves core runtime lines', () => {
       averageSetupMs: 40,
       averageNavigationMs: 600,
       readinessProbeWins: 2,
+      softReadinessWins: 1,
       averagePaintReadyMs: 10,
       averageVisualSettleMs: 620,
       visualSettleMaxOuts: 1,
@@ -87,6 +88,7 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Local browser last render failure: screenshot:/)
   assert.match(report, /Local browser average setup: 40 ms/)
   assert.match(report, /Local browser readiness probe wins: 2/)
+  assert.match(report, /Local browser soft readiness wins: 1/)
   assert.match(report, /Local browser average paint ready: 10 ms/)
   assert.match(report, /Local browser average visual settle: 620 ms/)
   assert.match(report, /Local browser complex settles: 4/)
