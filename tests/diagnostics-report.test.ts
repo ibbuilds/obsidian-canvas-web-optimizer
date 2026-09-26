@@ -20,6 +20,7 @@ test('diagnostics report preserves core runtime lines', () => {
     queued: 0,
     stagedPreviews: 4,
     previewRevealActive: true,
+    sharedLocalRenderHits: 3,
     interactiveWebviewActive: true,
     interactiveLightPreferenceStatus: 'CDP applied',
     interactiveMatchMediaLight: true,
@@ -49,6 +50,10 @@ test('diagnostics report preserves core runtime lines', () => {
       visualSettleMaxOuts: 1,
       visualSettleComplexPages: 4,
       visualSettleCommandFailures: 2,
+      fastPathCaptures: 6,
+      visualStabilityChecks: 5,
+      visualStabilityPasses: 4,
+      visualStabilityExtraWaits: 2,
       loaderBypasses: 2,
       cookieCleanupActions: 3,
       cookieGuardActions: 7,
@@ -76,6 +81,7 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Interactive matchMedia light: true/)
   assert.match(report, /Staged previews: 4/)
   assert.match(report, /Preview reveal: active/)
+  assert.match(report, /Shared local render hits: 3/)
   assert.match(report, /Cache hits: 3/)
   assert.match(report, /Local browser screenshot mode: optimizeForSpeed enabled/)
   assert.match(report, /Local browser last render failure: screenshot:/)
@@ -85,6 +91,9 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Local browser average visual settle: 620 ms/)
   assert.match(report, /Local browser complex settles: 4/)
   assert.match(report, /Local browser visual settle command failures: 2/)
+  assert.match(report, /Local browser fast-path captures: 6/)
+  assert.match(report, /Visual stability checks\/passes: 5\/4/)
+  assert.match(report, /Visual stability extra waits: 2/)
   assert.match(report, /Local browser loader bypasses: 2/)
   assert.match(report, /Cookie cleanup actions: 3/)
   assert.match(report, /Cookie guard actions: 7/)
