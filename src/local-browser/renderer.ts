@@ -199,7 +199,6 @@ const COOKIE_CLEANUP_SCRIPT = `
   })()
 `
 
-
 const VISUAL_SETTLE_SCRIPT = `
   new Promise(resolve => {
     const startedAt = performance.now()
@@ -489,6 +488,8 @@ export default class LocalBrowserRenderer {
   private visualSettleTotalMs = 0
   private visualSettleCount = 0
   private visualSettleMaxOuts = 0
+  private visualSettleComplexCount = 0
+  private loaderBypasses = 0
   private cookieCleanupActions = 0
   private screenshotTotalMs = 0
   private screenshotOptimizeForSpeed: boolean | null = null
@@ -629,6 +630,14 @@ export default class LocalBrowserRenderer {
     return this.visualSettleMaxOuts
   }
 
+  get visualSettleComplexPageCount(): number {
+    return this.visualSettleComplexCount
+  }
+
+  get loaderBypassCount(): number {
+    return this.loaderBypasses
+  }
+
   get cookieCleanupActionCount(): number {
     return this.cookieCleanupActions
   }
@@ -665,6 +674,8 @@ export default class LocalBrowserRenderer {
     this.visualSettleTotalMs = 0
     this.visualSettleCount = 0
     this.visualSettleMaxOuts = 0
+    this.visualSettleComplexCount = 0
+    this.loaderBypasses = 0
     this.cookieCleanupActions = 0
     this.screenshotTotalMs = 0
     this.lastRenderFailure = 'none'
@@ -854,6 +865,14 @@ export default class LocalBrowserRenderer {
 
         if (settleRecord?.maxedOut === true) {
           this.visualSettleMaxOuts++
+        }
+
+        if (settleRecord?.complex === true) {
+          this.visualSettleComplexCount++
+        }
+
+        if (typeof settleRecord?.loaderBypasses === 'number') {
+          this.loaderBypasses += settleRecord.loaderBypasses
         }
 
         const lateCleanupResponse = await runtime.connection
