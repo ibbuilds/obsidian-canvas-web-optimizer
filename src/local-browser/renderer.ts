@@ -20,6 +20,8 @@ const VISUAL_SETTLE_MAX_MS = 850
 const VISUAL_SETTLE_COMPLEX_MAX_MS = 1800
 const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 2400
 const CAPTURE_HEALTH_COMMAND_TIMEOUT_MS = 900
+const CAPTURE_INTRO_MAX_FROM_NAVIGATION_MS = 5500
+const CAPTURE_INTRO_POLL_MS = 250
 const CAPTURE_RECOVERY_WAIT_MS = 280
 const IDLE_SHUTDOWN_MS = 2500
 const MIN_SCREENSHOT_BYTES = 512
@@ -48,6 +50,26 @@ export type LocalBrowserRenderTask = {
   promise: Promise<LocalBrowserRenderResult>
   cancel: () => void
 }
+
+
+type CaptureHealthRecord = {
+  suspicious?: boolean
+  reasons?: unknown
+  score?: unknown
+}
+
+const NATURAL_INTRO_REASONS = new Set([
+  'progress-visible',
+  'loading-copy',
+  'loading-percent',
+  'loading-text',
+  'hero-hidden',
+  'hero-blurred',
+  'hero-clipped',
+  'hero-transform',
+  'fullscreen-cover',
+  'content-mostly-hidden'
+])
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => window.setTimeout(resolve, ms))
@@ -1013,6 +1035,9 @@ export default class LocalBrowserRenderer {
   private cookieCleanupActions = 0
   private captureRecoveries = 0
   private unresolvedSuspiciousCaptures = 0
+  private introWaits = 0
+  private introNaturalResolutions = 0
+  private introWaitTotalMs = 0
   private screenshotTotalMs = 0
   private screenshotOptimizeForSpeed: boolean | null = null
   private lastRenderFailure = 'none'
@@ -1176,6 +1201,18 @@ export default class LocalBrowserRenderer {
     return this.unresolvedSuspiciousCaptures
   }
 
+  get introWaitCount(): number {
+    return this.introWaits
+  }
+
+  get introNaturalResolutionCount(): number {
+    return this.introNaturalResolutions
+  }
+
+  get averageIntroWaitMs(): number {
+    return this.introWaits > 0 ? Math.round(this.introWaitTotalMs / this.introWaits) : 0
+  }
+
   get averageScreenshotMs(): number {
     return this.renderCount > 0 ? Math.round(this.screenshotTotalMs / this.renderCount) : 0
   }
@@ -1214,6 +1251,9 @@ export default class LocalBrowserRenderer {
     this.cookieCleanupActions = 0
     this.captureRecoveries = 0
     this.unresolvedSuspiciousCaptures = 0
+    this.introWaits = 0
+    this.introNaturalResolutions = 0
+    this.introWaitTotalMs = 0
     this.screenshotTotalMs = 0
     this.lastRenderFailure = 'none'
   }
@@ -1458,26 +1498,26 @@ export default class LocalBrowserRenderer {
         }
 
         stage = 'capture health'
-        const healthResponse = await runtime.connection
-          .send<{
-            result?: {
-              value?: unknown
-            }
-          }>(
-            'Runtime.evaluate',
-            {
-              expression: CAPTURE_HEALTH_SCRIPT,
-              returnByValue: true
-            },
+        let healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
+
+        if (healthRecord?.suspicious === true && this.shouldWaitForNaturalIntro(healthRecord)) {
+          stage = 'intro wait'
+          this.introWaits++
+          const introWaitStartedAt = performance.now()
+
+          healthRecord = await this.waitForNaturalIntro(
+            runtime.connection,
             sessionId,
-            CAPTURE_HEALTH_COMMAND_TIMEOUT_MS
+            navigationStartedAt,
+            healthRecord
           )
-          .catch(() => ({ result: { value: null } }))
-        const healthValue = healthResponse.result?.value
-        let healthRecord =
-          healthValue && typeof healthValue === 'object'
-            ? (healthValue as { suspicious?: unknown; reasons?: unknown })
-            : null
+
+          this.introWaitTotalMs += performance.now() - introWaitStartedAt
+
+          if (healthRecord?.suspicious !== true) {
+            this.introNaturalResolutions++
+          }
+        }
 
         if (healthRecord?.suspicious === true) {
           this.captureRecoveries++
@@ -1501,28 +1541,7 @@ export default class LocalBrowserRenderer {
             .catch(() => null)
 
           await delay(CAPTURE_RECOVERY_WAIT_MS)
-
-          const recoveredHealthResponse = await runtime.connection
-            .send<{
-              result?: {
-                value?: unknown
-              }
-            }>(
-              'Runtime.evaluate',
-              {
-                expression: CAPTURE_HEALTH_SCRIPT,
-                returnByValue: true
-              },
-              sessionId,
-              CAPTURE_HEALTH_COMMAND_TIMEOUT_MS
-            )
-            .catch(() => ({ result: { value: null } }))
-          const recoveredHealthValue = recoveredHealthResponse.result?.value
-
-          healthRecord =
-            recoveredHealthValue && typeof recoveredHealthValue === 'object'
-              ? (recoveredHealthValue as { suspicious?: unknown; reasons?: unknown })
-              : null
+          healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
 
           if (healthRecord?.suspicious === true) {
             this.unresolvedSuspiciousCaptures++
@@ -1592,6 +1611,75 @@ export default class LocalBrowserRenderer {
       promise,
       cancel
     }
+  }
+
+  private async evaluateCaptureHealth(
+    connection: CdpConnection,
+    sessionId: string
+  ): Promise<CaptureHealthRecord | null> {
+    const response = await connection
+      .send<{
+        result?: {
+          value?: unknown
+        }
+      }>(
+        'Runtime.evaluate',
+        {
+          expression: CAPTURE_HEALTH_SCRIPT,
+          returnByValue: true
+        },
+        sessionId,
+        CAPTURE_HEALTH_COMMAND_TIMEOUT_MS
+      )
+      .catch(() => ({ result: { value: null } }))
+    const value = response.result?.value
+
+    return value && typeof value === 'object' ? (value as CaptureHealthRecord) : null
+  }
+
+  private shouldWaitForNaturalIntro(health: CaptureHealthRecord): boolean {
+    if (!Array.isArray(health.reasons)) return false
+
+    return health.reasons.some(
+      reason => typeof reason === 'string' && NATURAL_INTRO_REASONS.has(reason)
+    )
+  }
+
+  private async waitForNaturalIntro(
+    connection: CdpConnection,
+    sessionId: string,
+    navigationStartedAt: number,
+    initialHealth: CaptureHealthRecord
+  ): Promise<CaptureHealthRecord | null> {
+    const deadline = navigationStartedAt + CAPTURE_INTRO_MAX_FROM_NAVIGATION_MS
+    let latestHealth: CaptureHealthRecord | null = initialHealth
+    let healthyPasses = 0
+
+    while (performance.now() < deadline) {
+      const remainingMs = deadline - performance.now()
+
+      await delay(Math.min(CAPTURE_INTRO_POLL_MS, Math.max(1, remainingMs)))
+
+      latestHealth = await this.evaluateCaptureHealth(connection, sessionId)
+
+      if (latestHealth?.suspicious === true) {
+        healthyPasses = 0
+
+        if (!this.shouldWaitForNaturalIntro(latestHealth)) {
+          return latestHealth
+        }
+
+        continue
+      }
+
+      healthyPasses++
+
+      if (healthyPasses >= 2) {
+        return latestHealth
+      }
+    }
+
+    return latestHealth
   }
 
   private waitForNavigationReadiness(
