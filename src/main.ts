@@ -47,8 +47,8 @@ const THUMBNAIL_MAX_VIEWPORT_LONG_EDGE = 4096
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
 const PREVIEW_LOAD_TIMEOUT_MS = 1000
-const PREVIEW_REVEAL_LEAD_IN_MS = 140
-const PREVIEW_REVEAL_STAGGER_MS = 55
+const PREVIEW_REVEAL_LEAD_IN_MS = 90
+const PREVIEW_REVEAL_STAGGER_MS = 45
 const INTERACTIVE_PAINT_SETTLE_MS = 50
 const GENERATION_PAINT_TIMEOUT_MS = 120
 const GENERATION_JOB_TIMEOUT_MS = 5000
@@ -814,6 +814,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     this.stagedPreviews.set(node.id, { node, preview })
     this.setPendingStatus(node, 'Ready')
+    this.scheduleStagedPreviewReveal()
 
     return true
   }
@@ -828,25 +829,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     this.previewRevealPromise = (async () => {
       await delay(PREVIEW_REVEAL_LEAD_IN_MS)
-
-      if (
-        this.activeGeneration ||
-        this.localGenerations.size > 0 ||
-        this.generationCoordinator.length > 0
-      ) {
-        return
-      }
-
       await this.revealStagedPreviews()
     })().finally(() => {
       this.previewRevealPromise = null
 
-      if (
-        this.stagedPreviews.size > 0 &&
-        !this.activeGeneration &&
-        this.localGenerations.size === 0 &&
-        this.generationCoordinator.length === 0
-      ) {
+      if (this.stagedPreviews.size > 0) {
         this.scheduleStagedPreviewReveal()
       }
     })
@@ -862,14 +849,6 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     })
 
     for (const entry of staged) {
-      if (
-        this.activeGeneration ||
-        this.localGenerations.size > 0 ||
-        this.generationCoordinator.length > 0
-      ) {
-        return
-      }
-
       const { node, preview } = entry
 
       if (this.stagedPreviews.get(node.id)?.preview !== preview) {
