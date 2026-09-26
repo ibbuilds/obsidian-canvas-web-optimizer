@@ -1623,6 +1623,8 @@ export default class LocalBrowserRenderer {
   private visualSettleComplexCount = 0
   private visualSettleCommandFailures = 0
   private fastPathCaptures = 0
+  private stabilityFastPathCaptures = 0
+  private introSettleSkips = 0
   private visualStabilityChecks = 0
   private visualStabilityPasses = 0
   private visualStabilityExtraWaits = 0
@@ -1789,6 +1791,14 @@ export default class LocalBrowserRenderer {
     return this.fastPathCaptures
   }
 
+  get stabilityFastPathCaptureCount(): number {
+    return this.stabilityFastPathCaptures
+  }
+
+  get introSettleSkipCount(): number {
+    return this.introSettleSkips
+  }
+
   get visualStabilityCheckCount(): number {
     return this.visualStabilityChecks
   }
@@ -1869,6 +1879,8 @@ export default class LocalBrowserRenderer {
     this.visualSettleComplexCount = 0
     this.visualSettleCommandFailures = 0
     this.fastPathCaptures = 0
+    this.stabilityFastPathCaptures = 0
+    this.introSettleSkips = 0
     this.visualStabilityChecks = 0
     this.visualStabilityPasses = 0
     this.visualStabilityExtraWaits = 0
@@ -2052,6 +2064,8 @@ export default class LocalBrowserRenderer {
         let healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
         let pageWasSuspicious = healthRecord?.suspicious === true
         let usedFastPath = healthRecord?.readyForFastCapture === true
+        const naturalIntroCandidate =
+          healthRecord?.suspicious === true && this.shouldWaitForNaturalIntro(healthRecord)
         let settleRecord: {
           maxedOut?: unknown
           complex?: unknown
@@ -2059,8 +2073,20 @@ export default class LocalBrowserRenderer {
           title?: unknown
         } | null = null
 
+        if (!usedFastPath && !pageWasSuspicious) {
+          stage = 'visual stability'
+          const visuallyStable = await this.waitForVisualStability(runtime.connection, sessionId)
+
+          if (visuallyStable) {
+            usedFastPath = true
+            this.stabilityFastPathCaptures++
+          }
+        }
+
         if (usedFastPath) {
           this.fastPathCaptures++
+        } else if (naturalIntroCandidate) {
+          this.introSettleSkips++
         } else {
           stage = 'visual settle'
           const visualSettleStartedAt = performance.now()
@@ -2179,7 +2205,10 @@ export default class LocalBrowserRenderer {
           stage = 'capture health'
           healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
           pageWasSuspicious = pageWasSuspicious || healthRecord?.suspicious === true
-          usedFastPath = false
+
+          if (lateCleanupActions > 0 || guardActions > 0) {
+            usedFastPath = false
+          }
         }
 
         if (healthRecord?.suspicious === true && this.shouldWaitForNaturalIntro(healthRecord)) {
