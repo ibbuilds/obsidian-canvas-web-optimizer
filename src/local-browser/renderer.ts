@@ -67,7 +67,7 @@ function isUnsupportedScreenshotSpeedOption(error: unknown): boolean {
   )
 }
 
-const COOKIE_CLEANUP_SCRIPT = String.raw`
+const COOKIE_CLEANUP_SCRIPT = `
   (() => {
     const rejectSelectors = [
       '#onetrust-reject-all-handler',
@@ -201,7 +201,7 @@ const COOKIE_CLEANUP_SCRIPT = String.raw`
   })()
 `
 
-const VISUAL_SETTLE_SCRIPT = String.raw`
+const VISUAL_SETTLE_SCRIPT = `
   new Promise(resolve => {
     const startedAt = performance.now()
     let lastActivityAt = startedAt
