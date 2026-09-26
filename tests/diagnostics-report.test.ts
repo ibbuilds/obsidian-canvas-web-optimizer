@@ -50,6 +50,8 @@ test('diagnostics report preserves core runtime lines', () => {
       visualSettleComplexPages: 4,
       loaderBypasses: 2,
       cookieCleanupActions: 3,
+      captureRecoveries: 5,
+      unresolvedSuspiciousCaptures: 1,
       averageScreenshotMs: 50,
       screenshotOptimizationStatus: 'optimizeForSpeed enabled',
       lastFailureSummary: 'screenshot: https://example.com — capture failed'
@@ -79,5 +81,7 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Local browser complex settles: 4/)
   assert.match(report, /Local browser loader bypasses: 2/)
   assert.match(report, /Cookie cleanup actions: 3/)
+  assert.match(report, /Suspicious capture recoveries: 5/)
+  assert.match(report, /Unresolved suspicious captures: 1/)
   assert.match(report, /Last batch throughput: 2\.00 cards\/s/)
 })
