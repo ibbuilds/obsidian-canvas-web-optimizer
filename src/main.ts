@@ -170,6 +170,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.cancelGenerationPreload(true)
       this.abortLocalGenerations(true)
       this.abortActiveGeneration(true)
+      this.discardStagedPreview(node)
       this.releaseBackgroundExecution()
       this.removePendingPlaceholder(node)
     },
@@ -342,6 +343,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private invalidateThumbnailGeometry(node: LinkNode) {
+    this.discardStagedPreview(node)
+
     const state = this.getNodeState(node)
     const geometry = this.getThumbnailCaptureGeometry(node)
 
@@ -591,6 +594,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private applyPreparedNodeState(node: LinkNode, state: CanvasNodeState) {
     if (state.cached) {
+      if (this.pendingPreviewPresentation.has(node.id)) {
+        this.ensurePendingPlaceholder(node)
+        return
+      }
+
       this.removePendingPlaceholder(node)
 
       if (this.isNodeContentMounted(node)) {
@@ -941,6 +949,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handlePreviewError(node: LinkNode, preview: HTMLImageElement) {
+    this.discardStagedPreview(node)
+
     if (node._previewImageEl === preview) {
       preview.remove()
       node._previewImageEl = null
@@ -1591,7 +1601,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     node.updateNodeLabel(title)
 
     const previewStartedAt = performance.now()
-    const previewReady = await this.showPreviewOverFrame(node, false)
+    const previewReady = await this.stageGeneratedPreview(node)
     this.metrics.previewReadyTotalMs += performance.now() - previewStartedAt
     this.metrics.previewReadyCount++
 
@@ -1655,6 +1665,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     this.releaseBackgroundExecution()
+    this.scheduleStagedPreviewReveal()
   }
 
   private async observeLocalConcurrencyBatch(
@@ -1718,6 +1729,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handleNodeUrlChanged(node: LinkNode) {
+    this.discardStagedPreview(node)
+
     const state = this.getNodeState(node)
 
     state.evaluated = false
@@ -2286,7 +2299,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     node.updateNodeLabel(title)
 
     const previewStartedAt = performance.now()
-    const previewReady = await this.showPreviewOverFrame(node, false)
+    const previewReady = await this.stageGeneratedPreview(node)
     this.metrics.previewReadyTotalMs += performance.now() - previewStartedAt
     this.metrics.previewReadyCount++
 
