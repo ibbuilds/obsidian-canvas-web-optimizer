@@ -553,7 +553,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     this.sharedLocalRenders.set(key, shared)
 
-    void sharedRender.task.promise
+    void task.promise
       .then(
         () => {
           if (this.sharedLocalRenders.get(key) === shared) {
@@ -1591,7 +1591,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.finishLocalGeneration(generation, 'fallback')
     }, LOCAL_GENERATION_TIMEOUT_MS)
 
-    void task.promise
+    void sharedRender.task.promise
       .then(result => {
         if (!this.isCurrentLocalGeneration(generation)) return
 
