@@ -19,7 +19,6 @@ const VISUAL_SETTLE_QUIET_MS = 120
 const VISUAL_SETTLE_MAX_MS = 850
 const VISUAL_SETTLE_COMPLEX_MAX_MS = 1800
 const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 2400
-const VISUAL_SETTLE_POLL_MS = 50
 const CAPTURE_HEALTH_COMMAND_TIMEOUT_MS = 900
 const CAPTURE_RECOVERY_WAIT_MS = 280
 const IDLE_SHUTDOWN_MS = 2500
@@ -522,7 +521,7 @@ const CAPTURE_HEALTH_SCRIPT = `
 
     if (
       compactBodyText.length <= 320 &&
-      /(?:^|\s)(?:loading|please wait|initializing|preparing|entering)(?:\s|:|\.|[0-9]|%|$)/i.test(
+      /(?:^| )(?:loading|please wait|initializing|preparing|entering)(?: |:|[.]|[0-9]|%|$)/i.test(
         compactBodyText
       )
     ) {
@@ -594,7 +593,7 @@ const CAPTURE_HEALTH_SCRIPT = `
           add('hero-hidden', 4)
         }
 
-        const blurMatch = filter.match(/blur\(([-\d.]+)px\)/i)
+        const blurMatch = filter.match(/blur\(([-0-9.]+)px\)/i)
         const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
 
         if (Number.isFinite(blur) && blur >= 1.5) {
