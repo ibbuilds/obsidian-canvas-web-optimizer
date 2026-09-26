@@ -53,6 +53,9 @@ test('diagnostics report preserves core runtime lines', () => {
       cookieCleanupActions: 3,
       captureRecoveries: 5,
       unresolvedSuspiciousCaptures: 1,
+      introWaits: 3,
+      introNaturalResolutions: 2,
+      averageIntroWaitMs: 2750,
       averageScreenshotMs: 50,
       screenshotOptimizationStatus: 'optimizeForSpeed enabled',
       lastFailureSummary: 'screenshot: https://example.com — capture failed'
@@ -85,5 +88,8 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Cookie cleanup actions: 3/)
   assert.match(report, /Suspicious capture recoveries: 5/)
   assert.match(report, /Unresolved suspicious captures: 1/)
+  assert.match(report, /Long intro waits: 3/)
+  assert.match(report, /Long intros resolved naturally: 2/)
+  assert.match(report, /Average long intro wait: 2750 ms/)
   assert.match(report, /Last batch throughput: 2\.00 cards\/s/)
 })
