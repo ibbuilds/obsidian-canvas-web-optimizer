@@ -48,6 +48,7 @@ test('diagnostics report preserves core runtime lines', () => {
       averageVisualSettleMs: 620,
       visualSettleMaxOuts: 1,
       visualSettleComplexPages: 4,
+      visualSettleCommandFailures: 2,
       loaderBypasses: 2,
       cookieCleanupActions: 3,
       captureRecoveries: 5,
@@ -79,6 +80,7 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Local browser average paint ready: 10 ms/)
   assert.match(report, /Local browser average visual settle: 620 ms/)
   assert.match(report, /Local browser complex settles: 4/)
+  assert.match(report, /Local browser visual settle command failures: 2/)
   assert.match(report, /Local browser loader bypasses: 2/)
   assert.match(report, /Cookie cleanup actions: 3/)
   assert.match(report, /Suspicious capture recoveries: 5/)
