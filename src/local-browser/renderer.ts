@@ -13,6 +13,7 @@ const NAVIGATION_TIMEOUT_MS = 5000
 const DOCUMENT_READY_PROBE_INTERVAL_MS = 50
 const DOCUMENT_READY_PROBE_COMMAND_TIMEOUT_MS = 600
 const PAINT_READY_TIMEOUT_MS = 250
+const FAST_PATH_MIN_FROM_NAVIGATION_MS = 650
 const VISUAL_SETTLE_MIN_MS = 260
 const VISUAL_SETTLE_COMPLEX_MIN_MS = 520
 const VISUAL_SETTLE_QUIET_MS = 120
@@ -22,6 +23,9 @@ const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 2400
 const CAPTURE_HEALTH_COMMAND_TIMEOUT_MS = 900
 const CAPTURE_INTRO_MAX_FROM_NAVIGATION_MS = 5500
 const CAPTURE_INTRO_POLL_MS = 250
+const VISUAL_STABILITY_SAMPLE_MS = 220
+const VISUAL_STABILITY_RETRY_MS = 300
+const VISUAL_STABILITY_COMMAND_TIMEOUT_MS = 900
 const CAPTURE_RECOVERY_WAIT_MS = 280
 const IDLE_SHUTDOWN_MS = 2500
 const MIN_SCREENSHOT_BYTES = 512
@@ -55,6 +59,9 @@ type CaptureHealthRecord = {
   suspicious?: boolean
   reasons?: unknown
   score?: unknown
+  readyForFastCapture?: boolean
+  dynamicSurface?: boolean
+  title?: unknown
 }
 
 const NATURAL_INTRO_REASONS = new Set([
@@ -840,7 +847,7 @@ const VISUAL_SETTLE_SCRIPT = `
       const loaderVisible = getLoaderOverlays().length > 0
       const hiddenHeading = primaryHeadingHidden()
       const dynamicSurface = dynamicSurfaceVisible()
-      const complex = loaderVisible || hiddenHeading || dynamicSurface
+      const complex = loaderVisible || hiddenHeading
       const minimumWait = complex
         ? ${VISUAL_SETTLE_COMPLEX_MIN_MS}
         : ${VISUAL_SETTLE_MIN_MS}
@@ -848,12 +855,13 @@ const VISUAL_SETTLE_SCRIPT = `
         ? ${VISUAL_SETTLE_COMPLEX_MAX_MS}
         : ${VISUAL_SETTLE_MAX_MS}
       const fontsReady = !document.fonts || document.fonts.status !== 'loading'
+      const dynamicSurfaceReady = !dynamicSurface || visibleVideosReady()
       const ready =
         elapsed >= minimumWait &&
         quietFor >= ${VISUAL_SETTLE_QUIET_MS} &&
         fontsReady &&
         visibleImagesReady() &&
-        visibleVideosReady() &&
+        dynamicSurfaceReady &&
         !loaderVisible &&
         !hiddenHeading
 
@@ -1098,13 +1106,209 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
       add('content-mostly-hidden', 2)
     }
 
+    let visibleImagesReady = true
+
+    for (const image of document.images) {
+      if (!isVisible(image)) continue
+
+      if (!image.complete || image.naturalWidth <= 0) {
+        visibleImagesReady = false
+        break
+      }
+    }
+
+    let visibleVideosReady = true
+    let dynamicSurface = false
+
+    for (const video of document.querySelectorAll('video')) {
+      if (!isVisible(video)) continue
+
+      dynamicSurface = true
+
+      if (video.readyState < 2) {
+        visibleVideosReady = false
+      }
+    }
+
+    for (const canvas of document.querySelectorAll('canvas')) {
+      if (isVisible(canvas)) {
+        dynamicSurface = true
+        break
+      }
+    }
+
+    let significantAnimationRunning = false
+
+    if (typeof document.getAnimations === 'function') {
+      for (const animation of document.getAnimations()) {
+        if (animation.playState !== 'running') continue
+
+        try {
+          const timing = animation.effect?.getComputedTiming()
+
+          if (!timing || !Number.isFinite(timing.endTime) || timing.endTime <= 0) {
+            continue
+          }
+
+          const target = animation.effect?.target
+
+          if (!(target instanceof Element)) continue
+
+          const rect = target.getBoundingClientRect()
+          const areaRatio = Math.max(rect.width * rect.height, 0) / viewportArea
+          const isHeroAnimation =
+            target.matches('h1, [role="heading"][aria-level="1"]') ||
+            Boolean(target.closest('h1, [role="heading"][aria-level="1"]'))
+
+          if (isHeroAnimation || areaRatio >= 0.12) {
+            significantAnimationRunning = true
+            break
+          }
+        } catch {}
+      }
+    }
+
+    const fontsReady = !document.fonts || document.fonts.status !== 'loading'
+    const suspicious = score >= 3
+
     return {
-      suspicious: score >= 3,
+      suspicious,
       score,
       reasons,
       visibleTextLength,
-      bodyTextLength
+      bodyTextLength,
+      readyForFastCapture:
+        !suspicious &&
+        fontsReady &&
+        visibleImagesReady &&
+        visibleVideosReady &&
+        !significantAnimationRunning,
+      dynamicSurface,
+      title: document.title || location.hostname || location.href
     }
+  })()
+`
+
+const VISUAL_FINGERPRINT_SCRIPT = `
+  (() => {
+    let hash = 2166136261
+
+    const mix = value => {
+      const text = String(value)
+
+      for (let index = 0; index < text.length; index++) {
+        hash ^= text.charCodeAt(index)
+        hash = Math.imul(hash, 16777619)
+      }
+    }
+
+    const visible = element => {
+      if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false
+
+      const rect = element.getBoundingClientRect()
+
+      if (
+        rect.width <= 0 ||
+        rect.height <= 0 ||
+        rect.bottom <= 0 ||
+        rect.right <= 0 ||
+        rect.top >= innerHeight ||
+        rect.left >= innerWidth
+      ) {
+        return false
+      }
+
+      const style = getComputedStyle(element)
+
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.04
+      )
+    }
+
+    mix(innerWidth)
+    mix(innerHeight)
+    mix((document.body?.innerText ?? '').slice(0, 700))
+
+    const hero = document.querySelector('h1, [role="heading"][aria-level="1"], main')
+
+    if (hero instanceof HTMLElement || hero instanceof SVGElement) {
+      const rect = hero.getBoundingClientRect()
+      const style = getComputedStyle(hero)
+
+      mix(Math.round(rect.x))
+      mix(Math.round(rect.y))
+      mix(Math.round(rect.width))
+      mix(Math.round(rect.height))
+      mix(style.opacity)
+      mix(style.transform)
+      mix(style.filter)
+      mix(style.clipPath)
+    }
+
+    let imageCount = 0
+
+    for (const image of document.images) {
+      if (!visible(image)) continue
+
+      const rect = image.getBoundingClientRect()
+
+      mix(image.currentSrc || image.src)
+      mix(image.naturalWidth)
+      mix(image.naturalHeight)
+      mix(Math.round(rect.x))
+      mix(Math.round(rect.y))
+      mix(Math.round(rect.width))
+      mix(Math.round(rect.height))
+
+      imageCount++
+
+      if (imageCount >= 8) break
+    }
+
+    let canvasCount = 0
+
+    for (const canvas of document.querySelectorAll('canvas')) {
+      if (!(canvas instanceof HTMLCanvasElement) || !visible(canvas)) continue
+
+      mix(canvas.width)
+      mix(canvas.height)
+
+      try {
+        const sample = document.createElement('canvas')
+        sample.width = 12
+        sample.height = 12
+        const context = sample.getContext('2d', { willReadFrequently: true })
+
+        if (context) {
+          context.drawImage(canvas, 0, 0, 12, 12)
+          const pixels = context.getImageData(0, 0, 12, 12).data
+
+          for (let offset = 0; offset < pixels.length; offset += 16) {
+            mix(pixels[offset])
+            mix(pixels[offset + 1])
+            mix(pixels[offset + 2])
+            mix(pixels[offset + 3])
+          }
+        }
+      } catch {}
+
+      canvasCount++
+
+      if (canvasCount >= 2) break
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      if (!(video instanceof HTMLVideoElement) || !visible(video)) continue
+
+      mix(video.readyState)
+      mix(video.videoWidth)
+      mix(video.videoHeight)
+      mix(video.poster)
+    }
+
+    return hash >>> 0
   })()
 `
 
@@ -1417,6 +1621,10 @@ export default class LocalBrowserRenderer {
   private visualSettleMaxOuts = 0
   private visualSettleComplexCount = 0
   private visualSettleCommandFailures = 0
+  private fastPathCaptures = 0
+  private visualStabilityChecks = 0
+  private visualStabilityPasses = 0
+  private visualStabilityExtraWaits = 0
   private loaderBypasses = 0
   private cookieCleanupActions = 0
   private cookieGuardActions = 0
@@ -1572,6 +1780,22 @@ export default class LocalBrowserRenderer {
     return this.visualSettleCommandFailures
   }
 
+  get fastPathCaptureCount(): number {
+    return this.fastPathCaptures
+  }
+
+  get visualStabilityCheckCount(): number {
+    return this.visualStabilityChecks
+  }
+
+  get visualStabilityPassCount(): number {
+    return this.visualStabilityPasses
+  }
+
+  get visualStabilityExtraWaitCount(): number {
+    return this.visualStabilityExtraWaits
+  }
+
   get loaderBypassCount(): number {
     return this.loaderBypasses
   }
@@ -1638,6 +1862,10 @@ export default class LocalBrowserRenderer {
     this.visualSettleMaxOuts = 0
     this.visualSettleComplexCount = 0
     this.visualSettleCommandFailures = 0
+    this.fastPathCaptures = 0
+    this.visualStabilityChecks = 0
+    this.visualStabilityPasses = 0
+    this.visualStabilityExtraWaits = 0
     this.loaderBypasses = 0
     this.cookieCleanupActions = 0
     this.cookieGuardActions = 0
