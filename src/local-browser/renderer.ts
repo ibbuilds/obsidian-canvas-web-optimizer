@@ -19,6 +19,7 @@ const VISUAL_SETTLE_QUIET_MS = 120
 const VISUAL_SETTLE_MAX_MS = 850
 const VISUAL_SETTLE_COMPLEX_MAX_MS = 1800
 const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 2400
+const VISUAL_SETTLE_POLL_MS = 50
 const CAPTURE_HEALTH_COMMAND_TIMEOUT_MS = 900
 const CAPTURE_RECOVERY_WAIT_MS = 280
 const IDLE_SHUTDOWN_MS = 2500
@@ -414,17 +415,15 @@ const VISUAL_SETTLE_SCRIPT = `
         document.head?.appendChild(freezeStyle)
       }
 
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          resolve({
-            waitedMs: performance.now() - startedAt,
-            maxedOut,
-            complex,
-            loaderBypasses,
-            title: document.title || location.hostname || location.href
-          })
+      setTimeout(() => {
+        resolve({
+          waitedMs: performance.now() - startedAt,
+          maxedOut,
+          complex,
+          loaderBypasses,
+          title: document.title || location.hostname || location.href
         })
-      })
+      }, 50)
     }
 
     const tick = () => {
@@ -461,10 +460,10 @@ const VISUAL_SETTLE_SCRIPT = `
         return
       }
 
-      requestAnimationFrame(tick)
+      setTimeout(tick, 50)
     }
 
-    requestAnimationFrame(tick)
+    setTimeout(tick, 50)
   })
 `
 
@@ -518,11 +517,27 @@ const CAPTURE_HEALTH_SCRIPT = `
       }
     }
 
+    const bodyText = (document.body?.innerText ?? '').replaceAll('\n', ' ').trim()
+    const compactBodyText = bodyText.replace(/ +/g, ' ')
+
+    if (
+      compactBodyText.length <= 320 &&
+      /(?:^|\s)(?:loading|please wait|initializing|preparing|entering)(?:\s|:|\.|[0-9]|%|$)/i.test(
+        compactBodyText
+      )
+    ) {
+      add('loading-copy', 4)
+    }
+
+    if (/\b[0-9]{1,3}%\b/.test(compactBodyText) && compactBodyText.length <= 420) {
+      add('loading-percent', 4)
+    }
+
     const elements = document.body?.getElementsByTagName('*')
     const elementCount = elements?.length ?? 0
     let visibleTextLength = 0
 
-    for (let index = 0; index < Math.min(elementCount, 700); index++) {
+    for (let index = 0; index < Math.min(elementCount, 900); index++) {
       const element = elements?.item(index)
 
       if (!(element instanceof HTMLElement) || !isVisible(element)) continue
@@ -554,35 +569,58 @@ const CAPTURE_HEALTH_SCRIPT = `
     const heading = document.querySelector('h1, [role="heading"][aria-level="1"]')
 
     if (heading instanceof HTMLElement && heading.offsetTop < innerHeight * 1.5) {
-      const style = getComputedStyle(heading)
-      const opacity = Number.parseFloat(style.opacity || '1')
-      const filter = style.filter || ''
-      const rect = heading.getBoundingClientRect()
+      const heroNodes = [heading, ...heading.querySelectorAll('*')]
+      let parent = heading.parentElement
 
-      if (style.display === 'none' || style.visibility === 'hidden' || opacity <= 0.08) {
-        add('hero-hidden', 4)
+      for (let depth = 0; depth < 3 && parent; depth++) {
+        heroNodes.push(parent)
+        parent = parent.parentElement
       }
 
-      const blurMatch = filter.match(/blur\(([-\d.]+)px\)/i)
-      const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+      for (const node of heroNodes) {
+        if (!(node instanceof HTMLElement || node instanceof SVGElement)) continue
 
-      if (Number.isFinite(blur) && blur >= 1.5) {
-        add('hero-blurred', 3)
-      }
+        const style = getComputedStyle(node)
+        const opacity = Number.parseFloat(style.opacity || '1')
+        const filter = style.filter || ''
+        const clipPath = style.clipPath || ''
+        const rect = node.getBoundingClientRect()
 
-      if (style.transform && style.transform !== 'none') {
-        try {
-          const matrix = new DOMMatrixReadOnly(style.transform)
-          const scaleX = Math.hypot(matrix.a, matrix.b)
-          const scaleY = Math.hypot(matrix.c, matrix.d)
-          const translatedFar =
-            Math.abs(matrix.e) > Math.max(rect.width, 1) * 0.45 ||
-            Math.abs(matrix.f) > Math.max(rect.height, 1) * 0.9
+        if (
+          style.display === 'none' ||
+          style.visibility === 'hidden' ||
+          opacity <= 0.08
+        ) {
+          add('hero-hidden', 4)
+        }
 
-          if (scaleX < 0.72 || scaleY < 0.72 || translatedFar) {
-            add('hero-transform', 2)
-          }
-        } catch {}
+        const blurMatch = filter.match(/blur\(([-\d.]+)px\)/i)
+        const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+
+        if (Number.isFinite(blur) && blur >= 1.5) {
+          add('hero-blurred', 3)
+        }
+
+        if (clipPath && clipPath !== 'none' && clipPath !== 'inset(0px)') {
+          add('hero-clipped', 2)
+        }
+
+        if (style.transform && style.transform !== 'none') {
+          try {
+            const matrix = new DOMMatrixReadOnly(style.transform)
+            const scaleX = Math.hypot(matrix.a, matrix.b)
+            const scaleY = Math.hypot(matrix.c, matrix.d)
+            const translatedFar =
+              Math.abs(matrix.e) > Math.max(rect.width, 1) * 0.45 ||
+              Math.abs(matrix.f) > Math.max(rect.height, 1) * 0.9
+
+            if (scaleX < 0.72 || scaleY < 0.72 || translatedFar) {
+              add('hero-transform', 2)
+            }
+          } catch {}
+        }
+
+        if (score >= 4) break
       }
     }
 
@@ -624,6 +662,26 @@ const CAPTURE_HEALTH_SCRIPT = `
       if (hasControls || looksTransient) {
         add('large-overlay', 2)
         break
+      }
+    }
+
+    const centerElement = document.elementFromPoint(innerWidth / 2, innerHeight / 2)
+
+    if (centerElement instanceof HTMLElement) {
+      const style = getComputedStyle(centerElement)
+      const rect = centerElement.getBoundingClientRect()
+      const areaRatio = Math.max(rect.width * rect.height, 0) / viewportArea
+      const hasMainBehind = Boolean(
+        document.querySelector('main, [role="main"], #main, [data-main]')
+      )
+
+      if (
+        hasMainBehind &&
+        areaRatio >= 0.72 &&
+        (style.position === 'fixed' || style.position === 'absolute') &&
+        centerElement.tagName !== 'MAIN'
+      ) {
+        add('fullscreen-cover', 2)
       }
     }
 
