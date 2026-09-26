@@ -2690,6 +2690,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         visualSettleComplexPages: this.localBrowserRenderer?.visualSettleComplexPageCount ?? 0,
         visualSettleCommandFailures:
           this.localBrowserRenderer?.visualSettleCommandFailureCount ?? 0,
+        fastPathCaptures: this.localBrowserRenderer?.fastPathCaptureCount ?? 0,
+        visualStabilityChecks: this.localBrowserRenderer?.visualStabilityCheckCount ?? 0,
+        visualStabilityPasses: this.localBrowserRenderer?.visualStabilityPassCount ?? 0,
+        visualStabilityExtraWaits:
+          this.localBrowserRenderer?.visualStabilityExtraWaitCount ?? 0,
         loaderBypasses: this.localBrowserRenderer?.loaderBypassCount ?? 0,
         cookieCleanupActions: this.localBrowserRenderer?.cookieCleanupActionCount ?? 0,
         cookieGuardActions: this.localBrowserRenderer?.cookieGuardActionCount ?? 0,
