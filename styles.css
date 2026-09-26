@@ -67,7 +67,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 7px;
   padding: 16px;
   overflow: hidden;
   background: var(--background-primary);
@@ -76,57 +76,61 @@
   user-select: none;
 }
 
+.canvas-web-pending-preview::before {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border: 1.5px solid color-mix(in srgb, var(--text-muted) 22%, transparent);
+  border-top-color: color-mix(in srgb, var(--text-normal) 82%, transparent);
+  border-radius: 999px;
+  content: '';
+  opacity: 0.9;
+  transform: translateZ(0);
+  transform-origin: 50% 50%;
+  will-change: transform;
+  animation: canvas-web-loader-spin 760ms linear infinite;
+}
+
 .canvas-web-pending-host {
-  max-width: 100%;
+  max-width: min(100%, 220px);
   overflow: hidden;
   color: var(--text-normal);
-  font-size: 0.95em;
-  font-weight: 600;
+  font-size: 0.86em;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .canvas-web-pending-status {
-  font-size: 0.8em;
-}
-
-
-.canvas-web-pending-preview::before {
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(
-      110deg,
-      transparent 20%,
-      color-mix(in srgb, var(--text-muted) 8%, transparent) 45%,
-      transparent 70%
-    );
-  background-size: 220% 100%;
-  content: '';
-  opacity: 0.75;
-  animation: canvas-web-preview-shimmer 1.35s ease-in-out infinite;
-}
-
-.canvas-web-pending-preview > * {
-  position: relative;
-  z-index: 1;
+  min-height: 1.2em;
+  color: var(--text-muted);
+  font-size: 0.72em;
+  line-height: 1.2;
+  opacity: 0.72;
+  transition:
+    color 140ms ease-out,
+    opacity 140ms ease-out;
 }
 
 .canvas-web-pending-preview.canvas-web-preview-ready::before {
-  opacity: 0.22;
-  animation-duration: 2.2s;
+  opacity: 0.55;
 }
 
 .canvas-web-pending-preview.canvas-web-preview-ready .canvas-web-pending-status {
   color: var(--text-normal);
+  opacity: 0.82;
 }
 
-@keyframes canvas-web-preview-shimmer {
-  from {
-    background-position: 120% 0;
-  }
-
+@keyframes canvas-web-loader-spin {
   to {
-    background-position: -120% 0;
+    transform: translateZ(0) rotate(1turn);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-web-pending-preview::before {
+    animation-duration: 1.6s;
   }
 }
