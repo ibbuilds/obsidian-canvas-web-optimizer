@@ -1287,6 +1287,82 @@ export default class LocalBrowserRenderer {
           throw new Error('Local browser render cancelled')
         }
 
+        stage = 'capture health'
+        const healthResponse = await runtime.connection
+          .send<{
+            result?: {
+              value?: unknown
+            }
+          }>(
+            'Runtime.evaluate',
+            {
+              expression: CAPTURE_HEALTH_SCRIPT,
+              returnByValue: true
+            },
+            sessionId,
+            CAPTURE_HEALTH_COMMAND_TIMEOUT_MS
+          )
+          .catch(() => ({ result: { value: null } }))
+        const healthValue = healthResponse.result?.value
+        let healthRecord =
+          healthValue && typeof healthValue === 'object'
+            ? (healthValue as { suspicious?: unknown; reasons?: unknown })
+            : null
+
+        if (healthRecord?.suspicious === true) {
+          this.captureRecoveries++
+          stage = 'capture recovery'
+
+          await runtime.connection
+            .send(
+              'Runtime.evaluate',
+              {
+                expression: `(() => {
+                  let actions = 0;
+                  actions += ${COOKIE_CLEANUP_SCRIPT};
+                  actions += ${CAPTURE_RECOVERY_SCRIPT};
+                  return actions;
+                })()`,
+                returnByValue: true
+              },
+              sessionId,
+              CAPTURE_HEALTH_COMMAND_TIMEOUT_MS
+            )
+            .catch(() => null)
+
+          await delay(CAPTURE_RECOVERY_WAIT_MS)
+
+          const recoveredHealthResponse = await runtime.connection
+            .send<{
+              result?: {
+                value?: unknown
+              }
+            }>(
+              'Runtime.evaluate',
+              {
+                expression: CAPTURE_HEALTH_SCRIPT,
+                returnByValue: true
+              },
+              sessionId,
+              CAPTURE_HEALTH_COMMAND_TIMEOUT_MS
+            )
+            .catch(() => ({ result: { value: null } }))
+          const recoveredHealthValue = recoveredHealthResponse.result?.value
+
+          healthRecord =
+            recoveredHealthValue && typeof recoveredHealthValue === 'object'
+              ? (recoveredHealthValue as { suspicious?: unknown; reasons?: unknown })
+              : null
+
+          if (healthRecord?.suspicious === true) {
+            this.unresolvedSuspiciousCaptures++
+          }
+        }
+
+        if (cancelled) {
+          throw new Error('Local browser render cancelled')
+        }
+
         stage = 'screenshot'
         const screenshotStartedAt = performance.now()
         const screenshot = await this.captureScreenshot(
