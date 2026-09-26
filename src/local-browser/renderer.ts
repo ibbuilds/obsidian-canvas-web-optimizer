@@ -263,9 +263,13 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = String.raw\`
       }
 
       const points = [
-        [innerWidth / 2, innerHeight - 12],
-        [12, innerHeight - 12],
-        [innerWidth - 12, innerHeight - 12],
+        [innerWidth * 0.15, innerHeight - 12],
+        [innerWidth * 0.35, innerHeight - 12],
+        [innerWidth * 0.5, innerHeight - 12],
+        [innerWidth * 0.65, innerHeight - 12],
+        [innerWidth * 0.85, innerHeight - 12],
+        [innerWidth * 0.2, innerHeight * 0.72],
+        [innerWidth * 0.8, innerHeight * 0.72],
         [innerWidth / 2, innerHeight / 2]
       ]
 
