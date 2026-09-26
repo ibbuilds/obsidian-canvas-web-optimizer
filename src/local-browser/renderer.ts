@@ -219,12 +219,11 @@ const VISUAL_SETTLE_SCRIPT = `
       if (!(freezeStyle instanceof HTMLStyleElement)) {
         freezeStyle = document.createElement('style')
         freezeStyle.id = 'canvas-web-optimizer-capture-freeze'
-        freezeStyle.textContent = `
-          *, *::before, *::after {
-            transition-property: none !important;
-            caret-color: transparent !important;
-          }
-        `
+        freezeStyle.textContent =
+          '*, *::before, *::after {' +
+          'transition-property: none !important;' +
+          'caret-color: transparent !important;' +
+          '}'
         document.head?.appendChild(freezeStyle)
       }
 
@@ -241,8 +240,8 @@ const VISUAL_SETTLE_SCRIPT = `
       const quietFor = now - lastActivityAt
       const fontsReady = !document.fonts || document.fonts.status !== 'loading'
       const ready =
-        elapsed >= 450 &&
-        quietFor >= 220 &&
+        elapsed >= ${VISUAL_SETTLE_MIN_MS} &&
+        quietFor >= ${VISUAL_SETTLE_QUIET_MS} &&
         fontsReady &&
         visibleImagesReady() &&
         !finiteAnimationsRunning()
@@ -252,7 +251,7 @@ const VISUAL_SETTLE_SCRIPT = `
         return
       }
 
-      if (elapsed >= 1600) {
+      if (elapsed >= ${VISUAL_SETTLE_MAX_MS}) {
         finish(true)
         return
       }
