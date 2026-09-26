@@ -553,7 +553,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     this.sharedLocalRenders.set(key, shared)
 
-    void task.promise
+    void sharedRender.task.promise
       .then(
         () => {
           if (this.sharedLocalRenders.get(key) === shared) {
