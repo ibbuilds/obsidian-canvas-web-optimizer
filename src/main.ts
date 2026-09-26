@@ -2521,6 +2521,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         captureRecoveries: this.localBrowserRenderer?.captureRecoveryCount ?? 0,
         unresolvedSuspiciousCaptures:
           this.localBrowserRenderer?.unresolvedSuspiciousCaptureCount ?? 0,
+        introWaits: this.localBrowserRenderer?.introWaitCount ?? 0,
+        introNaturalResolutions: this.localBrowserRenderer?.introNaturalResolutionCount ?? 0,
+        averageIntroWaitMs: this.localBrowserRenderer?.averageIntroWaitMs ?? 0,
         averageScreenshotMs: this.localBrowserRenderer?.averageScreenshotMs ?? 0,
         screenshotOptimizationStatus:
           this.localBrowserRenderer?.screenshotOptimizationStatus ?? 'not initialized',
