@@ -705,6 +705,47 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
   }
 
+  private getPreviewResourceUrl(node: LinkNode): string {
+    const resourcePath = this.previewCache.resourcePath(node.id)
+    const cacheVersion = this.getNodeState(node).metadata?.capturedAt
+
+    if (!cacheVersion) return resourcePath
+
+    const separator = resourcePath.includes('?') ? '&' : '?'
+    return `${resourcePath}${separator}v=${cacheVersion}`
+  }
+
+  private createPreviewImage(
+    node: LinkNode,
+    enterHidden = false,
+    handleErrors = true
+  ): HTMLImageElement {
+    const preview = node.contentEl.doc.createElement('img')
+
+    preview.classList.add('link-thumbnail')
+
+    if (enterHidden) {
+      preview.classList.add('link-thumbnail-enter')
+    }
+
+    preview.alt = 'Webpage thumbnail'
+    preview.decoding = 'async'
+    preview.draggable = false
+    preview.src = this.getPreviewResourceUrl(node)
+
+    if (handleErrors) {
+      preview.addEventListener(
+        'error',
+        () => {
+          this.handlePreviewError(node, preview)
+        },
+        { once: true }
+      )
+    }
+
+    return preview
+  }
+
   private ensurePreview(
     node: LinkNode,
     force = false,
@@ -731,39 +772,134 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     current?.remove()
 
-    const preview = node.contentEl.doc.createElement('img')
-
-    preview.classList.add('link-thumbnail')
-
-    if (enterHidden) {
-      preview.classList.add('link-thumbnail-enter')
-    }
-
-    preview.alt = 'Webpage thumbnail'
-    preview.decoding = 'async'
-    preview.draggable = false
-    const resourcePath = this.previewCache.resourcePath(node.id)
-    const cacheVersion = this.getNodeState(node).metadata?.capturedAt
-
-    if (cacheVersion) {
-      const separator = resourcePath.includes('?') ? '&' : '?'
-      preview.src = `${resourcePath}${separator}v=${cacheVersion}`
-    } else {
-      preview.src = resourcePath
-    }
-
-    preview.addEventListener(
-      'error',
-      () => {
-        this.handlePreviewError(node, preview)
-      },
-      { once: true }
-    )
+    const preview = this.createPreviewImage(node, enterHidden)
 
     node.contentEl.append(preview)
     node._previewImageEl = preview
 
     return preview
+  }
+
+  private async stageGeneratedPreview(node: LinkNode): Promise<boolean> {
+    this.pendingPreviewPresentation.add(node.id)
+    this.setPendingStatus(node, 'Finalizing preview')
+
+    const preview = this.createPreviewImage(node, true, false)
+    const loaded = await waitForImage(preview)
+
+    if (!loaded || !this.getNodeState(node).cached) {
+      this.pendingPreviewPresentation.delete(node.id)
+      return false
+    }
+
+    this.stagedPreviews.set(node.id, { node, preview })
+    this.setPendingStatus(node, 'Ready')
+
+    return true
+  }
+
+  private discardStagedPreview(node: LinkNode) {
+    this.stagedPreviews.delete(node.id)
+    this.pendingPreviewPresentation.delete(node.id)
+  }
+
+  private scheduleStagedPreviewReveal() {
+    if (this.previewRevealPromise || this.stagedPreviews.size === 0) return
+
+    this.previewRevealPromise = (async () => {
+      await delay(PREVIEW_REVEAL_LEAD_IN_MS)
+
+      if (
+        this.activeGeneration ||
+        this.localGenerations.size > 0 ||
+        this.generationCoordinator.length > 0
+      ) {
+        return
+      }
+
+      await this.revealStagedPreviews()
+    })().finally(() => {
+      this.previewRevealPromise = null
+
+      if (
+        this.stagedPreviews.size > 0 &&
+        !this.activeGeneration &&
+        this.localGenerations.size === 0 &&
+        this.generationCoordinator.length === 0
+      ) {
+        this.scheduleStagedPreviewReveal()
+      }
+    })
+  }
+
+  private async revealStagedPreviews() {
+    const staged = [...this.stagedPreviews.values()].sort((left, right) => {
+      const vertical = (left.node.y ?? 0) - (right.node.y ?? 0)
+
+      if (Math.abs(vertical) > 1) return vertical
+
+      return (left.node.x ?? 0) - (right.node.x ?? 0)
+    })
+
+    for (const entry of staged) {
+      if (
+        this.activeGeneration ||
+        this.localGenerations.size > 0 ||
+        this.generationCoordinator.length > 0
+      ) {
+        return
+      }
+
+      const { node, preview } = entry
+
+      if (this.stagedPreviews.get(node.id)?.preview !== preview) {
+        continue
+      }
+
+      this.stagedPreviews.delete(node.id)
+
+      const state = this.getNodeState(node)
+
+      if (
+        !state.cached ||
+        !node.nodeEl?.isConnected ||
+        !this.isNodeContentMounted(node) ||
+        this.activeInteractiveNode === node
+      ) {
+        this.pendingPreviewPresentation.delete(node.id)
+        continue
+      }
+
+      const current = node._previewImageEl
+
+      if (current?.isConnected) {
+        current.remove()
+      }
+
+      preview.addEventListener(
+        'error',
+        () => {
+          this.handlePreviewError(node, preview)
+        },
+        { once: true }
+      )
+
+      this.removePendingPlaceholder(node)
+      node.contentEl.append(preview)
+      node._previewImageEl = preview
+      this.pendingPreviewPresentation.delete(node.id)
+
+      await new Promise<void>(resolve => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            preview.classList.remove('link-thumbnail-enter')
+            resolve()
+          })
+        })
+      })
+
+      await delay(PREVIEW_REVEAL_STAGGER_MS)
+    }
   }
 
   private async showPreviewOverFrame(node: LinkNode, animate = true): Promise<boolean> {
