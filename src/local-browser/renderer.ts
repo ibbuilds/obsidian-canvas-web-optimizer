@@ -64,10 +64,7 @@ const NATURAL_INTRO_REASONS = new Set([
   'loading-text',
   'hero-hidden',
   'hero-blurred',
-  'hero-clipped',
-  'hero-transform',
-  'fullscreen-cover',
-  'content-mostly-hidden'
+  'fullscreen-cover'
 ])
 
 function delay(ms: number): Promise<void> {
@@ -194,7 +191,7 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = `
       for (const element of [document.documentElement, document.body]) {
         if (!(element instanceof HTMLElement)) continue
 
-        element.style.setProperty('overflow', 'auto', 'important')
+        element.style.removeProperty('overflow')
         element.style.removeProperty('position')
         element.style.removeProperty('inset')
         element.style.removeProperty('height')
@@ -202,7 +199,7 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = `
     }
 
     const hide = element => {
-      if (!(element instanceof HTMLElement)) return false
+      if (!(element instanceof HTMLElement) || isProtectedRoot(element)) return false
 
       element.style.setProperty('display', 'none', 'important')
       element.style.setProperty('visibility', 'hidden', 'important')
@@ -239,18 +236,59 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = `
       return null
     }
 
-    const looksLikeConsent = element => {
-      if (!(element instanceof HTMLElement)) return false
+    const isProtectedRoot = element =>
+      element === document.documentElement ||
+      element === document.body ||
+      element.tagName === 'MAIN' ||
+      element.getAttribute('role') === 'main'
 
-      const text = (element.innerText || element.textContent || '').trim()
-      const semanticName = [
+    const semanticNameFor = element =>
+      [
         element.id,
         typeof element.className === 'string' ? element.className : '',
         element.getAttribute('aria-label') || '',
         element.getAttribute('data-testid') || ''
-      ].join(' ')
+      ]
+        .join(' ')
+        .toLowerCase()
 
-      return consentText.test(text) || /cookie|consent|gdpr|cmp/i.test(semanticName)
+    const consentControlText =
+      /accept|agree|allow|reject|decline|deny|preferences|settings|manage|necessary|essential/i
+
+    const looksLikeConsent = element => {
+      if (!(element instanceof HTMLElement) || isProtectedRoot(element)) return false
+
+      const semanticName = semanticNameFor(element)
+
+      if (/cookie|consent|gdpr|cmp/.test(semanticName)) {
+        return true
+      }
+
+      const text = (element.innerText || element.textContent || '').trim()
+
+      if (text.length === 0 || text.length > 2500 || !consentText.test(text)) {
+        return false
+      }
+
+      const controls = element.querySelectorAll('button, [role="button"], input, a')
+
+      for (const control of controls) {
+        const label = [
+          control.getAttribute('aria-label') || '',
+          control.getAttribute('title') || '',
+          control instanceof HTMLInputElement ? control.value : '',
+          control.textContent || ''
+        ]
+          .join(' ')
+          .replace(/ +/g, ' ')
+          .trim()
+
+        if (consentControlText.test(label)) {
+          return true
+        }
+      }
+
+      return false
     }
 
     const candidateRoots = () => {
@@ -258,7 +296,9 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = `
 
       for (const selector of candidateSelectors) {
         for (const element of document.querySelectorAll(selector)) {
-          roots.add(element)
+          if (element instanceof HTMLElement && !isProtectedRoot(element)) {
+            roots.add(element)
+          }
         }
       }
 
@@ -278,7 +318,26 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = `
           let current = hit
 
           for (let depth = 0; depth < 5 && current instanceof HTMLElement; depth++) {
-            roots.add(current)
+            if (isProtectedRoot(current)) break
+
+            const style = getComputedStyle(current)
+            const semanticName = semanticNameFor(current)
+            const roleDialog =
+              current.getAttribute('role') === 'dialog' ||
+              current.getAttribute('aria-modal') === 'true'
+
+            if (
+              roleDialog ||
+              /cookie|consent|gdpr|cmp/.test(semanticName) ||
+              style.position === 'fixed' ||
+              style.position === 'sticky'
+            ) {
+              if (looksLikeConsent(current)) {
+                roots.add(current)
+                break
+              }
+            }
+
             current = current.parentElement
           }
         }
@@ -326,17 +385,16 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = `
         if (!looksLikeConsent(root)) continue
 
         const style = getComputedStyle(root)
-        const rect = root.getBoundingClientRect()
-        const viewportArea = Math.max(innerWidth * innerHeight, 1)
-        const areaRatio = (rect.width * rect.height) / viewportArea
+        const semanticName = semanticNameFor(root)
         const roleDialog =
           root.getAttribute('role') === 'dialog' || root.getAttribute('aria-modal') === 'true'
+        const strongSemantic = /cookie|consent|gdpr|cmp/.test(semanticName)
 
         if (
           !roleDialog &&
+          !strongSemantic &&
           style.position !== 'fixed' &&
-          style.position !== 'sticky' &&
-          areaRatio < 0.025
+          style.position !== 'sticky'
         ) {
           continue
         }
@@ -348,10 +406,9 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = `
             reject.click()
             state.actions++
             state.clicks++
-            changed = true
-          } catch {
-            changed = hide(root) || changed
-          }
+          } catch {}
+
+          changed = hide(root) || changed
         } else {
           changed = hide(root) || changed
         }
@@ -952,7 +1009,7 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
         }
 
         if (clipPath && clipPath !== 'none' && clipPath !== 'inset(0px)') {
-          add('hero-clipped', 2)
+          add('hero-clipped', 1)
         }
 
         if (style.transform && style.transform !== 'none') {
@@ -965,7 +1022,7 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
               Math.abs(matrix.f) > Math.max(rect.height, 1) * 0.9
 
             if (scaleX < 0.72 || scaleY < 0.72 || translatedFar) {
-              add('hero-transform', 2)
+              add('hero-transform', 1)
             }
           } catch {}
         }
@@ -983,7 +1040,7 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
       const areaRatio = (rect.width * rect.height) / viewportArea
 
       if (areaRatio >= 0.18) {
-        add('large-dialog', 2)
+        add('large-dialog', 1)
         break
       }
     }
@@ -1042,7 +1099,7 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
     }
 
     return {
-      suspicious: score >= 2,
+      suspicious: score >= 3,
       score,
       reasons,
       visibleTextLength,
