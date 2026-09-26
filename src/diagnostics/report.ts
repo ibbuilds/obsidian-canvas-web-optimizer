@@ -25,6 +25,8 @@ export type LocalBrowserDiagnostics = {
   visualSettleComplexPages: number
   visualSettleCommandFailures: number
   fastPathCaptures: number
+  stabilityFastPathCaptures: number
+  introSettleSkips: number
   visualStabilityChecks: number
   visualStabilityPasses: number
   visualStabilityExtraWaits: number
@@ -134,6 +136,8 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser complex settles: ${local.visualSettleComplexPages}`,
     `Local browser visual settle command failures: ${local.visualSettleCommandFailures}`,
     `Local browser fast-path captures: ${local.fastPathCaptures}`,
+    `Stability fast-path captures: ${local.stabilityFastPathCaptures}`,
+    `Intro settle skips: ${local.introSettleSkips}`,
     `Visual stability checks/passes: ${local.visualStabilityChecks}/${local.visualStabilityPasses}`,
     `Visual stability extra waits: ${local.visualStabilityExtraWaits}`,
     `Local browser loader bypasses: ${local.loaderBypasses}`,
