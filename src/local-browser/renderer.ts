@@ -291,6 +291,12 @@ const VISUAL_SETTLE_SCRIPT = `
         '[class*="page-loader" i]',
         '[id="loader"]',
         '[class~="loader"]',
+        '[id*="splash" i]',
+        '[class*="splash" i]',
+        '[id*="curtain" i]',
+        '[class*="curtain" i]',
+        '[id*="transition" i]',
+        '[class*="transition" i]',
         '[aria-busy="true"]'
       ]
       const results = new Set()
@@ -306,7 +312,7 @@ const VISUAL_SETTLE_SCRIPT = `
           const text = element.textContent?.trim() ?? ''
           const name = (element.id + ' ' + element.className).toLowerCase()
           const looksLikeLoader =
-            /loader|preloader|loading/.test(name) ||
+            /loader|preloader|loading|splash|curtain|page-transition/.test(name) ||
             /loading|please wait|enter site/i.test(text)
 
           if (!looksLikeLoader) continue
@@ -440,7 +446,6 @@ const VISUAL_SETTLE_SCRIPT = `
         fontsReady &&
         visibleImagesReady() &&
         visibleVideosReady() &&
-        !finiteAnimationsRunning() &&
         !loaderVisible &&
         !hiddenHeading
 
@@ -803,6 +808,7 @@ export default class LocalBrowserRenderer {
                 ${LIGHT_THEME_SCRIPT};
                 scrollTo(0, 0);
                 dispatchEvent(new Event('resize'));
+                dispatchEvent(new Event('scroll'));
                 return ${COOKIE_CLEANUP_SCRIPT}
               })()`,
               returnByValue: true
@@ -897,8 +903,14 @@ export default class LocalBrowserRenderer {
 
         this.cookieCleanupActions += lateCleanupActions
 
+        const settleNeedsRepaint =
+          settleRecord?.maxedOut === true ||
+          (typeof settleRecord?.loaderBypasses === 'number' && settleRecord.loaderBypasses > 0)
+
         if (lateCleanupActions > 0) {
           await delay(180)
+        } else if (settleNeedsRepaint) {
+          await delay(120)
         }
 
         if (cancelled) {
