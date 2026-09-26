@@ -22,6 +22,7 @@ export type LocalBrowserDiagnostics = {
   averageVisualSettleMs: number
   visualSettleMaxOuts: number
   visualSettleComplexPages: number
+  visualSettleCommandFailures: number
   loaderBypasses: number
   cookieCleanupActions: number
   captureRecoveries: number
@@ -119,6 +120,7 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser average visual settle: ${local.averageVisualSettleMs} ms`,
     `Local browser visual settle max-outs: ${local.visualSettleMaxOuts}`,
     `Local browser complex settles: ${local.visualSettleComplexPages}`,
+    `Local browser visual settle command failures: ${local.visualSettleCommandFailures}`,
     `Local browser loader bypasses: ${local.loaderBypasses}`,
     `Cookie cleanup actions: ${local.cookieCleanupActions}`,
     `Suspicious capture recoveries: ${local.captureRecoveries}`,
