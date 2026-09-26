@@ -2372,6 +2372,69 @@ export default class LocalBrowserRenderer {
     return latestHealth
   }
 
+  private async evaluateVisualFingerprint(
+    connection: CdpConnection,
+    sessionId: string
+  ): Promise<number | null> {
+    const response = await connection
+      .send<{
+        result?: {
+          value?: unknown
+        }
+      }>(
+        'Runtime.evaluate',
+        {
+          expression: VISUAL_FINGERPRINT_SCRIPT,
+          returnByValue: true
+        },
+        sessionId,
+        VISUAL_STABILITY_COMMAND_TIMEOUT_MS
+      )
+      .catch(() => ({ result: { value: null } }))
+    const value = response.result?.value
+
+    return typeof value === 'number' ? value : null
+  }
+
+  private async waitForVisualStability(
+    connection: CdpConnection,
+    sessionId: string
+  ): Promise<boolean> {
+    this.visualStabilityChecks++
+
+    let previous = await this.evaluateVisualFingerprint(connection, sessionId)
+
+    if (previous === null) return false
+
+    await delay(VISUAL_STABILITY_SAMPLE_MS)
+
+    let current = await this.evaluateVisualFingerprint(connection, sessionId)
+
+    if (current !== null && current === previous) {
+      this.visualStabilityPasses++
+      return true
+    }
+
+    this.visualStabilityExtraWaits++
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      previous = current
+      await delay(VISUAL_STABILITY_RETRY_MS)
+      current = await this.evaluateVisualFingerprint(connection, sessionId)
+
+      if (current !== null && previous !== null && current === previous) {
+        this.visualStabilityPasses++
+        return true
+      }
+
+      if (attempt === 0) {
+        this.visualStabilityExtraWaits++
+      }
+    }
+
+    return false
+  }
+
   private waitForNavigationReadiness(
     domReady: Promise<'event'>,
     connection: CdpConnection,
