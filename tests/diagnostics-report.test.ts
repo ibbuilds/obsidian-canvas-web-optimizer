@@ -52,6 +52,8 @@ test('diagnostics report preserves core runtime lines', () => {
       visualSettleComplexPages: 4,
       visualSettleCommandFailures: 2,
       fastPathCaptures: 6,
+      stabilityFastPathCaptures: 3,
+      introSettleSkips: 2,
       visualStabilityChecks: 5,
       visualStabilityPasses: 4,
       visualStabilityExtraWaits: 2,
@@ -94,6 +96,8 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Local browser complex settles: 4/)
   assert.match(report, /Local browser visual settle command failures: 2/)
   assert.match(report, /Local browser fast-path captures: 6/)
+  assert.match(report, /Stability fast-path captures: 3/)
+  assert.match(report, /Intro settle skips: 2/)
   assert.match(report, /Visual stability checks\/passes: 5\/4/)
   assert.match(report, /Visual stability extra waits: 2/)
   assert.match(report, /Local browser loader bypasses: 2/)
