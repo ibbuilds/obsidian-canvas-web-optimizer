@@ -51,7 +51,6 @@ export type LocalBrowserRenderTask = {
   cancel: () => void
 }
 
-
 type CaptureHealthRecord = {
   suspicious?: boolean
   reasons?: unknown
