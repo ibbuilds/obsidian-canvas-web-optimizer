@@ -21,6 +21,8 @@ export type LocalBrowserDiagnostics = {
   averagePaintReadyMs: number
   averageVisualSettleMs: number
   visualSettleMaxOuts: number
+  visualSettleComplexPages: number
+  loaderBypasses: number
   cookieCleanupActions: number
   averageScreenshotMs: number
   screenshotOptimizationStatus: string
@@ -114,6 +116,8 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser average paint ready: ${local.averagePaintReadyMs} ms`,
     `Local browser average visual settle: ${local.averageVisualSettleMs} ms`,
     `Local browser visual settle max-outs: ${local.visualSettleMaxOuts}`,
+    `Local browser complex settles: ${local.visualSettleComplexPages}`,
+    `Local browser loader bypasses: ${local.loaderBypasses}`,
     `Cookie cleanup actions: ${local.cookieCleanupActions}`,
     `Local browser average screenshot: ${local.averageScreenshotMs} ms`,
     `Average local generation: ${summary.averageLocalGenerationMs} ms`,
