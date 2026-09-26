@@ -27,6 +27,9 @@ export type LocalBrowserDiagnostics = {
   cookieCleanupActions: number
   captureRecoveries: number
   unresolvedSuspiciousCaptures: number
+  introWaits: number
+  introNaturalResolutions: number
+  averageIntroWaitMs: number
   averageScreenshotMs: number
   screenshotOptimizationStatus: string
   lastFailureSummary: string
@@ -125,6 +128,9 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Cookie cleanup actions: ${local.cookieCleanupActions}`,
     `Suspicious capture recoveries: ${local.captureRecoveries}`,
     `Unresolved suspicious captures: ${local.unresolvedSuspiciousCaptures}`,
+    `Long intro waits: ${local.introWaits}`,
+    `Long intros resolved naturally: ${local.introNaturalResolutions}`,
+    `Average long intro wait: ${local.averageIntroWaitMs} ms`,
     `Local browser average screenshot: ${local.averageScreenshotMs} ms`,
     `Average local generation: ${summary.averageLocalGenerationMs} ms`,
     `Generation preload: ${context.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
