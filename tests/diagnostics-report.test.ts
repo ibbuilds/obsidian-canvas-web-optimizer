@@ -18,6 +18,8 @@ test('diagnostics report preserves core runtime lines', () => {
     liveWebviews: 1,
     generatingThumbnails: 0,
     queued: 0,
+    stagedPreviews: 4,
+    previewRevealActive: true,
     interactiveWebviewActive: true,
     interactiveLightPreferenceStatus: 'CDP applied',
     interactiveMatchMediaLight: true,
@@ -43,6 +45,18 @@ test('diagnostics report preserves core runtime lines', () => {
       averageNavigationMs: 600,
       readinessProbeWins: 2,
       averagePaintReadyMs: 10,
+      averageVisualSettleMs: 620,
+      visualSettleMaxOuts: 1,
+      visualSettleComplexPages: 4,
+      visualSettleCommandFailures: 2,
+      loaderBypasses: 2,
+      cookieCleanupActions: 3,
+      cookieGuardActions: 7,
+      captureRecoveries: 5,
+      unresolvedSuspiciousCaptures: 1,
+      introWaits: 3,
+      introNaturalResolutions: 2,
+      averageIntroWaitMs: 2750,
       averageScreenshotMs: 50,
       screenshotOptimizationStatus: 'optimizeForSpeed enabled',
       lastFailureSummary: 'screenshot: https://example.com — capture failed'
@@ -60,11 +74,24 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Mounted web cards: 12/)
   assert.match(report, /Generation engine: local browser sidecar \(5 workers\)/)
   assert.match(report, /Interactive matchMedia light: true/)
+  assert.match(report, /Staged previews: 4/)
+  assert.match(report, /Preview reveal: active/)
   assert.match(report, /Cache hits: 3/)
   assert.match(report, /Local browser screenshot mode: optimizeForSpeed enabled/)
   assert.match(report, /Local browser last render failure: screenshot:/)
   assert.match(report, /Local browser average setup: 40 ms/)
   assert.match(report, /Local browser readiness probe wins: 2/)
   assert.match(report, /Local browser average paint ready: 10 ms/)
+  assert.match(report, /Local browser average visual settle: 620 ms/)
+  assert.match(report, /Local browser complex settles: 4/)
+  assert.match(report, /Local browser visual settle command failures: 2/)
+  assert.match(report, /Local browser loader bypasses: 2/)
+  assert.match(report, /Cookie cleanup actions: 3/)
+  assert.match(report, /Cookie guard actions: 7/)
+  assert.match(report, /Suspicious capture recoveries: 5/)
+  assert.match(report, /Unresolved suspicious captures: 1/)
+  assert.match(report, /Long intro waits: 3/)
+  assert.match(report, /Long intros resolved naturally: 2/)
+  assert.match(report, /Average long intro wait: 2750 ms/)
   assert.match(report, /Last batch throughput: 2\.00 cards\/s/)
 })

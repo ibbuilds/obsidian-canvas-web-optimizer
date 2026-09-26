@@ -47,12 +47,14 @@ const THUMBNAIL_MAX_VIEWPORT_LONG_EDGE = 4096
 
 const PREVIEW_TRANSITION_FALLBACK_MS = 250
 const PREVIEW_LOAD_TIMEOUT_MS = 1000
+const PREVIEW_REVEAL_LEAD_IN_MS = 90
+const PREVIEW_REVEAL_STAGGER_MS = 45
 const INTERACTIVE_PAINT_SETTLE_MS = 50
 const GENERATION_PAINT_TIMEOUT_MS = 120
 const GENERATION_JOB_TIMEOUT_MS = 5000
 const GENERATION_MAX_ATTEMPTS = 3
 const GENERATION_RETRY_DELAY_MS = 150
-const LOCAL_GENERATION_TIMEOUT_MS = 7500
+const LOCAL_GENERATION_TIMEOUT_MS = 9500
 const PRECONNECT_LOOKAHEAD_ORIGINS = 6
 const HTTP_WARM_LOOKAHEAD_URLS = 2
 
@@ -69,6 +71,11 @@ type ThumbnailImage = {
   isEmpty(): boolean
   resize(options: { width: number; height: number; quality: 'good' }): ThumbnailImage
   toJPEG(quality: number): ArrayBuffer
+}
+
+type StagedPreview = {
+  node: LinkNode
+  preview: HTMLImageElement
 }
 
 type PluginData = {
@@ -153,6 +160,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private localBatchTuning: LocalBatchTuningSnapshot | null = null
   private concurrencyTuner: AdaptiveConcurrencyTuner | null = null
   private canvasUtilitiesBatchDepth = 0
+  private readonly stagedPreviews = new Map<string, StagedPreview>()
+  private readonly pendingPreviewPresentation = new Set<string>()
+  private previewRevealPromise: Promise<void> | null = null
 
   private readonly interactiveActivation = new InteractiveActivationController<LinkNode>({
     isAvailable: node => this.isNodeContentMounted(node),
@@ -160,6 +170,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.cancelGenerationPreload(true)
       this.abortLocalGenerations(true)
       this.abortActiveGeneration(true)
+      this.discardStagedPreview(node)
       this.releaseBackgroundExecution()
       this.removePendingPlaceholder(node)
     },
@@ -264,6 +275,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.log('Unloading plugin')
 
     this.canvasUtilitiesBatchDepth = 0
+    this.stagedPreviews.clear()
+    this.pendingPreviewPresentation.clear()
+    this.previewRevealPromise = null
     this.generationCoordinator.clear()
     this.interactiveActivation.cancelPending()
     this.abortActiveGeneration(false)
@@ -329,6 +343,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private invalidateThumbnailGeometry(node: LinkNode) {
+    this.discardStagedPreview(node)
+
     const state = this.getNodeState(node)
     const geometry = this.getThumbnailCaptureGeometry(node)
 
@@ -578,6 +594,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
   private applyPreparedNodeState(node: LinkNode, state: CanvasNodeState) {
     if (state.cached) {
+      if (this.pendingPreviewPresentation.has(node.id)) {
+        this.ensurePendingPlaceholder(node)
+        return
+      }
+
       this.removePendingPlaceholder(node)
 
       if (this.isNodeContentMounted(node)) {
@@ -690,6 +711,49 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     if (status) {
       status.textContent = message
     }
+
+    placeholder?.classList.toggle('canvas-web-preview-ready', message === 'Ready')
+  }
+
+  private getPreviewResourceUrl(node: LinkNode): string {
+    const resourcePath = this.previewCache.resourcePath(node.id)
+    const cacheVersion = this.getNodeState(node).metadata?.capturedAt
+
+    if (!cacheVersion) return resourcePath
+
+    const separator = resourcePath.includes('?') ? '&' : '?'
+    return `${resourcePath}${separator}v=${cacheVersion}`
+  }
+
+  private createPreviewImage(
+    node: LinkNode,
+    enterHidden = false,
+    handleErrors = true
+  ): HTMLImageElement {
+    const preview = node.contentEl.doc.createElement('img')
+
+    preview.classList.add('link-thumbnail')
+
+    if (enterHidden) {
+      preview.classList.add('link-thumbnail-enter')
+    }
+
+    preview.alt = 'Webpage thumbnail'
+    preview.decoding = 'async'
+    preview.draggable = false
+    preview.src = this.getPreviewResourceUrl(node)
+
+    if (handleErrors) {
+      preview.addEventListener(
+        'error',
+        () => {
+          this.handlePreviewError(node, preview)
+        },
+        { once: true }
+      )
+    }
+
+    return preview
   }
 
   private ensurePreview(
@@ -718,39 +782,137 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     current?.remove()
 
-    const preview = node.contentEl.doc.createElement('img')
-
-    preview.classList.add('link-thumbnail')
-
-    if (enterHidden) {
-      preview.classList.add('link-thumbnail-enter')
-    }
-
-    preview.alt = 'Webpage thumbnail'
-    preview.decoding = 'async'
-    preview.draggable = false
-    const resourcePath = this.previewCache.resourcePath(node.id)
-    const cacheVersion = this.getNodeState(node).metadata?.capturedAt
-
-    if (cacheVersion) {
-      const separator = resourcePath.includes('?') ? '&' : '?'
-      preview.src = `${resourcePath}${separator}v=${cacheVersion}`
-    } else {
-      preview.src = resourcePath
-    }
-
-    preview.addEventListener(
-      'error',
-      () => {
-        this.handlePreviewError(node, preview)
-      },
-      { once: true }
-    )
+    const preview = this.createPreviewImage(node, enterHidden)
 
     node.contentEl.append(preview)
     node._previewImageEl = preview
 
     return preview
+  }
+
+  private async stageGeneratedPreview(node: LinkNode): Promise<boolean> {
+    this.pendingPreviewPresentation.add(node.id)
+    this.setPendingStatus(node, 'Finalizing preview')
+
+    const preview = this.createPreviewImage(node, true, false)
+    const loaded = await waitForImage(preview)
+
+    if (!loaded || !this.getNodeState(node).cached) {
+      this.pendingPreviewPresentation.delete(node.id)
+
+      if (!loaded) {
+        const state = this.getNodeState(node)
+
+        state.evaluated = true
+        state.cached = false
+        state.metadata = null
+        await this.previewCache.remove(node.id)
+      }
+
+      return false
+    }
+
+    this.stagedPreviews.set(node.id, { node, preview })
+    this.setPendingStatus(node, 'Ready')
+    this.scheduleStagedPreviewReveal()
+
+    return true
+  }
+
+  private discardStagedPreview(node: LinkNode) {
+    this.stagedPreviews.delete(node.id)
+    this.pendingPreviewPresentation.delete(node.id)
+  }
+
+  private scheduleStagedPreviewReveal() {
+    if (this.previewRevealPromise || this.stagedPreviews.size === 0) return
+
+    this.previewRevealPromise = (async () => {
+      await delay(PREVIEW_REVEAL_LEAD_IN_MS)
+      await this.revealStagedPreviews()
+    })().finally(() => {
+      this.previewRevealPromise = null
+
+      if (this.stagedPreviews.size > 0) {
+        this.scheduleStagedPreviewReveal()
+      }
+    })
+  }
+
+  private async revealStagedPreviews() {
+    const staged = [...this.stagedPreviews.values()].sort((left, right) => {
+      const vertical = (left.node.y ?? 0) - (right.node.y ?? 0)
+
+      if (Math.abs(vertical) > 1) return vertical
+
+      return (left.node.x ?? 0) - (right.node.x ?? 0)
+    })
+
+    for (const entry of staged) {
+      const { node, preview } = entry
+
+      if (this.stagedPreviews.get(node.id)?.preview !== preview) {
+        continue
+      }
+
+      this.stagedPreviews.delete(node.id)
+
+      const state = this.getNodeState(node)
+
+      if (
+        !state.cached ||
+        !node.nodeEl?.isConnected ||
+        !this.isNodeContentMounted(node) ||
+        this.activeInteractiveNode === node
+      ) {
+        this.pendingPreviewPresentation.delete(node.id)
+        continue
+      }
+
+      const current = node._previewImageEl
+
+      if (current?.isConnected) {
+        current.remove()
+      }
+
+      preview.addEventListener(
+        'error',
+        () => {
+          this.handlePreviewError(node, preview)
+        },
+        { once: true }
+      )
+
+      const placeholder = this.nodeRuntime.getPlaceholder(node)
+
+      node.contentEl.append(preview)
+      node._previewImageEl = preview
+
+      await new Promise<void>(resolve => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            preview.classList.remove('link-thumbnail-enter')
+            resolve()
+          })
+        })
+      })
+
+      await new Promise<void>(resolve => {
+        afterTransition(preview, resolve)
+      })
+
+      if (placeholder?.isConnected) {
+        placeholder.remove()
+      }
+
+      if (this.nodeRuntime.getPlaceholder(node) === placeholder) {
+        this.nodeRuntime.clearPlaceholder(node)
+      }
+
+      this.pendingPreviewPresentation.delete(node.id)
+
+      await delay(PREVIEW_REVEAL_STAGGER_MS)
+    }
   }
 
   private async showPreviewOverFrame(node: LinkNode, animate = true): Promise<boolean> {
@@ -792,6 +954,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handlePreviewError(node: LinkNode, preview: HTMLImageElement) {
+    this.discardStagedPreview(node)
+
     if (node._previewImageEl === preview) {
       preview.remove()
       node._previewImageEl = null
@@ -1442,7 +1606,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     node.updateNodeLabel(title)
 
     const previewStartedAt = performance.now()
-    const previewReady = await this.showPreviewOverFrame(node, false)
+    const previewReady = await this.stageGeneratedPreview(node)
     this.metrics.previewReadyTotalMs += performance.now() - previewStartedAt
     this.metrics.previewReadyCount++
 
@@ -1506,6 +1670,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     }
 
     this.releaseBackgroundExecution()
+    this.scheduleStagedPreviewReveal()
   }
 
   private async observeLocalConcurrencyBatch(
@@ -1569,6 +1734,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   }
 
   private handleNodeUrlChanged(node: LinkNode) {
+    this.discardStagedPreview(node)
+
     const state = this.getNodeState(node)
 
     state.evaluated = false
@@ -2137,7 +2304,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     node.updateNodeLabel(title)
 
     const previewStartedAt = performance.now()
-    const previewReady = await this.showPreviewOverFrame(node, false)
+    const previewReady = await this.stageGeneratedPreview(node)
     this.metrics.previewReadyTotalMs += performance.now() - previewStartedAt
     this.metrics.previewReadyCount++
 
@@ -2329,6 +2496,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       liveWebviews,
       generatingThumbnails: (this.activeGeneration ? 1 : 0) + this.localGenerations.size,
       queued: this.generationCoordinator.length,
+      stagedPreviews: this.stagedPreviews.size,
+      previewRevealActive: this.previewRevealPromise !== null,
       interactiveWebviewActive: Boolean(this.activeInteractiveNode),
       interactiveLightPreferenceStatus: this.interactiveLightPreferenceStatus,
       interactiveMatchMediaLight: this.interactiveMatchMediaLight,
@@ -2356,6 +2525,20 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         averageNavigationMs: this.localBrowserRenderer?.averageNavigationMs ?? 0,
         readinessProbeWins: this.localBrowserRenderer?.readinessProbeWinCount ?? 0,
         averagePaintReadyMs: this.localBrowserRenderer?.averagePaintReadyMs ?? 0,
+        averageVisualSettleMs: this.localBrowserRenderer?.averageVisualSettleMs ?? 0,
+        visualSettleMaxOuts: this.localBrowserRenderer?.visualSettleMaxOutCount ?? 0,
+        visualSettleComplexPages: this.localBrowserRenderer?.visualSettleComplexPageCount ?? 0,
+        visualSettleCommandFailures:
+          this.localBrowserRenderer?.visualSettleCommandFailureCount ?? 0,
+        loaderBypasses: this.localBrowserRenderer?.loaderBypassCount ?? 0,
+        cookieCleanupActions: this.localBrowserRenderer?.cookieCleanupActionCount ?? 0,
+        cookieGuardActions: this.localBrowserRenderer?.cookieGuardActionCount ?? 0,
+        captureRecoveries: this.localBrowserRenderer?.captureRecoveryCount ?? 0,
+        unresolvedSuspiciousCaptures:
+          this.localBrowserRenderer?.unresolvedSuspiciousCaptureCount ?? 0,
+        introWaits: this.localBrowserRenderer?.introWaitCount ?? 0,
+        introNaturalResolutions: this.localBrowserRenderer?.introNaturalResolutionCount ?? 0,
+        averageIntroWaitMs: this.localBrowserRenderer?.averageIntroWaitMs ?? 0,
         averageScreenshotMs: this.localBrowserRenderer?.averageScreenshotMs ?? 0,
         screenshotOptimizationStatus:
           this.localBrowserRenderer?.screenshotOptimizationStatus ?? 'not initialized',

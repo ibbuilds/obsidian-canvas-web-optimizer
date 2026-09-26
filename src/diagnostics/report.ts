@@ -19,6 +19,18 @@ export type LocalBrowserDiagnostics = {
   averageNavigationMs: number
   readinessProbeWins: number
   averagePaintReadyMs: number
+  averageVisualSettleMs: number
+  visualSettleMaxOuts: number
+  visualSettleComplexPages: number
+  visualSettleCommandFailures: number
+  loaderBypasses: number
+  cookieCleanupActions: number
+  cookieGuardActions: number
+  captureRecoveries: number
+  unresolvedSuspiciousCaptures: number
+  introWaits: number
+  introNaturalResolutions: number
+  averageIntroWaitMs: number
   averageScreenshotMs: number
   screenshotOptimizationStatus: string
   lastFailureSummary: string
@@ -39,6 +51,8 @@ export type DiagnosticsReportContext = {
   liveWebviews: number
   generatingThumbnails: number
   queued: number
+  stagedPreviews: number
+  previewRevealActive: boolean
   interactiveWebviewActive: boolean
   interactiveLightPreferenceStatus: string
   interactiveMatchMediaLight: boolean | null
@@ -63,6 +77,8 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Live webviews: ${context.liveWebviews}`,
     `Generating thumbnails: ${context.generatingThumbnails}`,
     `Queued: ${context.queued}`,
+    `Staged previews: ${context.stagedPreviews}`,
+    `Preview reveal: ${context.previewRevealActive ? 'active' : 'idle'}`,
     `Generation engine: ${generationEngine}`,
     `Local browser: ${local.status}`,
     `Local browser unavailable reason: ${local.unavailableReason}`,
@@ -105,6 +121,18 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser average navigation: ${local.averageNavigationMs} ms`,
     `Local browser readiness probe wins: ${local.readinessProbeWins}`,
     `Local browser average paint ready: ${local.averagePaintReadyMs} ms`,
+    `Local browser average visual settle: ${local.averageVisualSettleMs} ms`,
+    `Local browser visual settle max-outs: ${local.visualSettleMaxOuts}`,
+    `Local browser complex settles: ${local.visualSettleComplexPages}`,
+    `Local browser visual settle command failures: ${local.visualSettleCommandFailures}`,
+    `Local browser loader bypasses: ${local.loaderBypasses}`,
+    `Cookie cleanup actions: ${local.cookieCleanupActions}`,
+    `Cookie guard actions: ${local.cookieGuardActions}`,
+    `Suspicious capture recoveries: ${local.captureRecoveries}`,
+    `Unresolved suspicious captures: ${local.unresolvedSuspiciousCaptures}`,
+    `Long intro waits: ${local.introWaits}`,
+    `Long intros resolved naturally: ${local.introNaturalResolutions}`,
+    `Average long intro wait: ${local.averageIntroWaitMs} ms`,
     `Local browser average screenshot: ${local.averageScreenshotMs} ms`,
     `Average local generation: ${summary.averageLocalGenerationMs} ms`,
     `Generation preload: ${context.generationPreloadDisabled ? 'disabled' : 'enabled'}`,
