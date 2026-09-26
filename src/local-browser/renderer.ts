@@ -63,7 +63,6 @@ function isUnsupportedScreenshotSpeedOption(error: unknown): boolean {
   )
 }
 
-
 const COOKIE_CLEANUP_SCRIPT = `
   (() => {
     const rejectSelectors = [
@@ -690,8 +689,7 @@ export default class LocalBrowserRenderer {
           safeCaptureScale
         )
         const screenshotMs = performance.now() - screenshotStartedAt
-        const settledTitle =
-          typeof settleRecord?.title === 'string' ? settleRecord.title : ''
+        const settledTitle = typeof settleRecord?.title === 'string' ? settleRecord.title : ''
 
         const bytes = Buffer.from(screenshot.data, 'base64')
 
