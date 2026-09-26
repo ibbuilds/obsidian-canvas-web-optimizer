@@ -2501,6 +2501,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       liveWebviews,
       generatingThumbnails: (this.activeGeneration ? 1 : 0) + this.localGenerations.size,
       queued: this.generationCoordinator.length,
+      stagedPreviews: this.stagedPreviews.size,
+      previewRevealActive: this.previewRevealPromise !== null,
       interactiveWebviewActive: Boolean(this.activeInteractiveNode),
       interactiveLightPreferenceStatus: this.interactiveLightPreferenceStatus,
       interactiveMatchMediaLight: this.interactiveMatchMediaLight,
@@ -2528,6 +2530,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         averageNavigationMs: this.localBrowserRenderer?.averageNavigationMs ?? 0,
         readinessProbeWins: this.localBrowserRenderer?.readinessProbeWinCount ?? 0,
         averagePaintReadyMs: this.localBrowserRenderer?.averagePaintReadyMs ?? 0,
+        averageVisualSettleMs: this.localBrowserRenderer?.averageVisualSettleMs ?? 0,
+        visualSettleMaxOuts: this.localBrowserRenderer?.visualSettleMaxOutCount ?? 0,
+        cookieCleanupActions: this.localBrowserRenderer?.cookieCleanupActionCount ?? 0,
         averageScreenshotMs: this.localBrowserRenderer?.averageScreenshotMs ?? 0,
         screenshotOptimizationStatus:
           this.localBrowserRenderer?.screenshotOptimizationStatus ?? 'not initialized',
