@@ -88,7 +88,7 @@ function isUnsupportedScreenshotSpeedOption(error: unknown): boolean {
   )
 }
 
-const COOKIE_GUARD_BOOTSTRAP_SCRIPT = String.raw\`
+const COOKIE_GUARD_BOOTSTRAP_SCRIPT = String.raw`
   (() => {
     if (globalThis.__canvasWebOptimizerCookieGuard) return
 
@@ -376,9 +376,7 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = String.raw\`
       observer = new MutationObserver(scheduleClean)
       observer.observe(document.documentElement, {
         subtree: true,
-        childList: true,
-        attributes: true,
-        attributeFilter: ['class', 'id', 'style', 'role', 'aria-modal', 'aria-label']
+        childList: true
       })
     }
 
@@ -388,7 +386,7 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = String.raw\`
       clean()
 
       if (!interval) {
-        interval = setInterval(clean, 180)
+        interval = setInterval(clean, 220)
 
         setTimeout(() => {
           clearInterval(interval)
@@ -416,7 +414,7 @@ const COOKIE_GUARD_BOOTSTRAP_SCRIPT = String.raw\`
     addEventListener('DOMContentLoaded', start, { once: true })
     addEventListener('load', clean, { once: true })
   })()
-\`
+`
 
 const COOKIE_GUARD_STATUS_SCRIPT =
   'globalThis.__canvasWebOptimizerCookieGuard?.actions ?? 0'
