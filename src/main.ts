@@ -1363,6 +1363,18 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    if (
+      !this.isThumbnailViewportCurrent(
+        node,
+        generation.viewportWidth,
+        generation.viewportHeight
+      )
+    ) {
+      generation.requeue = true
+      this.finishLocalGeneration(generation, 'stale')
+      return
+    }
+
     const captureStartedAt = performance.now()
 
     try {
@@ -1385,6 +1397,18 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       return
     }
 
+    if (
+      !this.isThumbnailViewportCurrent(
+        node,
+        generation.viewportWidth,
+        generation.viewportHeight
+      )
+    ) {
+      generation.requeue = true
+      this.finishLocalGeneration(generation, 'stale')
+      return
+    }
+
     let title = result.title
 
     if (!title) {
@@ -1399,7 +1423,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       version: CACHE_METADATA_VERSION,
       url: generation.url,
       title,
-      capturedAt: Date.now()
+      capturedAt: Date.now(),
+      viewportWidth: generation.viewportWidth,
+      viewportHeight: generation.viewportHeight
     }
 
     try {
