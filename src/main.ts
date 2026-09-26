@@ -1563,12 +1563,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private startLocalGeneration(job: GenerationJob, renderer: LocalBrowserRenderer) {
     const { node } = job
     const geometry = this.getThumbnailCaptureGeometry(node)
-    const task = renderer.render(
-      node.url,
-      geometry.viewportWidth,
-      geometry.viewportHeight,
-      geometry.captureScale
-    )
+    const sharedRender = this.acquireSharedLocalRender(node, renderer)
     const generation: LocalConcurrentGeneration = {
       job,
       node,
@@ -1577,7 +1572,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       viewportWidth: geometry.viewportWidth,
       viewportHeight: geometry.viewportHeight,
       captureScale: geometry.captureScale,
-      task,
+      renderKey: sharedRender.key,
+      task: sharedRender.task,
       requeue: false,
       completed: false,
       timeoutId: 0
@@ -1624,9 +1620,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.localGenerations.delete(generation.node.id)
     }
 
-    if (outcome !== 'success') {
-      generation.task.cancel()
-    }
+    this.releaseSharedLocalRender(generation.renderKey, outcome !== 'success')
 
     const { job, node } = generation
 
