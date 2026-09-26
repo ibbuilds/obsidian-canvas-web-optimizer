@@ -1614,6 +1614,7 @@ export default class LocalBrowserRenderer {
   private setupCount = 0
   private navigationTotalMs = 0
   private navigationReadinessProbeWins = 0
+  private navigationSoftReadinessWins = 0
   private paintReadyTotalMs = 0
   private paintReadyCount = 0
   private visualSettleTotalMs = 0
@@ -1758,6 +1759,10 @@ export default class LocalBrowserRenderer {
     return this.navigationReadinessProbeWins
   }
 
+  get softReadinessWinCount(): number {
+    return this.navigationSoftReadinessWins
+  }
+
   get averagePaintReadyMs(): number {
     return this.paintReadyCount > 0 ? Math.round(this.paintReadyTotalMs / this.paintReadyCount) : 0
   }
@@ -1855,6 +1860,7 @@ export default class LocalBrowserRenderer {
     this.setupCount = 0
     this.navigationTotalMs = 0
     this.navigationReadinessProbeWins = 0
+    this.navigationSoftReadinessWins = 0
     this.paintReadyTotalMs = 0
     this.paintReadyCount = 0
     this.visualSettleTotalMs = 0
@@ -2518,6 +2524,52 @@ export default class LocalBrowserRenderer {
       }
 
       await delay(Math.min(DOCUMENT_READY_PROBE_INTERVAL_MS, remainingMs))
+    }
+
+    try {
+      const response = await connection.send<{
+        result?: {
+          value?: unknown
+        }
+      }>(
+        'Runtime.evaluate',
+        {
+          expression: `(() => ({
+            href: location.href,
+            hasDocumentElement: Boolean(document.documentElement),
+            hasBody: Boolean(document.body),
+            bodyChildren: document.body?.childElementCount ?? 0,
+            bodyTextLength: (document.body?.innerText ?? '').trim().length
+          }))()`,
+          returnByValue: true
+        },
+        sessionId,
+        DOCUMENT_READY_PROBE_COMMAND_TIMEOUT_MS
+      )
+      const value = response.result?.value
+
+      if (
+        value &&
+        typeof value === 'object' &&
+        'href' in value &&
+        typeof value.href === 'string' &&
+        value.href !== 'about:blank' &&
+        'hasDocumentElement' in value &&
+        value.hasDocumentElement === true &&
+        'hasBody' in value &&
+        value.hasBody === true &&
+        (('bodyChildren' in value &&
+          typeof value.bodyChildren === 'number' &&
+          value.bodyChildren > 0) ||
+          ('bodyTextLength' in value &&
+            typeof value.bodyTextLength === 'number' &&
+            value.bodyTextLength > 0))
+      ) {
+        this.navigationSoftReadinessWins++
+        return
+      }
+    } catch (error) {
+      lastError = toError(error)
     }
 
     throw new Error(
