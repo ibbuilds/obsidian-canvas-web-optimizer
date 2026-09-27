@@ -21,6 +21,7 @@ test('diagnostics report preserves core runtime lines', () => {
     stagedPreviews: 4,
     previewRevealActive: true,
     sharedLocalRenderHits: 3,
+    sharedLocalRenderStarts: 9,
     interactiveWebviewActive: true,
     interactiveLightPreferenceStatus: 'CDP applied',
     interactiveMatchMediaLight: true,
@@ -36,6 +37,9 @@ test('diagnostics report preserves core runtime lines', () => {
       concurrencySummary: '5 active / 8 hardware cap / 8 heuristic',
       tuningStatus: 'saved best 5',
       activeTasks: 0,
+      introWaitActive: 2,
+      introWaitYields: 5,
+      maxActiveTasks: 7,
       renderFailures: 0,
       launches: 1,
       closes: 1,
@@ -85,6 +89,10 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Staged previews: 4/)
   assert.match(report, /Preview reveal: active/)
   assert.match(report, /Shared local render hits: 3/)
+  assert.match(report, /Shared local render starts: 9/)
+  assert.match(report, /Local browser active intro waits: 2/)
+  assert.match(report, /Local browser intro wait yields: 5/)
+  assert.match(report, /Local browser max active tasks: 7/)
   assert.match(report, /Cache hits: 3/)
   assert.match(report, /Local browser screenshot mode: optimizeForSpeed enabled/)
   assert.match(report, /Local browser last render failure: screenshot:/)
