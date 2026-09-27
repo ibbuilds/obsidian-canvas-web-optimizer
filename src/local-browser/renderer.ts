@@ -36,6 +36,7 @@ const MIN_SCREENSHOT_BYTES = 512
 const LOCAL_BROWSER_MAX_WORKERS = 8
 const LOCAL_BROWSER_MEMORY_RESERVE_GIB = 2
 const LOCAL_BROWSER_MEMORY_PER_WORKER_GIB = 1.75
+const INTRO_WAIT_EXTRA_WORKERS = 1
 
 type BrowserRuntime = {
   process: ChildProcess
@@ -1899,7 +1900,9 @@ export default class LocalBrowserRenderer {
   }
 
   get schedulingLimit(): number {
-    return Math.min(this.maxPoolSize, this.poolSize + this.introWaitActive)
+    const yieldedCapacity = Math.min(this.introWaitActive, INTRO_WAIT_EXTRA_WORKERS)
+
+    return Math.min(this.maxPoolSize, this.poolSize + yieldedCapacity)
   }
 
   get canStartRender(): boolean {
