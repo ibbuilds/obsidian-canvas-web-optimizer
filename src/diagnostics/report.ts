@@ -9,6 +9,9 @@ export type LocalBrowserDiagnostics = {
   concurrencySummary: string
   tuningStatus: string
   activeTasks: number
+  introWaitActive: number
+  introWaitYields: number
+  maxActiveTasks: number
   renderFailures: number
   launches: number
   closes: number
@@ -61,6 +64,7 @@ export type DiagnosticsReportContext = {
   stagedPreviews: number
   previewRevealActive: boolean
   sharedLocalRenderHits: number
+  sharedLocalRenderStarts: number
   interactiveWebviewActive: boolean
   interactiveLightPreferenceStatus: string
   interactiveMatchMediaLight: boolean | null
@@ -88,6 +92,7 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Staged previews: ${context.stagedPreviews}`,
     `Preview reveal: ${context.previewRevealActive ? 'active' : 'idle'}`,
     `Shared local render hits: ${context.sharedLocalRenderHits}`,
+    `Shared local render starts: ${context.sharedLocalRenderStarts}`,
     `Generation engine: ${generationEngine}`,
     `Local browser: ${local.status}`,
     `Local browser unavailable reason: ${local.unavailableReason}`,
@@ -95,6 +100,9 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser concurrency: ${local.concurrencySummary}`,
     `Local browser tuning: ${local.tuningStatus}`,
     `Local browser active tasks: ${local.activeTasks}`,
+    `Local browser active intro waits: ${local.introWaitActive}`,
+    `Local browser intro wait yields: ${local.introWaitYields}`,
+    `Local browser max active tasks: ${local.maxActiveTasks}`,
     `Interactive webview: ${context.interactiveWebviewActive ? 1 : 0}`,
     `Interactive light preference: ${context.interactiveLightPreferenceStatus}`,
     `Interactive matchMedia light: ${
