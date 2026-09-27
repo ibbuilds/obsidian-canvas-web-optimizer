@@ -1601,6 +1601,9 @@ export default class LocalBrowserRenderer {
   private disposed = false
   private disabledReason: string | null = null
   private activeTasks = 0
+  private introWaitActive = 0
+  private introWaitYields = 0
+  private maxObservedActiveTasks = 0
   private readonly activeCancels = new Set<() => void>()
 
   private browserLaunches = 0
@@ -1663,6 +1666,8 @@ export default class LocalBrowserRenderer {
 
   private targetPoolSize = this.heuristicPoolSize
 
+  constructor(private readonly onCapacityAvailable: () => void = () => {}) {}
+
   get available(): boolean {
     return !this.disposed && this.disabledReason === null && this.candidates.length > 0
   }
@@ -1691,6 +1696,26 @@ export default class LocalBrowserRenderer {
 
   get activeCount(): number {
     return this.activeTasks
+  }
+
+  get introWaitActiveCount(): number {
+    return this.introWaitActive
+  }
+
+  get introWaitYieldCount(): number {
+    return this.introWaitYields
+  }
+
+  get maxActiveTaskCount(): number {
+    return this.maxObservedActiveTasks
+  }
+
+  get schedulingLimit(): number {
+    return Math.min(this.maxPoolSize, this.poolSize + this.introWaitActive)
+  }
+
+  get canStartRender(): boolean {
+    return this.activeTasks < this.schedulingLimit
   }
 
   get poolSize(): number {
@@ -1892,6 +1917,8 @@ export default class LocalBrowserRenderer {
     this.introWaits = 0
     this.introNaturalResolutions = 0
     this.introWaitTotalMs = 0
+    this.introWaitYields = 0
+    this.maxObservedActiveTasks = this.activeTasks
     this.screenshotTotalMs = 0
     this.lastRenderFailure = 'none'
   }
@@ -1918,6 +1945,7 @@ export default class LocalBrowserRenderer {
     this.activeCancels.add(cancel)
     this.cancelIdleShutdown()
     this.activeTasks++
+    this.maxObservedActiveTasks = Math.max(this.maxObservedActiveTasks, this.activeTasks)
 
     const promise = (async (): Promise<LocalBrowserRenderResult> => {
       try {
@@ -2214,14 +2242,26 @@ export default class LocalBrowserRenderer {
         if (healthRecord?.suspicious === true && this.shouldWaitForNaturalIntro(healthRecord)) {
           stage = 'intro wait'
           this.introWaits++
+          this.introWaitActive++
+          this.introWaitYields++
           const introWaitStartedAt = performance.now()
 
-          healthRecord = await this.waitForNaturalIntro(
-            runtime.connection,
-            sessionId,
-            navigationStartedAt,
-            healthRecord
-          )
+          queueMicrotask(() => {
+            if (!cancelled) {
+              this.onCapacityAvailable()
+            }
+          })
+
+          try {
+            healthRecord = await this.waitForNaturalIntro(
+              runtime.connection,
+              sessionId,
+              navigationStartedAt,
+              healthRecord
+            )
+          } finally {
+            this.introWaitActive = Math.max(0, this.introWaitActive - 1)
+          }
 
           this.introWaitTotalMs += performance.now() - introWaitStartedAt
 
