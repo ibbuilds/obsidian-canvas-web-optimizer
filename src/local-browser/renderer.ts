@@ -2572,6 +2572,104 @@ export default class LocalBrowserRenderer {
     return latestHealth
   }
 
+  private async captureCompositedProbe(
+    connection: CdpConnection,
+    sessionId: string,
+    viewportWidth: number,
+    viewportHeight: number
+  ): Promise<CompositedProbe | null> {
+    const longEdge = Math.max(viewportWidth, viewportHeight)
+    const scale = Math.min(1, COMPOSITED_PROBE_MAX_LONG_EDGE / Math.max(1, longEdge))
+    const outputWidth = Math.max(1, Math.round(viewportWidth * scale))
+    const outputHeight = Math.max(1, Math.round(viewportHeight * scale))
+
+    const screenshot = await connection
+      .send<{ data: string }>(
+        'Page.captureScreenshot',
+        {
+          format: 'jpeg',
+          quality: COMPOSITED_PROBE_QUALITY,
+          fromSurface: true,
+          captureBeyondViewport: false,
+          clip: {
+            x: 0,
+            y: 0,
+            width: viewportWidth,
+            height: viewportHeight,
+            scale
+          }
+        },
+        sessionId,
+        VISUAL_STABILITY_COMMAND_TIMEOUT_MS
+      )
+      .catch(() => null)
+
+    if (!screenshot?.data) return null
+
+    const bytes = Buffer.from(screenshot.data, 'base64')
+    let hash = 2166136261
+
+    for (let index = 0; index < bytes.length; index += 3) {
+      hash ^= bytes[index] ?? 0
+      hash = Math.imul(hash, 16777619)
+    }
+
+    return {
+      hash: hash >>> 0,
+      byteLength: bytes.byteLength,
+      minUsefulBytes: Math.max(900, Math.round(outputWidth * outputHeight * 0.05))
+    }
+  }
+
+  private async waitForCompositedReadiness(
+    connection: CdpConnection,
+    sessionId: string,
+    viewportWidth: number,
+    viewportHeight: number
+  ): Promise<boolean> {
+    this.compositedProbeChecks++
+
+    const deadline = performance.now() + COMPOSITED_PROBE_MAX_WAIT_MS
+    let previous: CompositedProbe | null = null
+    let richChangingFrames = 0
+
+    while (performance.now() < deadline) {
+      const current = await this.captureCompositedProbe(
+        connection,
+        sessionId,
+        viewportWidth,
+        viewportHeight
+      )
+
+      if (current) {
+        const rich = current.byteLength >= current.minUsefulBytes
+
+        if (previous) {
+          if (rich && current.hash === previous.hash) {
+            this.compositedProbePasses++
+            return true
+          }
+
+          if (rich && current.hash !== previous.hash) {
+            richChangingFrames++
+          }
+
+          if (richChangingFrames >= 2) {
+            this.compositedProbePasses++
+            return true
+          }
+        }
+
+        previous = current
+      }
+
+      await delay(COMPOSITED_PROBE_SAMPLE_MS)
+    }
+
+    this.compositedProbeTimeouts++
+    return false
+  }
+
   private async evaluateVisualFingerprint(
     connection: CdpConnection,
     sessionId: string
