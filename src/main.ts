@@ -83,7 +83,7 @@ type StagedPreview = {
 
 type SharedLocalRender = {
   task: LocalBrowserRenderTask
-  consumers: number
+  consumerNodeIds: Set<string>
   status: 'pending' | 'success' | 'failure'
 }
 
@@ -537,8 +537,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const existing = this.sharedLocalRenders.get(key)
 
     if (existing && existing.status !== 'failure') {
-      existing.consumers++
-      this.sharedLocalRenderHits++
+      if (!existing.consumerNodeIds.has(node.id)) {
+        existing.consumerNodeIds.add(node.id)
+        this.sharedLocalRenderHits++
+      }
+
       return { key, task: existing.task }
     }
 
@@ -552,7 +555,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     )
     const shared: SharedLocalRender = {
       task,
-      consumers: 1,
+      consumerNodeIds: new Set([node.id]),
       status: 'pending'
     }
 
@@ -569,7 +572,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
           if (this.sharedLocalRenders.get(key) === shared) {
             shared.status = 'failure'
 
-            if (shared.consumers === 0) {
+            if (shared.consumerNodeIds.size === 0) {
               this.sharedLocalRenders.delete(key)
             }
           }
@@ -580,14 +583,18 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     return { key, task }
   }
 
-  private releaseSharedLocalRender(renderKey: string, cancelIfUnused: boolean) {
+  private releaseSharedLocalRender(
+    renderKey: string,
+    nodeId: string,
+    cancelIfUnused: boolean
+  ) {
     const shared = this.sharedLocalRenders.get(renderKey)
 
     if (!shared) return
 
-    shared.consumers = Math.max(0, shared.consumers - 1)
+    shared.consumerNodeIds.delete(nodeId)
 
-    if (shared.consumers > 0) return
+    if (shared.consumerNodeIds.size > 0) return
 
     if (shared.status === 'pending' && cancelIfUnused) {
       shared.task.cancel()
@@ -1628,7 +1635,11 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.localGenerations.delete(generation.node.id)
     }
 
-    this.releaseSharedLocalRender(generation.renderKey, outcome !== 'success')
+    this.releaseSharedLocalRender(
+      generation.renderKey,
+      generation.node.id,
+      outcome !== 'success'
+    )
 
     const { job, node } = generation
 
