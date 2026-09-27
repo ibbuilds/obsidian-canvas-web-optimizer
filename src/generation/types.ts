@@ -34,6 +34,7 @@ export type LocalConcurrentGeneration = {
 
 export type LocalBatchTuningSnapshot = ConcurrencyCounters & {
   concurrency: number
+  introWaitYieldCount: number
 }
 
 export type ActiveGeneration = {
