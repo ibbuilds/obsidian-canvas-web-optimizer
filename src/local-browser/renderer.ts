@@ -87,6 +87,7 @@ const NATURAL_INTRO_REASONS = new Set([
   'prominent-text-hidden',
   'prominent-text-blurred',
   'prominent-text-transform',
+  'prominent-text-animation',
   'fullscreen-cover',
   'content-mostly-hidden',
   'dynamic-surface-not-ready'
@@ -1034,7 +1035,7 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
       const nodes = [candidate]
       let parent = candidate.parentElement
 
-      for (let depth = 0; depth < 3 && parent; depth++) {
+      for (let depth = 0; depth < 6 && parent; depth++) {
         nodes.push(parent)
         parent = parent.parentElement
       }
@@ -1042,7 +1043,8 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
       for (const node of nodes) {
         const style = getComputedStyle(node)
         const opacity = Number.parseFloat(style.opacity || '1')
-        const blurMatch = (style.filter || '').match(/blur\(([-0-9.]+)px\)/i)
+        const visualFilter = [style.filter || '', style.backdropFilter || ''].join(' ')
+        const blurMatch = visualFilter.match(/blur\(([-0-9.]+)px\)/i)
         const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
         const rect = node.getBoundingClientRect()
 
@@ -1070,6 +1072,25 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
               break
             }
           } catch {}
+        }
+
+        if (typeof node.getAnimations === 'function') {
+          const hasFiniteEntranceAnimation = node.getAnimations().some(animation => {
+            if (animation.playState !== 'running') return false
+
+            try {
+              const timing = animation.effect?.getComputedTiming()
+
+              return Boolean(timing && Number.isFinite(timing.endTime) && timing.endTime > 0)
+            } catch {
+              return false
+            }
+          })
+
+          if (hasFiniteEntranceAnimation) {
+            add('prominent-text-animation', 4)
+            break
+          }
         }
       }
 
@@ -1550,6 +1571,7 @@ const CAPTURE_RECOVERY_SCRIPT = String.raw`
           element.style.setProperty('visibility', 'visible', 'important')
           element.style.setProperty('opacity', '1', 'important')
           element.style.setProperty('filter', 'none', 'important')
+          element.style.setProperty('backdrop-filter', 'none', 'important')
           element.style.setProperty('transform', 'none', 'important')
           element.style.setProperty('clip-path', 'none', 'important')
           element.style.setProperty('mask-image', 'none', 'important')
@@ -1597,7 +1619,8 @@ const CAPTURE_RECOVERY_SCRIPT = String.raw`
 
         const style = getComputedStyle(element)
         const opacity = Number.parseFloat(style.opacity || '1')
-        const blurMatch = (style.filter || '').match(/blur\(([-0-9.]+)px\)/i)
+        const visualFilter = [style.filter || '', style.backdropFilter || ''].join(' ')
+        const blurMatch = visualFilter.match(/blur\(([-0-9.]+)px\)/i)
         const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
         const elementRect = element.getBoundingClientRect()
         let transformLooksTransient = false
@@ -2731,7 +2754,7 @@ export default class LocalBrowserRenderer {
     return {
       hash: hash >>> 0,
       byteLength: bytes.byteLength,
-      minUsefulBytes: Math.max(900, Math.round(outputWidth * outputHeight * 0.05))
+      minUsefulBytes: Math.max(1600, Math.round(outputWidth * outputHeight * 0.11))
     }
   }
 
@@ -2746,6 +2769,7 @@ export default class LocalBrowserRenderer {
     const deadline = performance.now() + COMPOSITED_PROBE_MAX_WAIT_MS
     let previous: CompositedProbe | null = null
     let richChangingFrames = 0
+    let richFrames = 0
 
     while (performance.now() < deadline) {
       const current = await this.captureCompositedProbe(
@@ -2758,8 +2782,14 @@ export default class LocalBrowserRenderer {
       if (current) {
         const rich = current.byteLength >= current.minUsefulBytes
 
+        if (rich) {
+          richFrames++
+        } else {
+          richFrames = 0
+        }
+
         if (previous) {
-          if (rich && current.hash === previous.hash) {
+          if (rich && richFrames >= 2 && current.hash === previous.hash) {
             this.compositedProbePasses++
             return true
           }
@@ -2768,7 +2798,7 @@ export default class LocalBrowserRenderer {
             richChangingFrames++
           }
 
-          if (richChangingFrames >= 2) {
+          if (richFrames >= 3 && richChangingFrames >= 2) {
             this.compositedProbePasses++
             return true
           }
