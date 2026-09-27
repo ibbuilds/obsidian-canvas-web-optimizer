@@ -583,11 +583,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     return { key, task }
   }
 
-  private releaseSharedLocalRender(
-    renderKey: string,
-    nodeId: string,
-    cancelIfUnused: boolean
-  ) {
+  private releaseSharedLocalRender(renderKey: string, nodeId: string, cancelIfUnused: boolean) {
     const shared = this.sharedLocalRenders.get(renderKey)
 
     if (!shared) return
@@ -1635,11 +1631,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.localGenerations.delete(generation.node.id)
     }
 
-    this.releaseSharedLocalRender(
-      generation.renderKey,
-      generation.node.id,
-      outcome !== 'success'
-    )
+    this.releaseSharedLocalRender(generation.renderKey, generation.node.id, outcome !== 'success')
 
     const { job, node } = generation
 
