@@ -2311,9 +2311,7 @@ export default class LocalBrowserRenderer {
           if (compositedReady && !pageWasSuspicious) {
             usedFastPath = true
           } else if (!compositedReady) {
-            const reasons = Array.isArray(healthRecord.reasons)
-              ? [...healthRecord.reasons]
-              : []
+            const reasons = Array.isArray(healthRecord.reasons) ? [...healthRecord.reasons] : []
 
             if (!reasons.includes('dynamic-surface-not-ready')) {
               reasons.push('dynamic-surface-not-ready')
