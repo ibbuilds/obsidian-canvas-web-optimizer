@@ -2217,6 +2217,41 @@ export default class LocalBrowserRenderer {
         let healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
         let pageWasSuspicious = healthRecord?.suspicious === true
         let usedFastPath = healthRecord?.readyForFastCapture === true
+
+        if (
+          healthRecord?.dynamicSurface === true &&
+          (healthRecord.dynamicSurfaceAreaRatio ?? 0) >= 0.12
+        ) {
+          stage = 'composited readiness'
+          const compositedReady = await this.waitForCompositedReadiness(
+            runtime.connection,
+            sessionId,
+            safeWidth,
+            safeHeight
+          )
+
+          if (compositedReady && !pageWasSuspicious) {
+            usedFastPath = true
+          } else if (!compositedReady) {
+            const reasons = Array.isArray(healthRecord.reasons)
+              ? [...healthRecord.reasons]
+              : []
+
+            if (!reasons.includes('dynamic-surface-not-ready')) {
+              reasons.push('dynamic-surface-not-ready')
+            }
+
+            healthRecord = {
+              ...healthRecord,
+              suspicious: true,
+              readyForFastCapture: false,
+              reasons
+            }
+            pageWasSuspicious = true
+            usedFastPath = false
+          }
+        }
+
         const naturalIntroCandidate =
           healthRecord?.suspicious === true && this.shouldWaitForNaturalIntro(healthRecord)
         let settleRecord: {
