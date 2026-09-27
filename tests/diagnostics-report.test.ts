@@ -61,6 +61,9 @@ test('diagnostics report preserves core runtime lines', () => {
       visualStabilityChecks: 5,
       visualStabilityPasses: 4,
       visualStabilityExtraWaits: 2,
+      compositedProbeChecks: 3,
+      compositedProbePasses: 2,
+      compositedProbeTimeouts: 1,
       loaderBypasses: 2,
       cookieCleanupActions: 3,
       cookieGuardActions: 7,
@@ -108,6 +111,7 @@ test('diagnostics report preserves core runtime lines', () => {
   assert.match(report, /Intro settle skips: 2/)
   assert.match(report, /Visual stability checks\/passes: 5\/4/)
   assert.match(report, /Visual stability extra waits: 2/)
+  assert.match(report, /Composited probes checks\/passes\/timeouts: 3\/2\/1/)
   assert.match(report, /Local browser loader bypasses: 2/)
   assert.match(report, /Cookie cleanup actions: 3/)
   assert.match(report, /Cookie guard actions: 7/)
