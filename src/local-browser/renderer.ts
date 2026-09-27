@@ -26,6 +26,10 @@ const CAPTURE_INTRO_POLL_MS = 250
 const VISUAL_STABILITY_SAMPLE_MS = 220
 const VISUAL_STABILITY_RETRY_MS = 300
 const VISUAL_STABILITY_COMMAND_TIMEOUT_MS = 900
+const COMPOSITED_PROBE_MAX_LONG_EDGE = 160
+const COMPOSITED_PROBE_QUALITY = 32
+const COMPOSITED_PROBE_SAMPLE_MS = 260
+const COMPOSITED_PROBE_MAX_WAIT_MS = 2400
 const CAPTURE_RECOVERY_WAIT_MS = 280
 const IDLE_SHUTDOWN_MS = 2500
 const MIN_SCREENSHOT_BYTES = 512
@@ -61,7 +65,15 @@ type CaptureHealthRecord = {
   score?: unknown
   readyForFastCapture?: boolean
   dynamicSurface?: boolean
+  dynamicSurfaceAreaRatio?: number
+  visibleTextLength?: number
   title?: unknown
+}
+
+type CompositedProbe = {
+  hash: number
+  byteLength: number
+  minUsefulBytes: number
 }
 
 const NATURAL_INTRO_REASONS = new Set([
@@ -71,7 +83,12 @@ const NATURAL_INTRO_REASONS = new Set([
   'loading-text',
   'hero-hidden',
   'hero-blurred',
-  'fullscreen-cover'
+  'prominent-text-hidden',
+  'prominent-text-blurred',
+  'prominent-text-transform',
+  'fullscreen-cover',
+  'content-mostly-hidden',
+  'dynamic-surface-not-ready'
 ])
 
 function delay(ms: number): Promise<void> {
@@ -981,6 +998,83 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
       }
     }
 
+    const prominentCandidates = []
+    const prominentElements = document.body?.querySelectorAll('h1, h2, h3, p, div, span') ?? []
+
+    for (let index = 0; index < Math.min(prominentElements.length, 700); index++) {
+      const element = prominentElements[index]
+
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const rect = element.getBoundingClientRect()
+
+      if (rect.top > innerHeight * 0.9 || rect.bottom < 0) continue
+
+      const ownText = [...element.childNodes]
+        .filter(node => node.nodeType === Node.TEXT_NODE)
+        .map(node => node.textContent?.trim() ?? '')
+        .join(' ')
+        .replace(/ +/g, ' ')
+        .trim()
+
+      if (ownText.length < 8 || ownText.length > 180) continue
+
+      const style = getComputedStyle(element)
+      const fontSize = Number.parseFloat(style.fontSize || '0')
+
+      if (!Number.isFinite(fontSize) || fontSize < 22) continue
+
+      prominentCandidates.push(element)
+
+      if (prominentCandidates.length >= 6) break
+    }
+
+    for (const candidate of prominentCandidates) {
+      const nodes = [candidate]
+      let parent = candidate.parentElement
+
+      for (let depth = 0; depth < 3 && parent; depth++) {
+        nodes.push(parent)
+        parent = parent.parentElement
+      }
+
+      for (const node of nodes) {
+        const style = getComputedStyle(node)
+        const opacity = Number.parseFloat(style.opacity || '1')
+        const blurMatch = (style.filter || '').match(/blur\(([-0-9.]+)px\)/i)
+        const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+        const rect = node.getBoundingClientRect()
+
+        if (style.visibility === 'hidden' || opacity <= 0.2) {
+          add('prominent-text-hidden', 4)
+          break
+        }
+
+        if (Number.isFinite(blur) && blur >= 1) {
+          add('prominent-text-blurred', 4)
+          break
+        }
+
+        if (style.transform && style.transform !== 'none') {
+          try {
+            const matrix = new DOMMatrixReadOnly(style.transform)
+            const scaleX = Math.hypot(matrix.a, matrix.b)
+            const scaleY = Math.hypot(matrix.c, matrix.d)
+            const translatedFar =
+              Math.abs(matrix.e) > Math.max(rect.width, 1) * 0.3 ||
+              Math.abs(matrix.f) > Math.max(rect.height, 1) * 0.7
+
+            if (scaleX < 0.8 || scaleY < 0.8 || translatedFar) {
+              add('prominent-text-transform', 3)
+              break
+            }
+          } catch {}
+        }
+      }
+
+      if (score >= 4) break
+    }
+
     const heading = document.querySelector('h1, [role="heading"][aria-level="1"]')
 
     if (heading instanceof HTMLElement && heading.offsetTop < innerHeight * 1.5) {
@@ -1103,7 +1197,7 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
     const bodyTextLength = (document.body?.innerText ?? '').trim().length
 
     if (bodyTextLength > 500 && visibleTextLength < 24) {
-      add('content-mostly-hidden', 2)
+      add('content-mostly-hidden', 3)
     }
 
     let visibleImagesReady = true
@@ -1119,11 +1213,18 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
 
     let visibleVideosReady = true
     let dynamicSurface = false
+    let dynamicSurfaceAreaRatio = 0
 
     for (const video of document.querySelectorAll('video')) {
       if (!isVisible(video)) continue
 
       dynamicSurface = true
+
+      const rect = video.getBoundingClientRect()
+      dynamicSurfaceAreaRatio = Math.max(
+        dynamicSurfaceAreaRatio,
+        Math.max(rect.width * rect.height, 0) / viewportArea
+      )
 
       if (video.readyState < 2) {
         visibleVideosReady = false
@@ -1131,10 +1232,15 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
     }
 
     for (const canvas of document.querySelectorAll('canvas')) {
-      if (isVisible(canvas)) {
-        dynamicSurface = true
-        break
-      }
+      if (!isVisible(canvas)) continue
+
+      dynamicSurface = true
+
+      const rect = canvas.getBoundingClientRect()
+      dynamicSurfaceAreaRatio = Math.max(
+        dynamicSurfaceAreaRatio,
+        Math.max(rect.width * rect.height, 0) / viewportArea
+      )
     }
 
     let significantAnimationRunning = false
@@ -1184,6 +1290,7 @@ const CAPTURE_HEALTH_SCRIPT = String.raw`
         visibleVideosReady &&
         !significantAnimationRunning,
       dynamicSurface,
+      dynamicSurfaceAreaRatio,
       title: document.title || location.hostname || location.href
     }
   })()
@@ -1630,6 +1737,9 @@ export default class LocalBrowserRenderer {
   private introSettleSkips = 0
   private visualStabilityChecks = 0
   private visualStabilityPasses = 0
+  private compositedProbeChecks = 0
+  private compositedProbePasses = 0
+  private compositedProbeTimeouts = 0
   private visualStabilityExtraWaits = 0
   private loaderBypasses = 0
   private cookieCleanupActions = 0
@@ -1836,6 +1946,18 @@ export default class LocalBrowserRenderer {
     return this.visualStabilityExtraWaits
   }
 
+  get compositedProbeCheckCount(): number {
+    return this.compositedProbeChecks
+  }
+
+  get compositedProbePassCount(): number {
+    return this.compositedProbePasses
+  }
+
+  get compositedProbeTimeoutCount(): number {
+    return this.compositedProbeTimeouts
+  }
+
   get loaderBypassCount(): number {
     return this.loaderBypasses
   }
@@ -1909,6 +2031,9 @@ export default class LocalBrowserRenderer {
     this.visualStabilityChecks = 0
     this.visualStabilityPasses = 0
     this.visualStabilityExtraWaits = 0
+    this.compositedProbeChecks = 0
+    this.compositedProbePasses = 0
+    this.compositedProbeTimeouts = 0
     this.loaderBypasses = 0
     this.cookieCleanupActions = 0
     this.cookieGuardActions = 0
