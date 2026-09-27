@@ -192,6 +192,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
   private readonly generationRetryTimers = new Set<number>()
   private readonly sharedLocalRenders = new Map<string, SharedLocalRender>()
   private sharedLocalRenderHits = 0
+  private sharedLocalRenderStarts = 0
   private previewRevealPromise: Promise<void> | null = null
 
   private readonly interactiveActivation = new InteractiveActivationController<LinkNode>({
@@ -540,6 +541,8 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.sharedLocalRenderHits++
       return { key, task: existing.task }
     }
+
+    this.sharedLocalRenderStarts++
 
     const task = renderer.render(
       node.url,
@@ -2622,6 +2625,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     this.metrics.reset(batchStartedAt)
     this.sharedLocalRenderHits = 0
+    this.sharedLocalRenderStarts = 0
     this.interactiveLightPreferenceStatus = 'not attempted'
     this.interactiveMatchMediaLight = null
     this.localBrowserRenderer?.resetMetrics()
@@ -2665,6 +2669,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       stagedPreviews: this.stagedPreviews.size,
       previewRevealActive: this.previewRevealPromise !== null,
       sharedLocalRenderHits: this.sharedLocalRenderHits,
+      sharedLocalRenderStarts: this.sharedLocalRenderStarts,
       interactiveWebviewActive: Boolean(this.activeInteractiveNode),
       interactiveLightPreferenceStatus: this.interactiveLightPreferenceStatus,
       interactiveMatchMediaLight: this.interactiveMatchMediaLight,
@@ -2682,6 +2687,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
         concurrencySummary: this.localBrowserRenderer?.concurrencySummary ?? 'unknown',
         tuningStatus: this.concurrencyTuner?.status ?? 'not initialized',
         activeTasks: this.localBrowserRenderer?.activeCount ?? 0,
+        introWaitActive: this.localBrowserRenderer?.introWaitActiveCount ?? 0,
+        introWaitYields: this.localBrowserRenderer?.introWaitYieldCount ?? 0,
+        maxActiveTasks: this.localBrowserRenderer?.maxActiveTaskCount ?? 0,
         renderFailures: this.localBrowserRenderer?.renderFailureCount ?? 0,
         launches: this.localBrowserRenderer?.launchCount ?? 0,
         closes: this.localBrowserRenderer?.closeCount ?? 0,
