@@ -272,7 +272,9 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     this.pluginData = loadedData && typeof loadedData === 'object' ? (loadedData as PluginData) : {}
 
     this.networkPreconnector = new NetworkPreconnector(this.getWebviewPartition())
-    this.localBrowserRenderer = new LocalBrowserRenderer()
+    this.localBrowserRenderer = new LocalBrowserRenderer(() => {
+      this.scheduleThumbnailQueue()
+    })
 
     this.concurrencyTuner = new AdaptiveConcurrencyTuner(this.localBrowserRenderer)
     this.concurrencyTuner.initialize(
@@ -1181,6 +1183,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
       this.localBatchTuning = renderer?.available
         ? {
             concurrency: renderer.poolSize,
+            introWaitYieldCount: renderer.introWaitYieldCount,
             localGenerationCount: this.metrics.localGenerationCount,
             localFallbacks: this.metrics.localFallbacks,
             generationPreemptions: this.metrics.generationPreemptions
@@ -1234,7 +1237,7 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
 
     if (renderer?.available) {
       while (renderer.available && !this.activeInteractiveNode) {
-        const hasWorkerCapacity = renderer.activeCount < renderer.poolSize
+        const hasWorkerCapacity = renderer.canStartRender
         const localJob = this.dequeueNextGenerationJob(
           job =>
             !job.forceNative &&
@@ -1840,6 +1843,10 @@ export default class CanvasWebOptimizerPlugin extends Plugin {
     const tuner = this.concurrencyTuner
 
     if (!renderer || !tuner) return
+
+    if (renderer.introWaitYieldCount !== snapshot.introWaitYieldCount) {
+      return
+    }
 
     const key = renderer.tuningKey
     const observation = tuner.observe(
