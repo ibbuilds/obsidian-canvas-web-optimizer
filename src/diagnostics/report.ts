@@ -33,6 +33,9 @@ export type LocalBrowserDiagnostics = {
   visualStabilityChecks: number
   visualStabilityPasses: number
   visualStabilityExtraWaits: number
+  compositedProbeChecks: number
+  compositedProbePasses: number
+  compositedProbeTimeouts: number
   loaderBypasses: number
   cookieCleanupActions: number
   cookieGuardActions: number
@@ -148,6 +151,7 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Intro settle skips: ${local.introSettleSkips}`,
     `Visual stability checks/passes: ${local.visualStabilityChecks}/${local.visualStabilityPasses}`,
     `Visual stability extra waits: ${local.visualStabilityExtraWaits}`,
+    `Composited probes checks/passes/timeouts: ${local.compositedProbeChecks}/${local.compositedProbePasses}/${local.compositedProbeTimeouts}`,
     `Local browser loader bypasses: ${local.loaderBypasses}`,
     `Cookie cleanup actions: ${local.cookieCleanupActions}`,
     `Cookie guard actions: ${local.cookieGuardActions}`,
