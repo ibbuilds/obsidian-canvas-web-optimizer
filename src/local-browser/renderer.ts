@@ -13,11 +13,30 @@ const NAVIGATION_TIMEOUT_MS = 5000
 const DOCUMENT_READY_PROBE_INTERVAL_MS = 50
 const DOCUMENT_READY_PROBE_COMMAND_TIMEOUT_MS = 600
 const PAINT_READY_TIMEOUT_MS = 250
+const FAST_PATH_MIN_FROM_NAVIGATION_MS = 650
+const VISUAL_SETTLE_MIN_MS = 260
+const VISUAL_SETTLE_COMPLEX_MIN_MS = 520
+const VISUAL_SETTLE_QUIET_MS = 120
+const VISUAL_SETTLE_MAX_MS = 850
+const VISUAL_SETTLE_COMPLEX_MAX_MS = 1800
+const VISUAL_SETTLE_COMMAND_TIMEOUT_MS = 2400
+const CAPTURE_HEALTH_COMMAND_TIMEOUT_MS = 900
+const CAPTURE_INTRO_MAX_FROM_NAVIGATION_MS = 5500
+const CAPTURE_INTRO_POLL_MS = 250
+const VISUAL_STABILITY_SAMPLE_MS = 220
+const VISUAL_STABILITY_RETRY_MS = 300
+const VISUAL_STABILITY_COMMAND_TIMEOUT_MS = 900
+const COMPOSITED_PROBE_MAX_LONG_EDGE = 160
+const COMPOSITED_PROBE_QUALITY = 32
+const COMPOSITED_PROBE_SAMPLE_MS = 260
+const COMPOSITED_PROBE_MAX_WAIT_MS = 2400
+const CAPTURE_RECOVERY_WAIT_MS = 280
 const IDLE_SHUTDOWN_MS = 2500
 const MIN_SCREENSHOT_BYTES = 512
 const LOCAL_BROWSER_MAX_WORKERS = 8
 const LOCAL_BROWSER_MEMORY_RESERVE_GIB = 2
 const LOCAL_BROWSER_MEMORY_PER_WORKER_GIB = 1.75
+const INTRO_WAIT_EXTRA_WORKERS = 1
 
 type BrowserRuntime = {
   process: ChildProcess
@@ -41,6 +60,39 @@ export type LocalBrowserRenderTask = {
   cancel: () => void
 }
 
+type CaptureHealthRecord = {
+  suspicious?: boolean
+  reasons?: unknown
+  score?: unknown
+  readyForFastCapture?: boolean
+  dynamicSurface?: boolean
+  dynamicSurfaceAreaRatio?: number
+  visibleTextLength?: number
+  title?: unknown
+}
+
+type CompositedProbe = {
+  hash: number
+  byteLength: number
+  minUsefulBytes: number
+}
+
+const NATURAL_INTRO_REASONS = new Set([
+  'progress-visible',
+  'loading-copy',
+  'loading-percent',
+  'loading-text',
+  'hero-hidden',
+  'hero-blurred',
+  'prominent-text-hidden',
+  'prominent-text-blurred',
+  'prominent-text-transform',
+  'prominent-text-animation',
+  'fullscreen-cover',
+  'content-mostly-hidden',
+  'dynamic-surface-not-ready'
+])
+
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => window.setTimeout(resolve, ms))
 }
@@ -59,6 +111,1696 @@ function isUnsupportedScreenshotSpeedOption(error: unknown): boolean {
   )
 }
 
+const COOKIE_GUARD_BOOTSTRAP_SCRIPT = `
+  (() => {
+    if (globalThis.__canvasWebOptimizerCookieGuard) return
+
+    const state = {
+      actions: 0,
+      clicks: 0,
+      hides: 0,
+      scans: 0
+    }
+
+    Object.defineProperty(globalThis, '__canvasWebOptimizerCookieGuard', {
+      value: state,
+      configurable: true
+    })
+
+    try {
+      Object.defineProperty(Navigator.prototype, 'globalPrivacyControl', {
+        configurable: true,
+        get: () => true
+      })
+    } catch {}
+
+    try {
+      Object.defineProperty(Navigator.prototype, 'doNotTrack', {
+        configurable: true,
+        get: () => '1'
+      })
+    } catch {}
+
+    const styleId = 'canvas-web-optimizer-cookie-guard'
+    const knownSelectors = [
+      '#onetrust-banner-sdk',
+      '#onetrust-consent-sdk',
+      '#CybotCookiebotDialog',
+      '#CybotCookiebotDialogBodyUnderlay',
+      '#didomi-host',
+      '.qc-cmp2-container',
+      '.qc-cmp-cleanslate',
+      '.truste_popframe',
+      '#usercentrics-root',
+      '.iubenda-cs-container',
+      '[id*="cookie-banner" i]',
+      '[class*="cookie-banner" i]',
+      '[id*="cookie-consent" i]',
+      '[class*="cookie-consent" i]',
+      '[id*="consent-banner" i]',
+      '[class*="consent-banner" i]',
+      '[data-testid*="cookie-banner" i]',
+      '[data-testid*="cookie-consent" i]'
+    ]
+    const candidateSelectors = [
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      '[id*="cookie" i]',
+      '[class*="cookie" i]',
+      '[id*="consent" i]',
+      '[class*="consent" i]',
+      '[id*="gdpr" i]',
+      '[class*="gdpr" i]',
+      '[id*="cmp" i]',
+      '[class*="cmp" i]',
+      '[data-testid*="cookie" i]',
+      '[data-testid*="consent" i]'
+    ]
+    const consentText =
+      /cookie|consent|privacy preferences|tracking|gdpr|personal data|data partners/i
+    const rejectText =
+      /reject|decline|deny|essential only|necessary only|continue without|do not accept|no thanks|only necessary/i
+    let observer = null
+    let scheduled = false
+    let interval = 0
+
+    const ensureStyle = () => {
+      if (document.getElementById(styleId)) return
+
+      const style = document.createElement('style')
+      style.id = styleId
+      style.textContent =
+        knownSelectors.join(',') +
+        '{display:none!important;visibility:hidden!important;opacity:0!important;' +
+        'pointer-events:none!important;}'
+
+      ;(document.head || document.documentElement)?.appendChild(style)
+    }
+
+    const isVisible = element => {
+      if (!(element instanceof HTMLElement)) return false
+
+      const rect = element.getBoundingClientRect()
+
+      if (rect.width <= 0 || rect.height <= 0) return false
+
+      const style = getComputedStyle(element)
+
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.02
+      )
+    }
+
+    const restoreScrolling = () => {
+      for (const element of [document.documentElement, document.body]) {
+        if (!(element instanceof HTMLElement)) continue
+
+        element.style.removeProperty('overflow')
+        element.style.removeProperty('position')
+        element.style.removeProperty('inset')
+        element.style.removeProperty('height')
+      }
+    }
+
+    const hide = element => {
+      if (!(element instanceof HTMLElement) || isProtectedRoot(element)) return false
+
+      element.style.setProperty('display', 'none', 'important')
+      element.style.setProperty('visibility', 'hidden', 'important')
+      element.style.setProperty('opacity', '0', 'important')
+      element.style.setProperty('pointer-events', 'none', 'important')
+      state.actions++
+      state.hides++
+      return true
+    }
+
+    const findRejectControl = root => {
+      const controls = root.querySelectorAll(
+        'button, [role="button"], input[type="button"], input[type="submit"], a'
+      )
+
+      for (const control of controls) {
+        if (!(control instanceof HTMLElement) || !isVisible(control)) continue
+
+        const label = [
+          control.getAttribute('aria-label') || '',
+          control.getAttribute('title') || '',
+          control instanceof HTMLInputElement ? control.value : '',
+          control.textContent || ''
+        ]
+          .join(' ')
+          .replace(/ +/g, ' ')
+          .trim()
+
+        if (rejectText.test(label)) {
+          return control
+        }
+      }
+
+      return null
+    }
+
+    const isProtectedRoot = element =>
+      element === document.documentElement ||
+      element === document.body ||
+      element.tagName === 'MAIN' ||
+      element.getAttribute('role') === 'main'
+
+    const semanticNameFor = element =>
+      [
+        element.id,
+        typeof element.className === 'string' ? element.className : '',
+        element.getAttribute('aria-label') || '',
+        element.getAttribute('data-testid') || ''
+      ]
+        .join(' ')
+        .toLowerCase()
+
+    const consentControlText =
+      /accept|agree|allow|reject|decline|deny|preferences|settings|manage|necessary|essential/i
+
+    const looksLikeConsent = element => {
+      if (!(element instanceof HTMLElement) || isProtectedRoot(element)) return false
+
+      const semanticName = semanticNameFor(element)
+
+      if (/cookie|consent|gdpr|cmp/.test(semanticName)) {
+        return true
+      }
+
+      const text = (element.innerText || element.textContent || '').trim()
+
+      if (text.length === 0 || text.length > 2500 || !consentText.test(text)) {
+        return false
+      }
+
+      const controls = element.querySelectorAll('button, [role="button"], input, a')
+
+      for (const control of controls) {
+        const label = [
+          control.getAttribute('aria-label') || '',
+          control.getAttribute('title') || '',
+          control instanceof HTMLInputElement ? control.value : '',
+          control.textContent || ''
+        ]
+          .join(' ')
+          .replace(/ +/g, ' ')
+          .trim()
+
+        if (consentControlText.test(label)) {
+          return true
+        }
+      }
+
+      return false
+    }
+
+    const candidateRoots = () => {
+      const roots = new Set()
+
+      for (const selector of candidateSelectors) {
+        for (const element of document.querySelectorAll(selector)) {
+          if (element instanceof HTMLElement && !isProtectedRoot(element)) {
+            roots.add(element)
+          }
+        }
+      }
+
+      const points = [
+        [innerWidth * 0.15, innerHeight - 12],
+        [innerWidth * 0.35, innerHeight - 12],
+        [innerWidth * 0.5, innerHeight - 12],
+        [innerWidth * 0.65, innerHeight - 12],
+        [innerWidth * 0.85, innerHeight - 12],
+        [innerWidth * 0.2, innerHeight * 0.72],
+        [innerWidth * 0.8, innerHeight * 0.72],
+        [innerWidth / 2, innerHeight / 2]
+      ]
+
+      for (const [x, y] of points) {
+        for (const hit of document.elementsFromPoint(x, y)) {
+          let current = hit
+
+          for (let depth = 0; depth < 5 && current instanceof HTMLElement; depth++) {
+            if (isProtectedRoot(current)) break
+
+            const style = getComputedStyle(current)
+            const semanticName = semanticNameFor(current)
+            const roleDialog =
+              current.getAttribute('role') === 'dialog' ||
+              current.getAttribute('aria-modal') === 'true'
+
+            if (
+              roleDialog ||
+              /cookie|consent|gdpr|cmp/.test(semanticName) ||
+              style.position === 'fixed' ||
+              style.position === 'sticky'
+            ) {
+              if (looksLikeConsent(current)) {
+                roots.add(current)
+                break
+              }
+            }
+
+            current = current.parentElement
+          }
+        }
+      }
+
+      return roots
+    }
+
+    const hideBackdropAfterConsent = () => {
+      const center = document.elementFromPoint(innerWidth / 2, innerHeight / 2)
+
+      if (!(center instanceof HTMLElement)) return
+
+      let current = center
+
+      for (let depth = 0; depth < 5 && current; depth++) {
+        const style = getComputedStyle(current)
+        const rect = current.getBoundingClientRect()
+        const viewportArea = Math.max(innerWidth * innerHeight, 1)
+        const areaRatio = (rect.width * rect.height) / viewportArea
+        const name = (current.id + ' ' + current.className).toLowerCase()
+
+        if (
+          areaRatio >= 0.72 &&
+          (style.position === 'fixed' || style.position === 'absolute') &&
+          /backdrop|overlay|modal|consent|cookie|cmp/.test(name)
+        ) {
+          hide(current)
+          return
+        }
+
+        current = current.parentElement
+      }
+    }
+
+    const clean = () => {
+      scheduled = false
+      state.scans++
+      ensureStyle()
+
+      let changed = false
+
+      for (const root of candidateRoots()) {
+        if (!(root instanceof HTMLElement) || !isVisible(root)) continue
+        if (!looksLikeConsent(root)) continue
+
+        const style = getComputedStyle(root)
+        const semanticName = semanticNameFor(root)
+        const roleDialog =
+          root.getAttribute('role') === 'dialog' || root.getAttribute('aria-modal') === 'true'
+        const strongSemantic = /cookie|consent|gdpr|cmp/.test(semanticName)
+
+        if (
+          !roleDialog &&
+          !strongSemantic &&
+          style.position !== 'fixed' &&
+          style.position !== 'sticky'
+        ) {
+          continue
+        }
+
+        const reject = findRejectControl(root)
+
+        if (reject) {
+          try {
+            reject.click()
+            state.actions++
+            state.clicks++
+          } catch {}
+
+          changed = hide(root) || changed
+        } else {
+          changed = hide(root) || changed
+        }
+      }
+
+      if (changed) {
+        restoreScrolling()
+        hideBackdropAfterConsent()
+      }
+    }
+
+    const scheduleClean = () => {
+      if (scheduled) return
+
+      scheduled = true
+      queueMicrotask(clean)
+    }
+
+    const installObserver = () => {
+      if (observer || !document.documentElement) return
+
+      observer = new MutationObserver(scheduleClean)
+      observer.observe(document.documentElement, {
+        subtree: true,
+        childList: true
+      })
+    }
+
+    const start = () => {
+      ensureStyle()
+      installObserver()
+      clean()
+
+      if (!interval) {
+        interval = setInterval(clean, 220)
+
+        setTimeout(() => {
+          clearInterval(interval)
+          interval = 0
+        }, 12000)
+      }
+    }
+
+    if (document.documentElement) {
+      start()
+    } else {
+      const bootstrapObserver = new MutationObserver(() => {
+        if (!document.documentElement) return
+
+        bootstrapObserver.disconnect()
+        start()
+      })
+
+      bootstrapObserver.observe(document, {
+        subtree: true,
+        childList: true
+      })
+    }
+
+    addEventListener('DOMContentLoaded', start, { once: true })
+    addEventListener('load', clean, { once: true })
+  })()
+`
+
+const COOKIE_GUARD_STATUS_SCRIPT = 'globalThis.__canvasWebOptimizerCookieGuard?.actions ?? 0'
+
+const COOKIE_CLEANUP_SCRIPT = `
+  (() => {
+    const rejectSelectors = [
+      '#onetrust-reject-all-handler',
+      '#CybotCookiebotDialogBodyButtonDecline',
+      '#CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll',
+      '#didomi-notice-disagree-button',
+      '.didomi-continue-without-agreeing',
+      '#uc-btn-deny-banner',
+      '[data-testid="uc-deny-all-button"]',
+      '.iubenda-cs-reject-btn'
+    ]
+    const knownContainers = [
+      '#onetrust-banner-sdk',
+      '#onetrust-consent-sdk',
+      '#CybotCookiebotDialog',
+      '#CybotCookiebotDialogBodyUnderlay',
+      '#didomi-host',
+      '.qc-cmp2-container',
+      '.truste_popframe',
+      '#usercentrics-root',
+      '.iubenda-cs-container'
+    ]
+    const semanticContainers = [
+      '[role="dialog"][id*="cookie" i]',
+      '[role="dialog"][class*="cookie" i]',
+      '[role="dialog"][id*="consent" i]',
+      '[role="dialog"][class*="consent" i]',
+      '[aria-label*="cookie" i]',
+      '[aria-label*="consent" i]',
+      '[data-testid*="cookie" i]',
+      '[data-testid*="consent" i]',
+      '[id*="cookie" i][class]',
+      '[class*="cookie" i]',
+      '[id*="consent" i][class]',
+      '[class*="consent" i]'
+    ]
+    const rejectText =
+      /reject|decline|deny|essential only|necessary only|continue without|do not accept|no thanks/i
+    let actions = 0
+
+    for (const selector of rejectSelectors) {
+      const element = document.querySelector(selector)
+
+      if (element instanceof HTMLElement && element.getClientRects().length > 0) {
+        element.click()
+        actions++
+        break
+      }
+    }
+
+    const hideContainer = element => {
+      if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) return false
+
+      element.style.setProperty('display', 'none', 'important')
+      element.style.setProperty('visibility', 'hidden', 'important')
+      element.style.setProperty('pointer-events', 'none', 'important')
+      actions++
+      return true
+    }
+
+    if (actions === 0) {
+      for (const selector of knownContainers) {
+        for (const element of document.querySelectorAll(selector)) {
+          hideContainer(element)
+        }
+      }
+    }
+
+    if (actions === 0) {
+      const containers = new Set()
+
+      for (const selector of semanticContainers) {
+        for (const element of document.querySelectorAll(selector)) {
+          containers.add(element)
+        }
+      }
+
+      for (const element of containers) {
+        if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) continue
+
+        const style = getComputedStyle(element)
+        const rect = element.getBoundingClientRect()
+        const viewportArea = Math.max(innerWidth * innerHeight, 1)
+        const areaRatio = Math.max(rect.width * rect.height, 0) / viewportArea
+        const text = element.textContent?.trim() ?? ''
+        const looksLikeConsent =
+          /cookie|consent|privacy|tracking|gdpr/i.test(text) ||
+          /cookie|consent/i.test(element.id + ' ' + element.className)
+
+        if (!looksLikeConsent) continue
+        if (
+          style.position !== 'fixed' &&
+          style.position !== 'sticky' &&
+          areaRatio < 0.08
+        ) {
+          continue
+        }
+
+        const controls = element.querySelectorAll('button, [role="button"], a')
+
+        for (const control of controls) {
+          const label = control.textContent?.trim() ?? ''
+
+          if (
+            rejectText.test(label) &&
+            control instanceof HTMLElement &&
+            control.getClientRects().length > 0
+          ) {
+            control.click()
+            actions++
+            break
+          }
+        }
+
+        if (actions === 0) {
+          hideContainer(element)
+        }
+
+        if (actions > 0) break
+      }
+    }
+
+    if (actions > 0) {
+      document.documentElement.style.removeProperty('overflow')
+      document.body?.style.removeProperty('overflow')
+      document.documentElement.style.removeProperty('position')
+      document.body?.style.removeProperty('position')
+    }
+
+    return actions
+  })()
+`
+
+const VISUAL_SETTLE_SCRIPT = `
+  new Promise(resolve => {
+    const startedAt = performance.now()
+    let lastActivityAt = startedAt
+    let finished = false
+    const root = document.documentElement || document
+    const markActivity = () => {
+      lastActivityAt = performance.now()
+    }
+    const observer = new MutationObserver(markActivity)
+
+    try {
+      observer.observe(root, {
+        subtree: true,
+        childList: true,
+        characterData: true
+      })
+    } catch {}
+
+    addEventListener('load', markActivity, true)
+
+    const intersectsViewport = rect =>
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.bottom > 0 &&
+      rect.right > 0 &&
+      rect.top < innerHeight &&
+      rect.left < innerWidth
+
+    const isVisibleElement = element => {
+      if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false
+
+      const rect = element.getBoundingClientRect()
+
+      if (!intersectsViewport(rect)) return false
+
+      const style = getComputedStyle(element)
+
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.05
+      )
+    }
+
+    const visibleImagesReady = () => {
+      for (const image of document.images) {
+        if (!isVisibleElement(image)) continue
+
+        if (!image.complete || image.naturalWidth <= 0) {
+          return false
+        }
+      }
+
+      return true
+    }
+
+    const visibleVideosReady = () => {
+      for (const video of document.querySelectorAll('video')) {
+        if (!isVisibleElement(video)) continue
+
+        if (video.readyState < 2) {
+          return false
+        }
+      }
+
+      return true
+    }
+
+    const finiteAnimationsRunning = () => {
+      if (typeof document.getAnimations !== 'function') return false
+
+      return document.getAnimations().some(animation => {
+        if (animation.playState !== 'running') return false
+
+        try {
+          const timing = animation.effect?.getComputedTiming()
+          return Boolean(timing && Number.isFinite(timing.endTime) && timing.endTime > 0)
+        } catch {
+          return false
+        }
+      })
+    }
+
+    const getLoaderOverlays = () => {
+      const selectors = [
+        '[id*="preloader" i]',
+        '[class*="preloader" i]',
+        '[id*="page-loader" i]',
+        '[class*="page-loader" i]',
+        '[id="loader"]',
+        '[class~="loader"]',
+        '[id*="splash" i]',
+        '[class*="splash" i]',
+        '[id*="curtain" i]',
+        '[class*="curtain" i]',
+        '[id*="transition" i]',
+        '[class*="transition" i]',
+        '[aria-busy="true"]'
+      ]
+      const results = new Set()
+
+      for (const selector of selectors) {
+        for (const element of document.querySelectorAll(selector)) {
+          if (!(element instanceof HTMLElement) || !isVisibleElement(element)) continue
+
+          const rect = element.getBoundingClientRect()
+          const style = getComputedStyle(element)
+          const viewportArea = Math.max(innerWidth * innerHeight, 1)
+          const areaRatio = (rect.width * rect.height) / viewportArea
+          const text = element.textContent?.trim() ?? ''
+          const name = (element.id + ' ' + element.className).toLowerCase()
+          const looksLikeLoader =
+            /loader|preloader|loading|splash|curtain|page-transition/.test(name) ||
+            /loading|please wait|enter site/i.test(text)
+
+          if (!looksLikeLoader) continue
+
+          if (
+            areaRatio >= 0.32 ||
+            style.position === 'fixed' ||
+            style.position === 'sticky'
+          ) {
+            results.add(element)
+          }
+        }
+      }
+
+      return [...results]
+    }
+
+    const primaryHeadingHidden = () => {
+      const heading = document.querySelector('h1')
+
+      if (!(heading instanceof HTMLElement)) return false
+
+      const style = getComputedStyle(heading)
+
+      if (heading.offsetTop > innerHeight * 1.5) return false
+
+      return (
+        style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        Number.parseFloat(style.opacity || '1') <= 0.08
+      )
+    }
+
+    const dynamicSurfaceVisible = () => {
+      for (const element of document.querySelectorAll('canvas, video')) {
+        if (isVisibleElement(element)) return true
+      }
+
+      return false
+    }
+
+    const finishAnimations = () => {
+      if (typeof document.getAnimations !== 'function') return
+
+      for (const animation of document.getAnimations()) {
+        try {
+          if (animation.playState !== 'running') continue
+
+          const timing = animation.effect?.getComputedTiming()
+
+          if (timing && Number.isFinite(timing.endTime) && timing.endTime > 0) {
+            animation.finish()
+          } else {
+            animation.pause()
+          }
+        } catch {
+          try {
+            animation.pause()
+          } catch {}
+        }
+      }
+    }
+
+    const hideStuckLoaders = () => {
+      let hidden = 0
+
+      for (const element of getLoaderOverlays()) {
+        element.style.setProperty('display', 'none', 'important')
+        element.style.setProperty('visibility', 'hidden', 'important')
+        element.style.setProperty('pointer-events', 'none', 'important')
+        hidden++
+      }
+
+      return hidden
+    }
+
+    const finish = (maxedOut, complex) => {
+      if (finished) return
+
+      finished = true
+      observer.disconnect()
+      removeEventListener('load', markActivity, true)
+
+      finishAnimations()
+      const loaderBypasses = maxedOut ? hideStuckLoaders() : 0
+
+      let freezeStyle = document.getElementById('canvas-web-optimizer-capture-freeze')
+
+      if (!(freezeStyle instanceof HTMLStyleElement)) {
+        freezeStyle = document.createElement('style')
+        freezeStyle.id = 'canvas-web-optimizer-capture-freeze'
+        freezeStyle.textContent =
+          '*, *::before, *::after {' +
+          'transition-property: none !important;' +
+          'caret-color: transparent !important;' +
+          '}'
+        document.head?.appendChild(freezeStyle)
+      }
+
+      setTimeout(() => {
+        resolve({
+          waitedMs: performance.now() - startedAt,
+          maxedOut,
+          complex,
+          loaderBypasses,
+          title: document.title || location.hostname || location.href
+        })
+      }, 50)
+    }
+
+    const tick = () => {
+      const now = performance.now()
+      const elapsed = now - startedAt
+      const quietFor = now - lastActivityAt
+      const loaderVisible = getLoaderOverlays().length > 0
+      const hiddenHeading = primaryHeadingHidden()
+      const dynamicSurface = dynamicSurfaceVisible()
+      const complex = loaderVisible || hiddenHeading
+      const minimumWait = complex
+        ? ${VISUAL_SETTLE_COMPLEX_MIN_MS}
+        : ${VISUAL_SETTLE_MIN_MS}
+      const maximumWait = complex
+        ? ${VISUAL_SETTLE_COMPLEX_MAX_MS}
+        : ${VISUAL_SETTLE_MAX_MS}
+      const fontsReady = !document.fonts || document.fonts.status !== 'loading'
+      const dynamicSurfaceReady = !dynamicSurface || visibleVideosReady()
+      const ready =
+        elapsed >= minimumWait &&
+        quietFor >= ${VISUAL_SETTLE_QUIET_MS} &&
+        fontsReady &&
+        visibleImagesReady() &&
+        dynamicSurfaceReady &&
+        !loaderVisible &&
+        !hiddenHeading
+
+      if (ready) {
+        finish(false, complex)
+        return
+      }
+
+      if (elapsed >= maximumWait) {
+        finish(true, complex)
+        return
+      }
+
+      setTimeout(tick, 50)
+    }
+
+    setTimeout(tick, 50)
+  })
+`
+
+const CAPTURE_HEALTH_SCRIPT = String.raw`
+  (() => {
+    const reasons = []
+    let score = 0
+    const viewportArea = Math.max(innerWidth * innerHeight, 1)
+
+    const isVisible = element => {
+      if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false
+
+      const rect = element.getBoundingClientRect()
+
+      if (
+        rect.width <= 0 ||
+        rect.height <= 0 ||
+        rect.bottom <= 0 ||
+        rect.right <= 0 ||
+        rect.top >= innerHeight ||
+        rect.left >= innerWidth
+      ) {
+        return false
+      }
+
+      const style = getComputedStyle(element)
+
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.04
+      )
+    }
+
+    const add = (reason, weight) => {
+      if (!reasons.includes(reason)) {
+        reasons.push(reason)
+      }
+
+      score += weight
+    }
+
+    const progressNodes = document.querySelectorAll(
+      'progress, [role="progressbar"], [aria-busy="true"]'
+    )
+
+    for (const element of progressNodes) {
+      if (isVisible(element)) {
+        add('progress-visible', 4)
+        break
+      }
+    }
+
+    const bodyText = (document.body?.innerText ?? '').replaceAll('\n', ' ').trim()
+    const compactBodyText = bodyText.replace(/ +/g, ' ')
+
+    if (
+      compactBodyText.length <= 320 &&
+      /(?:^| )(?:loading|please wait|initializing|preparing|entering)(?: |:|[.]|[0-9]|%|$)/i.test(
+        compactBodyText
+      )
+    ) {
+      add('loading-copy', 4)
+    }
+
+    if (/\b[0-9]{1,3}%\b/.test(compactBodyText) && compactBodyText.length <= 420) {
+      add('loading-percent', 4)
+    }
+
+    const elements = document.body?.getElementsByTagName('*')
+    const elementCount = elements?.length ?? 0
+    let visibleTextLength = 0
+
+    for (let index = 0; index < Math.min(elementCount, 900); index++) {
+      const element = elements?.item(index)
+
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const ownText = [...element.childNodes]
+        .filter(node => node.nodeType === Node.TEXT_NODE)
+        .map(node => node.textContent?.trim() ?? '')
+        .join(' ')
+        .trim()
+
+      if (ownText) {
+        visibleTextLength += ownText.length
+      }
+
+      if (ownText.length > 0 && ownText.length <= 120) {
+        const normalized = ownText.replaceAll('\n', ' ').replaceAll('\t', ' ').replace(/ +/g, ' ').trim()
+
+        if (
+          /^(loading|loading\s*\d{1,3}%|please wait|initializing|preparing|entering|\d{1,3}%$)/i.test(
+            normalized
+          )
+        ) {
+          add('loading-text', 4)
+          break
+        }
+      }
+    }
+
+    const prominentCandidates = []
+    const prominentElements = document.body?.querySelectorAll('h1, h2, h3, p, div, span') ?? []
+
+    for (let index = 0; index < Math.min(prominentElements.length, 700); index++) {
+      const element = prominentElements[index]
+
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const rect = element.getBoundingClientRect()
+
+      if (rect.top > innerHeight * 0.9 || rect.bottom < 0) continue
+
+      const ownText = [...element.childNodes]
+        .filter(node => node.nodeType === Node.TEXT_NODE)
+        .map(node => node.textContent?.trim() ?? '')
+        .join(' ')
+        .replace(/ +/g, ' ')
+        .trim()
+
+      if (ownText.length < 8 || ownText.length > 180) continue
+
+      const style = getComputedStyle(element)
+      const fontSize = Number.parseFloat(style.fontSize || '0')
+
+      if (!Number.isFinite(fontSize) || fontSize < 22) continue
+
+      prominentCandidates.push(element)
+
+      if (prominentCandidates.length >= 6) break
+    }
+
+    for (const candidate of prominentCandidates) {
+      const nodes = [candidate]
+      let parent = candidate.parentElement
+
+      for (let depth = 0; depth < 6 && parent; depth++) {
+        nodes.push(parent)
+        parent = parent.parentElement
+      }
+
+      for (const node of nodes) {
+        const style = getComputedStyle(node)
+        const opacity = Number.parseFloat(style.opacity || '1')
+        const visualFilter = [style.filter || '', style.backdropFilter || ''].join(' ')
+        const blurMatch = visualFilter.match(/blur\(([-0-9.]+)px\)/i)
+        const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+        const rect = node.getBoundingClientRect()
+
+        if (style.visibility === 'hidden' || opacity <= 0.2) {
+          add('prominent-text-hidden', 4)
+          break
+        }
+
+        if (Number.isFinite(blur) && blur >= 1) {
+          add('prominent-text-blurred', 4)
+          break
+        }
+
+        if (style.transform && style.transform !== 'none') {
+          try {
+            const matrix = new DOMMatrixReadOnly(style.transform)
+            const scaleX = Math.hypot(matrix.a, matrix.b)
+            const scaleY = Math.hypot(matrix.c, matrix.d)
+            const translatedFar =
+              Math.abs(matrix.e) > Math.max(rect.width, 1) * 0.3 ||
+              Math.abs(matrix.f) > Math.max(rect.height, 1) * 0.7
+
+            if (scaleX < 0.8 || scaleY < 0.8 || translatedFar) {
+              add('prominent-text-transform', 3)
+              break
+            }
+          } catch {}
+        }
+
+        if (typeof node.getAnimations === 'function') {
+          const hasFiniteEntranceAnimation = node.getAnimations().some(animation => {
+            if (animation.playState !== 'running') return false
+
+            try {
+              const timing = animation.effect?.getComputedTiming()
+
+              return Boolean(timing && Number.isFinite(timing.endTime) && timing.endTime > 0)
+            } catch {
+              return false
+            }
+          })
+
+          if (hasFiniteEntranceAnimation) {
+            add('prominent-text-animation', 4)
+            break
+          }
+        }
+      }
+
+      if (score >= 4) break
+    }
+
+    const heading = document.querySelector('h1, [role="heading"][aria-level="1"]')
+
+    if (heading instanceof HTMLElement && heading.offsetTop < innerHeight * 1.5) {
+      const heroNodes = [heading, ...heading.querySelectorAll('*')]
+      let parent = heading.parentElement
+
+      for (let depth = 0; depth < 3 && parent; depth++) {
+        heroNodes.push(parent)
+        parent = parent.parentElement
+      }
+
+      for (const node of heroNodes) {
+        if (!(node instanceof HTMLElement || node instanceof SVGElement)) continue
+
+        const style = getComputedStyle(node)
+        const opacity = Number.parseFloat(style.opacity || '1')
+        const filter = style.filter || ''
+        const clipPath = style.clipPath || ''
+        const rect = node.getBoundingClientRect()
+
+        if (
+          style.display === 'none' ||
+          style.visibility === 'hidden' ||
+          opacity <= 0.08
+        ) {
+          add('hero-hidden', 4)
+        }
+
+        const blurMatch = filter.match(/blur\(([-0-9.]+)px\)/i)
+        const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+
+        if (Number.isFinite(blur) && blur >= 1.5) {
+          add('hero-blurred', 3)
+        }
+
+        if (clipPath && clipPath !== 'none' && clipPath !== 'inset(0px)') {
+          add('hero-clipped', 1)
+        }
+
+        if (style.transform && style.transform !== 'none') {
+          try {
+            const matrix = new DOMMatrixReadOnly(style.transform)
+            const scaleX = Math.hypot(matrix.a, matrix.b)
+            const scaleY = Math.hypot(matrix.c, matrix.d)
+            const translatedFar =
+              Math.abs(matrix.e) > Math.max(rect.width, 1) * 0.45 ||
+              Math.abs(matrix.f) > Math.max(rect.height, 1) * 0.9
+
+            if (scaleX < 0.72 || scaleY < 0.72 || translatedFar) {
+              add('hero-transform', 1)
+            }
+          } catch {}
+        }
+
+        if (score >= 4) break
+      }
+    }
+
+    const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"]')
+
+    for (const element of dialogs) {
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const rect = element.getBoundingClientRect()
+      const areaRatio = (rect.width * rect.height) / viewportArea
+
+      if (areaRatio >= 0.18) {
+        add('large-dialog', 1)
+        break
+      }
+    }
+
+    const fixedCandidates = document.querySelectorAll('body *')
+
+    for (let index = 0; index < Math.min(fixedCandidates.length, 450); index++) {
+      const element = fixedCandidates[index]
+
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const style = getComputedStyle(element)
+
+      if (style.position !== 'fixed' && style.position !== 'sticky') continue
+
+      const rect = element.getBoundingClientRect()
+      const areaRatio = (rect.width * rect.height) / viewportArea
+
+      if (areaRatio < 0.4) continue
+
+      const text = element.textContent?.trim() ?? ''
+      const hasControls = Boolean(element.querySelector('button, [role="button"], input, form'))
+      const looksTransient =
+        /loading|please wait|cookie|consent|privacy|subscribe|sign up|join|member/i.test(text)
+
+      if (hasControls || looksTransient) {
+        add('large-overlay', 2)
+        break
+      }
+    }
+
+    const centerElement = document.elementFromPoint(innerWidth / 2, innerHeight / 2)
+
+    if (centerElement instanceof HTMLElement) {
+      const style = getComputedStyle(centerElement)
+      const rect = centerElement.getBoundingClientRect()
+      const areaRatio = Math.max(rect.width * rect.height, 0) / viewportArea
+      const hasMainBehind = Boolean(
+        document.querySelector('main, [role="main"], #main, [data-main]')
+      )
+
+      if (
+        hasMainBehind &&
+        areaRatio >= 0.72 &&
+        (style.position === 'fixed' || style.position === 'absolute') &&
+        centerElement.tagName !== 'MAIN'
+      ) {
+        add('fullscreen-cover', 2)
+      }
+    }
+
+    const bodyTextLength = (document.body?.innerText ?? '').trim().length
+
+    if (bodyTextLength > 500 && visibleTextLength < 24) {
+      add('content-mostly-hidden', 3)
+    }
+
+    let visibleImagesReady = true
+
+    for (const image of document.images) {
+      if (!isVisible(image)) continue
+
+      if (!image.complete || image.naturalWidth <= 0) {
+        visibleImagesReady = false
+        break
+      }
+    }
+
+    let visibleVideosReady = true
+    let dynamicSurface = false
+    let dynamicSurfaceAreaRatio = 0
+
+    for (const video of document.querySelectorAll('video')) {
+      if (!isVisible(video)) continue
+
+      dynamicSurface = true
+
+      const rect = video.getBoundingClientRect()
+      dynamicSurfaceAreaRatio = Math.max(
+        dynamicSurfaceAreaRatio,
+        Math.max(rect.width * rect.height, 0) / viewportArea
+      )
+
+      if (video.readyState < 2) {
+        visibleVideosReady = false
+      }
+    }
+
+    for (const canvas of document.querySelectorAll('canvas')) {
+      if (!isVisible(canvas)) continue
+
+      dynamicSurface = true
+
+      const rect = canvas.getBoundingClientRect()
+      dynamicSurfaceAreaRatio = Math.max(
+        dynamicSurfaceAreaRatio,
+        Math.max(rect.width * rect.height, 0) / viewportArea
+      )
+    }
+
+    let significantAnimationRunning = false
+
+    if (typeof document.getAnimations === 'function') {
+      for (const animation of document.getAnimations()) {
+        if (animation.playState !== 'running') continue
+
+        try {
+          const timing = animation.effect?.getComputedTiming()
+
+          if (!timing || !Number.isFinite(timing.endTime) || timing.endTime <= 0) {
+            continue
+          }
+
+          const target = animation.effect?.target
+
+          if (!(target instanceof Element)) continue
+
+          const rect = target.getBoundingClientRect()
+          const areaRatio = Math.max(rect.width * rect.height, 0) / viewportArea
+          const isHeroAnimation =
+            target.matches('h1, [role="heading"][aria-level="1"]') ||
+            Boolean(target.closest('h1, [role="heading"][aria-level="1"]'))
+
+          if (isHeroAnimation || areaRatio >= 0.12) {
+            significantAnimationRunning = true
+            break
+          }
+        } catch {}
+      }
+    }
+
+    const fontsReady = !document.fonts || document.fonts.status !== 'loading'
+    const suspicious = score >= 3
+
+    return {
+      suspicious,
+      score,
+      reasons,
+      visibleTextLength,
+      bodyTextLength,
+      readyForFastCapture:
+        !suspicious &&
+        fontsReady &&
+        visibleImagesReady &&
+        visibleVideosReady &&
+        !significantAnimationRunning,
+      dynamicSurface,
+      dynamicSurfaceAreaRatio,
+      title: document.title || location.hostname || location.href
+    }
+  })()
+`
+
+const VISUAL_FINGERPRINT_SCRIPT = `
+  (() => {
+    let hash = 2166136261
+
+    const mix = value => {
+      const text = String(value)
+
+      for (let index = 0; index < text.length; index++) {
+        hash ^= text.charCodeAt(index)
+        hash = Math.imul(hash, 16777619)
+      }
+    }
+
+    const visible = element => {
+      if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false
+
+      const rect = element.getBoundingClientRect()
+
+      if (
+        rect.width <= 0 ||
+        rect.height <= 0 ||
+        rect.bottom <= 0 ||
+        rect.right <= 0 ||
+        rect.top >= innerHeight ||
+        rect.left >= innerWidth
+      ) {
+        return false
+      }
+
+      const style = getComputedStyle(element)
+
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.04
+      )
+    }
+
+    mix(innerWidth)
+    mix(innerHeight)
+    mix((document.body?.innerText ?? '').slice(0, 700))
+
+    const hero = document.querySelector('h1, [role="heading"][aria-level="1"], main')
+
+    if (hero instanceof HTMLElement || hero instanceof SVGElement) {
+      const rect = hero.getBoundingClientRect()
+      const style = getComputedStyle(hero)
+
+      mix(Math.round(rect.x))
+      mix(Math.round(rect.y))
+      mix(Math.round(rect.width))
+      mix(Math.round(rect.height))
+      mix(style.opacity)
+      mix(style.transform)
+      mix(style.filter)
+      mix(style.clipPath)
+    }
+
+    let imageCount = 0
+
+    for (const image of document.images) {
+      if (!visible(image)) continue
+
+      const rect = image.getBoundingClientRect()
+
+      mix(image.currentSrc || image.src)
+      mix(image.naturalWidth)
+      mix(image.naturalHeight)
+      mix(Math.round(rect.x))
+      mix(Math.round(rect.y))
+      mix(Math.round(rect.width))
+      mix(Math.round(rect.height))
+
+      imageCount++
+
+      if (imageCount >= 8) break
+    }
+
+    let canvasCount = 0
+
+    for (const canvas of document.querySelectorAll('canvas')) {
+      if (!(canvas instanceof HTMLCanvasElement) || !visible(canvas)) continue
+
+      mix(canvas.width)
+      mix(canvas.height)
+
+      try {
+        const sample = document.createElement('canvas')
+        sample.width = 12
+        sample.height = 12
+        const context = sample.getContext('2d', { willReadFrequently: true })
+
+        if (context) {
+          context.drawImage(canvas, 0, 0, 12, 12)
+          const pixels = context.getImageData(0, 0, 12, 12).data
+
+          for (let offset = 0; offset < pixels.length; offset += 16) {
+            mix(pixels[offset])
+            mix(pixels[offset + 1])
+            mix(pixels[offset + 2])
+            mix(pixels[offset + 3])
+          }
+        }
+      } catch {}
+
+      canvasCount++
+
+      if (canvasCount >= 2) break
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      if (!(video instanceof HTMLVideoElement) || !visible(video)) continue
+
+      mix(video.readyState)
+      mix(video.videoWidth)
+      mix(video.videoHeight)
+      mix(video.poster)
+    }
+
+    return hash >>> 0
+  })()
+`
+
+const CAPTURE_RECOVERY_SCRIPT = String.raw`
+  (() => {
+    let actions = 0
+    const viewportArea = Math.max(innerWidth * innerHeight, 1)
+
+    const isVisible = element => {
+      if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false
+
+      const rect = element.getBoundingClientRect()
+
+      if (
+        rect.width <= 0 ||
+        rect.height <= 0 ||
+        rect.bottom <= 0 ||
+        rect.right <= 0 ||
+        rect.top >= innerHeight ||
+        rect.left >= innerWidth
+      ) {
+        return false
+      }
+
+      const style = getComputedStyle(element)
+
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.04
+      )
+    }
+
+    const hide = element => {
+      if (!(element instanceof HTMLElement)) return
+
+      element.style.setProperty('display', 'none', 'important')
+      element.style.setProperty('visibility', 'hidden', 'important')
+      element.style.setProperty('pointer-events', 'none', 'important')
+      actions++
+    }
+
+    const loaderSelectors = [
+      '[id*="loader" i]',
+      '[class*="loader" i]',
+      '[id*="preloader" i]',
+      '[class*="preloader" i]',
+      '[id*="splash" i]',
+      '[class*="splash" i]',
+      '[id*="curtain" i]',
+      '[class*="curtain" i]',
+      '[id*="transition" i]',
+      '[class*="transition" i]',
+      'progress',
+      '[role="progressbar"]',
+      '[aria-busy="true"]'
+    ]
+
+    for (const selector of loaderSelectors) {
+      for (const element of document.querySelectorAll(selector)) {
+        if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+        const rect = element.getBoundingClientRect()
+        const style = getComputedStyle(element)
+        const areaRatio = (rect.width * rect.height) / viewportArea
+        const text = element.textContent?.trim() ?? ''
+        const name = (element.id + ' ' + element.className).toLowerCase()
+        const looksLikeLoader =
+          /loader|preloader|loading|splash|curtain|transition/.test(name) ||
+          /loading|please wait|initializing|preparing|[0-9]{1,3}%/i.test(text)
+
+        if (
+          looksLikeLoader &&
+          (areaRatio >= 0.08 || style.position === 'fixed' || style.position === 'sticky')
+        ) {
+          hide(element)
+        }
+      }
+    }
+
+    const heading = document.querySelector('h1, [role="heading"][aria-level="1"]')
+
+    if (heading instanceof HTMLElement && heading.offsetTop < innerHeight * 1.5) {
+      const candidates = [heading, ...heading.querySelectorAll('*')]
+      let parent = heading.parentElement
+
+      for (let depth = 0; depth < 3 && parent; depth++) {
+        candidates.push(parent)
+        parent = parent.parentElement
+      }
+
+      for (const element of candidates) {
+        if (!(element instanceof HTMLElement || element instanceof SVGElement)) continue
+
+        const style = getComputedStyle(element)
+        const opacity = Number.parseFloat(style.opacity || '1')
+        const blurMatch = (style.filter || '').match(/blur\(([-\d.]+)px\)/i)
+        const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+        const rect = element.getBoundingClientRect()
+        let transformLooksTransient = false
+
+        if (style.transform && style.transform !== 'none') {
+          try {
+            const matrix = new DOMMatrixReadOnly(style.transform)
+            const scaleX = Math.hypot(matrix.a, matrix.b)
+            const scaleY = Math.hypot(matrix.c, matrix.d)
+
+            transformLooksTransient =
+              scaleX < 0.72 ||
+              scaleY < 0.72 ||
+              Math.abs(matrix.e) > Math.max(rect.width, 1) * 0.45 ||
+              Math.abs(matrix.f) > Math.max(rect.height, 1) * 0.9
+          } catch {}
+        }
+
+        const clipLooksTransient =
+          Boolean(style.clipPath) &&
+          style.clipPath !== 'none' &&
+          style.clipPath !== 'inset(0px)'
+        const maskLooksTransient =
+          Boolean(style.maskImage) && style.maskImage !== 'none'
+
+        if (
+          style.visibility === 'hidden' ||
+          opacity <= 0.2 ||
+          (Number.isFinite(blur) && blur >= 1.5) ||
+          clipLooksTransient ||
+          maskLooksTransient ||
+          transformLooksTransient
+        ) {
+          element.style.setProperty('visibility', 'visible', 'important')
+          element.style.setProperty('opacity', '1', 'important')
+          element.style.setProperty('filter', 'none', 'important')
+          element.style.setProperty('backdrop-filter', 'none', 'important')
+          element.style.setProperty('transform', 'none', 'important')
+          element.style.setProperty('clip-path', 'none', 'important')
+          element.style.setProperty('mask-image', 'none', 'important')
+          actions++
+        }
+      }
+    }
+
+    const prominentElements = document.body?.querySelectorAll('h1, h2, h3, p, div, span') ?? []
+    let prominentRecovered = 0
+
+    for (let index = 0; index < Math.min(prominentElements.length, 700); index++) {
+      const candidate = prominentElements[index]
+
+      if (!(candidate instanceof HTMLElement) || !isVisible(candidate)) continue
+
+      const rect = candidate.getBoundingClientRect()
+
+      if (rect.top > innerHeight * 0.9 || rect.bottom < 0) continue
+
+      const ownText = [...candidate.childNodes]
+        .filter(node => node.nodeType === Node.TEXT_NODE)
+        .map(node => node.textContent?.trim() ?? '')
+        .join(' ')
+        .replace(/ +/g, ' ')
+        .trim()
+
+      if (ownText.length < 8 || ownText.length > 180) continue
+
+      const candidateStyle = getComputedStyle(candidate)
+      const fontSize = Number.parseFloat(candidateStyle.fontSize || '0')
+
+      if (!Number.isFinite(fontSize) || fontSize < 22) continue
+
+      const nodes = [candidate]
+      let parent = candidate.parentElement
+
+      for (let depth = 0; depth < 3 && parent; depth++) {
+        nodes.push(parent)
+        parent = parent.parentElement
+      }
+
+      for (const element of nodes) {
+        if (!(element instanceof HTMLElement || element instanceof SVGElement)) continue
+
+        const style = getComputedStyle(element)
+        const opacity = Number.parseFloat(style.opacity || '1')
+        const visualFilter = [style.filter || '', style.backdropFilter || ''].join(' ')
+        const blurMatch = visualFilter.match(/blur\(([-0-9.]+)px\)/i)
+        const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+        const elementRect = element.getBoundingClientRect()
+        let transformLooksTransient = false
+
+        if (style.transform && style.transform !== 'none') {
+          try {
+            const matrix = new DOMMatrixReadOnly(style.transform)
+            const scaleX = Math.hypot(matrix.a, matrix.b)
+            const scaleY = Math.hypot(matrix.c, matrix.d)
+
+            transformLooksTransient =
+              scaleX < 0.8 ||
+              scaleY < 0.8 ||
+              Math.abs(matrix.e) > Math.max(elementRect.width, 1) * 0.3 ||
+              Math.abs(matrix.f) > Math.max(elementRect.height, 1) * 0.7
+          } catch {}
+        }
+
+        if (
+          style.visibility === 'hidden' ||
+          opacity <= 0.2 ||
+          (Number.isFinite(blur) && blur >= 1) ||
+          transformLooksTransient
+        ) {
+          element.style.setProperty('visibility', 'visible', 'important')
+          element.style.setProperty('opacity', '1', 'important')
+          element.style.setProperty('filter', 'none', 'important')
+          element.style.setProperty('transform', 'none', 'important')
+          element.style.setProperty('clip-path', 'none', 'important')
+          element.style.setProperty('mask-image', 'none', 'important')
+          actions++
+          prominentRecovered++
+        }
+      }
+
+      if (prominentRecovered >= 8) break
+    }
+
+    const visibleElements = document.body?.querySelectorAll('*') ?? []
+
+    for (let index = 0; index < Math.min(visibleElements.length, 900); index++) {
+      const element = visibleElements[index]
+
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const ownText = [...element.childNodes]
+        .filter(node => node.nodeType === Node.TEXT_NODE)
+        .map(node => node.textContent?.trim() ?? '')
+        .join(' ')
+        .replace(/ +/g, ' ')
+        .trim()
+
+      if (
+        ownText.length === 0 ||
+        ownText.length > 120 ||
+        !/^(?:loading|please wait|initializing|preparing|entering|[0-9]{1,3}%)(?:\s|:|\.|[0-9]|%|$)/i.test(
+          ownText
+        )
+      ) {
+        continue
+      }
+
+      let candidate = element
+      let parent = element.parentElement
+
+      for (let depth = 0; depth < 5 && parent; depth++) {
+        const style = getComputedStyle(parent)
+        const rect = parent.getBoundingClientRect()
+        const areaRatio = Math.max(rect.width * rect.height, 0) / viewportArea
+
+        if (
+          areaRatio >= 0.08 &&
+          (style.position === 'fixed' ||
+            style.position === 'absolute' ||
+            style.position === 'sticky')
+        ) {
+          candidate = parent
+        }
+
+        parent = parent.parentElement
+      }
+
+      hide(candidate)
+      break
+    }
+
+    const main = document.querySelector('main, [role="main"], #main, [data-main]')
+    let centerCover = document.elementFromPoint(innerWidth / 2, innerHeight / 2)
+
+    for (let depth = 0; depth < 6 && centerCover instanceof HTMLElement; depth++) {
+      const style = getComputedStyle(centerCover)
+      const rect = centerCover.getBoundingClientRect()
+      const areaRatio = Math.max(rect.width * rect.height, 0) / viewportArea
+
+      if (
+        main instanceof HTMLElement &&
+        !centerCover.contains(main) &&
+        areaRatio >= 0.72 &&
+        (style.position === 'fixed' || style.position === 'absolute') &&
+        centerCover !== document.body &&
+        centerCover !== document.documentElement
+      ) {
+        hide(centerCover)
+        break
+      }
+
+      centerCover = centerCover.parentElement
+    }
+
+    if (typeof document.getAnimations === 'function') {
+      for (const animation of document.getAnimations()) {
+        try {
+          if (animation.playState !== 'running') continue
+
+          const timing = animation.effect?.getComputedTiming()
+
+          if (timing && Number.isFinite(timing.endTime) && timing.endTime > 0) {
+            animation.finish()
+          } else {
+            animation.pause()
+          }
+
+          actions++
+        } catch {}
+      }
+    }
+
+    for (const video of document.querySelectorAll('video')) {
+      if (!isVisible(video)) continue
+
+      try {
+        video.muted = true
+        void video.play().catch(() => {})
+      } catch {}
+    }
+
+    const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"]')
+
+    for (const element of dialogs) {
+      if (!(element instanceof HTMLElement) || !isVisible(element)) continue
+
+      const rect = element.getBoundingClientRect()
+      const areaRatio = (rect.width * rect.height) / viewportArea
+
+      if (areaRatio < 0.18) continue
+
+      const buttons = element.querySelectorAll('button, [role="button"], a')
+      let dismissed = false
+
+      for (const button of buttons) {
+        const label =
+          (button.getAttribute('aria-label') ?? '') + ' ' + (button.textContent?.trim() ?? '')
+
+        if (/close|dismiss|no thanks|skip|not now|decline|reject/i.test(label)) {
+          if (button instanceof HTMLElement && isVisible(button)) {
+            button.click()
+            actions++
+            dismissed = true
+            break
+          }
+        }
+      }
+
+      if (!dismissed) {
+        const text = element.textContent?.trim() ?? ''
+
+        if (/cookie|consent|privacy|subscribe|sign up|join|member/i.test(text)) {
+          hide(element)
+        }
+      }
+    }
+
+    scrollTo(0, 0)
+    dispatchEvent(new Event('resize'))
+    dispatchEvent(new Event('scroll'))
+
+    return actions
+  })()
+`
+
 export default class LocalBrowserRenderer {
   private readonly candidates = detectBrowserCandidates()
   private browser: BrowserRuntime | null = null
@@ -68,6 +1810,9 @@ export default class LocalBrowserRenderer {
   private disposed = false
   private disabledReason: string | null = null
   private activeTasks = 0
+  private introWaitActive = 0
+  private introWaitYields = 0
+  private maxObservedActiveTasks = 0
   private readonly activeCancels = new Set<() => void>()
 
   private browserLaunches = 0
@@ -81,8 +1826,31 @@ export default class LocalBrowserRenderer {
   private setupCount = 0
   private navigationTotalMs = 0
   private navigationReadinessProbeWins = 0
+  private navigationSoftReadinessWins = 0
   private paintReadyTotalMs = 0
   private paintReadyCount = 0
+  private visualSettleTotalMs = 0
+  private visualSettleCount = 0
+  private visualSettleMaxOuts = 0
+  private visualSettleComplexCount = 0
+  private visualSettleCommandFailures = 0
+  private fastPathCaptures = 0
+  private stabilityFastPathCaptures = 0
+  private introSettleSkips = 0
+  private visualStabilityChecks = 0
+  private visualStabilityPasses = 0
+  private compositedProbeChecks = 0
+  private compositedProbePasses = 0
+  private compositedProbeTimeouts = 0
+  private visualStabilityExtraWaits = 0
+  private loaderBypasses = 0
+  private cookieCleanupActions = 0
+  private cookieGuardActions = 0
+  private captureRecoveries = 0
+  private unresolvedSuspiciousCaptures = 0
+  private introWaits = 0
+  private introNaturalResolutions = 0
+  private introWaitTotalMs = 0
   private screenshotTotalMs = 0
   private screenshotOptimizeForSpeed: boolean | null = null
   private lastRenderFailure = 'none'
@@ -109,6 +1877,8 @@ export default class LocalBrowserRenderer {
   )
 
   private targetPoolSize = this.heuristicPoolSize
+
+  constructor(private readonly onCapacityAvailable: () => void = () => {}) {}
 
   get available(): boolean {
     return !this.disposed && this.disabledReason === null && this.candidates.length > 0
@@ -138,6 +1908,28 @@ export default class LocalBrowserRenderer {
 
   get activeCount(): number {
     return this.activeTasks
+  }
+
+  get introWaitActiveCount(): number {
+    return this.introWaitActive
+  }
+
+  get introWaitYieldCount(): number {
+    return this.introWaitYields
+  }
+
+  get maxActiveTaskCount(): number {
+    return this.maxObservedActiveTasks
+  }
+
+  get schedulingLimit(): number {
+    const yieldedCapacity = Math.min(this.introWaitActive, INTRO_WAIT_EXTRA_WORKERS)
+
+    return Math.min(this.maxPoolSize, this.poolSize + yieldedCapacity)
+  }
+
+  get canStartRender(): boolean {
+    return this.activeTasks < this.schedulingLimit
   }
 
   get poolSize(): number {
@@ -208,8 +2000,98 @@ export default class LocalBrowserRenderer {
     return this.navigationReadinessProbeWins
   }
 
+  get softReadinessWinCount(): number {
+    return this.navigationSoftReadinessWins
+  }
+
   get averagePaintReadyMs(): number {
     return this.paintReadyCount > 0 ? Math.round(this.paintReadyTotalMs / this.paintReadyCount) : 0
+  }
+
+  get averageVisualSettleMs(): number {
+    return this.visualSettleCount > 0
+      ? Math.round(this.visualSettleTotalMs / this.visualSettleCount)
+      : 0
+  }
+
+  get visualSettleMaxOutCount(): number {
+    return this.visualSettleMaxOuts
+  }
+
+  get visualSettleComplexPageCount(): number {
+    return this.visualSettleComplexCount
+  }
+
+  get visualSettleCommandFailureCount(): number {
+    return this.visualSettleCommandFailures
+  }
+
+  get fastPathCaptureCount(): number {
+    return this.fastPathCaptures
+  }
+
+  get stabilityFastPathCaptureCount(): number {
+    return this.stabilityFastPathCaptures
+  }
+
+  get introSettleSkipCount(): number {
+    return this.introSettleSkips
+  }
+
+  get visualStabilityCheckCount(): number {
+    return this.visualStabilityChecks
+  }
+
+  get visualStabilityPassCount(): number {
+    return this.visualStabilityPasses
+  }
+
+  get visualStabilityExtraWaitCount(): number {
+    return this.visualStabilityExtraWaits
+  }
+
+  get compositedProbeCheckCount(): number {
+    return this.compositedProbeChecks
+  }
+
+  get compositedProbePassCount(): number {
+    return this.compositedProbePasses
+  }
+
+  get compositedProbeTimeoutCount(): number {
+    return this.compositedProbeTimeouts
+  }
+
+  get loaderBypassCount(): number {
+    return this.loaderBypasses
+  }
+
+  get cookieCleanupActionCount(): number {
+    return this.cookieCleanupActions
+  }
+
+  get cookieGuardActionCount(): number {
+    return this.cookieGuardActions
+  }
+
+  get captureRecoveryCount(): number {
+    return this.captureRecoveries
+  }
+
+  get unresolvedSuspiciousCaptureCount(): number {
+    return this.unresolvedSuspiciousCaptures
+  }
+
+  get introWaitCount(): number {
+    return this.introWaits
+  }
+
+  get introNaturalResolutionCount(): number {
+    return this.introNaturalResolutions
+  }
+
+  get averageIntroWaitMs(): number {
+    return this.introWaits > 0 ? Math.round(this.introWaitTotalMs / this.introWaits) : 0
   }
 
   get averageScreenshotMs(): number {
@@ -239,8 +2121,33 @@ export default class LocalBrowserRenderer {
     this.setupCount = 0
     this.navigationTotalMs = 0
     this.navigationReadinessProbeWins = 0
+    this.navigationSoftReadinessWins = 0
     this.paintReadyTotalMs = 0
     this.paintReadyCount = 0
+    this.visualSettleTotalMs = 0
+    this.visualSettleCount = 0
+    this.visualSettleMaxOuts = 0
+    this.visualSettleComplexCount = 0
+    this.visualSettleCommandFailures = 0
+    this.fastPathCaptures = 0
+    this.stabilityFastPathCaptures = 0
+    this.introSettleSkips = 0
+    this.visualStabilityChecks = 0
+    this.visualStabilityPasses = 0
+    this.visualStabilityExtraWaits = 0
+    this.compositedProbeChecks = 0
+    this.compositedProbePasses = 0
+    this.compositedProbeTimeouts = 0
+    this.loaderBypasses = 0
+    this.cookieCleanupActions = 0
+    this.cookieGuardActions = 0
+    this.captureRecoveries = 0
+    this.unresolvedSuspiciousCaptures = 0
+    this.introWaits = 0
+    this.introNaturalResolutions = 0
+    this.introWaitTotalMs = 0
+    this.introWaitYields = 0
+    this.maxObservedActiveTasks = this.activeTasks
     this.screenshotTotalMs = 0
     this.lastRenderFailure = 'none'
   }
@@ -267,6 +2174,7 @@ export default class LocalBrowserRenderer {
     this.activeCancels.add(cancel)
     this.cancelIdleShutdown()
     this.activeTasks++
+    this.maxObservedActiveTasks = Math.max(this.maxObservedActiveTasks, this.activeTasks)
 
     const promise = (async (): Promise<LocalBrowserRenderResult> => {
       try {
@@ -316,6 +2224,13 @@ export default class LocalBrowserRenderer {
               features: [{ name: 'prefers-color-scheme', value: 'light' }]
             },
             sessionId
+          ),
+          runtime.connection.send(
+            'Page.addScriptToEvaluateOnNewDocument',
+            {
+              source: COOKIE_GUARD_BOOTSTRAP_SCRIPT
+            },
+            sessionId
           )
         ])
 
@@ -355,7 +2270,7 @@ export default class LocalBrowserRenderer {
         const navigationMs = performance.now() - navigationStartedAt
         stage = 'paint/theme'
         const paintStartedAt = performance.now()
-        const themeAndTitle = runtime.connection
+        const preparation = runtime.connection
           .send<{
             result?: {
               value?: unknown
@@ -365,21 +2280,295 @@ export default class LocalBrowserRenderer {
             {
               expression: `(() => {
                 ${LIGHT_THEME_SCRIPT};
-                return document.title || location.hostname || location.href
+                scrollTo(0, 0);
+                dispatchEvent(new Event('resize'));
+                dispatchEvent(new Event('scroll'));
+                return ${COOKIE_CLEANUP_SCRIPT}
               })()`,
-              awaitPromise: true,
               returnByValue: true
             },
             sessionId,
             PAINT_READY_TIMEOUT_MS + 100
           )
-          .catch(() => ({ result: { value: '' } }))
+          .catch(() => ({ result: { value: 0 } }))
 
-        await Promise.race([themeAndTitle.then(() => undefined), delay(PAINT_READY_TIMEOUT_MS)])
+        await Promise.race([preparation.then(() => undefined), delay(PAINT_READY_TIMEOUT_MS)])
 
         const paintReadyMs = performance.now() - paintStartedAt
         this.paintReadyTotalMs += paintReadyMs
         this.paintReadyCount++
+
+        const preparationResponse = await preparation
+        const cleanupActions =
+          typeof preparationResponse.result?.value === 'number'
+            ? preparationResponse.result.value
+            : 0
+
+        this.cookieCleanupActions += cleanupActions
+
+        if (cancelled) {
+          throw new Error('Local browser render cancelled')
+        }
+
+        const fastPathDelay =
+          FAST_PATH_MIN_FROM_NAVIGATION_MS - (performance.now() - navigationStartedAt)
+
+        if (fastPathDelay > 0) {
+          await delay(fastPathDelay)
+        }
+
+        stage = 'capture health'
+        let healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
+        let pageWasSuspicious = healthRecord?.suspicious === true
+        let usedFastPath = healthRecord?.readyForFastCapture === true
+
+        if (
+          healthRecord?.dynamicSurface === true &&
+          (healthRecord.dynamicSurfaceAreaRatio ?? 0) >= 0.12
+        ) {
+          stage = 'composited readiness'
+          const compositedReady = await this.waitForCompositedReadiness(
+            runtime.connection,
+            sessionId,
+            safeWidth,
+            safeHeight
+          )
+
+          if (compositedReady && !pageWasSuspicious) {
+            usedFastPath = true
+          } else if (!compositedReady) {
+            const reasons = Array.isArray(healthRecord.reasons) ? [...healthRecord.reasons] : []
+
+            if (!reasons.includes('dynamic-surface-not-ready')) {
+              reasons.push('dynamic-surface-not-ready')
+            }
+
+            healthRecord = {
+              ...healthRecord,
+              suspicious: true,
+              readyForFastCapture: false,
+              reasons
+            }
+            pageWasSuspicious = true
+            usedFastPath = false
+          }
+        }
+
+        const naturalIntroCandidate =
+          healthRecord?.suspicious === true && this.shouldWaitForNaturalIntro(healthRecord)
+        let settleRecord: {
+          maxedOut?: unknown
+          complex?: unknown
+          loaderBypasses?: unknown
+          title?: unknown
+        } | null = null
+
+        if (!usedFastPath && !pageWasSuspicious) {
+          stage = 'visual stability'
+          const visuallyStable = await this.waitForVisualStability(runtime.connection, sessionId)
+
+          if (visuallyStable) {
+            usedFastPath = true
+            this.stabilityFastPathCaptures++
+          }
+        }
+
+        if (usedFastPath) {
+          this.fastPathCaptures++
+        } else if (naturalIntroCandidate) {
+          this.introSettleSkips++
+        } else {
+          stage = 'visual settle'
+          const visualSettleStartedAt = performance.now()
+          let visualSettleCommandFailed = false
+          const settleResponse = await runtime.connection
+            .send<{
+              result?: {
+                value?: unknown
+              }
+            }>(
+              'Runtime.evaluate',
+              {
+                expression: VISUAL_SETTLE_SCRIPT,
+                awaitPromise: true,
+                returnByValue: true
+              },
+              sessionId,
+              VISUAL_SETTLE_COMMAND_TIMEOUT_MS
+            )
+            .catch(() => {
+              visualSettleCommandFailed = true
+              return { result: { value: null } }
+            })
+          const visualSettleMs = performance.now() - visualSettleStartedAt
+          const settleValue = settleResponse.result?.value
+
+          settleRecord =
+            settleValue && typeof settleValue === 'object'
+              ? (settleValue as {
+                  maxedOut?: unknown
+                  complex?: unknown
+                  loaderBypasses?: unknown
+                  title?: unknown
+                })
+              : null
+
+          this.visualSettleTotalMs += visualSettleMs
+          this.visualSettleCount++
+
+          if (visualSettleCommandFailed) {
+            this.visualSettleCommandFailures++
+          }
+
+          if (settleRecord?.maxedOut === true) {
+            this.visualSettleMaxOuts++
+          }
+
+          if (settleRecord?.complex === true) {
+            this.visualSettleComplexCount++
+          }
+
+          if (typeof settleRecord?.loaderBypasses === 'number') {
+            this.loaderBypasses += settleRecord.loaderBypasses
+          }
+        }
+
+        const lateCleanupResponse = await runtime.connection
+          .send<{
+            result?: {
+              value?: unknown
+            }
+          }>(
+            'Runtime.evaluate',
+            {
+              expression: COOKIE_CLEANUP_SCRIPT,
+              returnByValue: true
+            },
+            sessionId,
+            PAINT_READY_TIMEOUT_MS + 100
+          )
+          .catch(() => ({ result: { value: 0 } }))
+        const lateCleanupActions =
+          typeof lateCleanupResponse.result?.value === 'number'
+            ? lateCleanupResponse.result.value
+            : 0
+
+        this.cookieCleanupActions += lateCleanupActions
+
+        const guardStatusResponse = await runtime.connection
+          .send<{
+            result?: {
+              value?: unknown
+            }
+          }>(
+            'Runtime.evaluate',
+            {
+              expression: COOKIE_GUARD_STATUS_SCRIPT,
+              returnByValue: true
+            },
+            sessionId,
+            PAINT_READY_TIMEOUT_MS + 100
+          )
+          .catch(() => ({ result: { value: 0 } }))
+        const guardActions =
+          typeof guardStatusResponse.result?.value === 'number'
+            ? guardStatusResponse.result.value
+            : 0
+
+        this.cookieGuardActions += guardActions
+
+        const settleNeedsRepaint =
+          settleRecord?.maxedOut === true ||
+          (typeof settleRecord?.loaderBypasses === 'number' && settleRecord.loaderBypasses > 0)
+
+        if (lateCleanupActions > 0) {
+          await delay(180)
+        } else if (settleNeedsRepaint) {
+          await delay(120)
+        }
+
+        if (cancelled) {
+          throw new Error('Local browser render cancelled')
+        }
+
+        if (!usedFastPath || lateCleanupActions > 0 || guardActions > 0) {
+          stage = 'capture health'
+          healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
+          pageWasSuspicious = pageWasSuspicious || healthRecord?.suspicious === true
+
+          if (lateCleanupActions > 0 || guardActions > 0) {
+            usedFastPath = false
+          }
+        }
+
+        if (healthRecord?.suspicious === true && this.shouldWaitForNaturalIntro(healthRecord)) {
+          stage = 'intro wait'
+          this.introWaits++
+          this.introWaitActive++
+          this.introWaitYields++
+          const introWaitStartedAt = performance.now()
+
+          queueMicrotask(() => {
+            if (!cancelled) {
+              this.onCapacityAvailable()
+            }
+          })
+
+          try {
+            healthRecord = await this.waitForNaturalIntro(
+              runtime.connection,
+              sessionId,
+              navigationStartedAt,
+              healthRecord
+            )
+          } finally {
+            this.introWaitActive = Math.max(0, this.introWaitActive - 1)
+          }
+
+          this.introWaitTotalMs += performance.now() - introWaitStartedAt
+
+          if (healthRecord?.suspicious !== true) {
+            this.introNaturalResolutions++
+          }
+
+          pageWasSuspicious = true
+        }
+
+        if (healthRecord?.suspicious === true) {
+          this.captureRecoveries++
+          stage = 'capture recovery'
+
+          await runtime.connection
+            .send(
+              'Runtime.evaluate',
+              {
+                expression: `(() => {
+                  let actions = 0;
+                  actions += ${COOKIE_CLEANUP_SCRIPT};
+                  actions += ${CAPTURE_RECOVERY_SCRIPT};
+                  return actions;
+                })()`,
+                returnByValue: true
+              },
+              sessionId,
+              CAPTURE_HEALTH_COMMAND_TIMEOUT_MS
+            )
+            .catch(() => null)
+
+          await delay(CAPTURE_RECOVERY_WAIT_MS)
+          healthRecord = await this.evaluateCaptureHealth(runtime.connection, sessionId)
+
+          if (healthRecord?.suspicious === true) {
+            this.unresolvedSuspiciousCaptures++
+          }
+
+          pageWasSuspicious = true
+        }
+
+        if (pageWasSuspicious) {
+          stage = 'visual stability'
+          await this.waitForVisualStability(runtime.connection, sessionId)
+        }
 
         if (cancelled) {
           throw new Error('Local browser render cancelled')
@@ -387,17 +2576,20 @@ export default class LocalBrowserRenderer {
 
         stage = 'screenshot'
         const screenshotStartedAt = performance.now()
-        const [titleResponse, screenshot] = await Promise.all([
-          themeAndTitle,
-          this.captureScreenshot(
-            runtime.connection,
-            sessionId,
-            safeWidth,
-            safeHeight,
-            safeCaptureScale
-          )
-        ])
+        const screenshot = await this.captureScreenshot(
+          runtime.connection,
+          sessionId,
+          safeWidth,
+          safeHeight,
+          safeCaptureScale
+        )
         const screenshotMs = performance.now() - screenshotStartedAt
+        const settledTitle =
+          typeof settleRecord?.title === 'string'
+            ? settleRecord.title
+            : typeof healthRecord?.title === 'string'
+              ? healthRecord.title
+              : ''
 
         const bytes = Buffer.from(screenshot.data, 'base64')
 
@@ -415,7 +2607,7 @@ export default class LocalBrowserRenderer {
 
         return {
           jpeg,
-          title: typeof titleResponse.result?.value === 'string' ? titleResponse.result.value : '',
+          title: settledTitle,
           totalMs,
           navigationMs,
           paintReadyMs,
@@ -446,6 +2638,243 @@ export default class LocalBrowserRenderer {
       promise,
       cancel
     }
+  }
+
+  private async evaluateCaptureHealth(
+    connection: CdpConnection,
+    sessionId: string
+  ): Promise<CaptureHealthRecord | null> {
+    const response = await connection
+      .send<{
+        result?: {
+          value?: unknown
+        }
+      }>(
+        'Runtime.evaluate',
+        {
+          expression: CAPTURE_HEALTH_SCRIPT,
+          returnByValue: true
+        },
+        sessionId,
+        CAPTURE_HEALTH_COMMAND_TIMEOUT_MS
+      )
+      .catch(() => ({ result: { value: null } }))
+    const value = response.result?.value
+
+    return value && typeof value === 'object' ? (value as CaptureHealthRecord) : null
+  }
+
+  private shouldWaitForNaturalIntro(health: CaptureHealthRecord): boolean {
+    if (!Array.isArray(health.reasons)) return false
+
+    return health.reasons.some(
+      reason => typeof reason === 'string' && NATURAL_INTRO_REASONS.has(reason)
+    )
+  }
+
+  private async waitForNaturalIntro(
+    connection: CdpConnection,
+    sessionId: string,
+    navigationStartedAt: number,
+    initialHealth: CaptureHealthRecord
+  ): Promise<CaptureHealthRecord | null> {
+    const deadline = navigationStartedAt + CAPTURE_INTRO_MAX_FROM_NAVIGATION_MS
+    let latestHealth: CaptureHealthRecord | null = initialHealth
+    let healthyPasses = 0
+
+    while (performance.now() < deadline) {
+      const remainingMs = deadline - performance.now()
+
+      await delay(Math.min(CAPTURE_INTRO_POLL_MS, Math.max(1, remainingMs)))
+
+      latestHealth = await this.evaluateCaptureHealth(connection, sessionId)
+
+      if (latestHealth?.suspicious === true) {
+        healthyPasses = 0
+
+        if (!this.shouldWaitForNaturalIntro(latestHealth)) {
+          return latestHealth
+        }
+
+        continue
+      }
+
+      healthyPasses++
+
+      if (healthyPasses >= 2) {
+        return latestHealth
+      }
+    }
+
+    return latestHealth
+  }
+
+  private async captureCompositedProbe(
+    connection: CdpConnection,
+    sessionId: string,
+    viewportWidth: number,
+    viewportHeight: number
+  ): Promise<CompositedProbe | null> {
+    const longEdge = Math.max(viewportWidth, viewportHeight)
+    const scale = Math.min(1, COMPOSITED_PROBE_MAX_LONG_EDGE / Math.max(1, longEdge))
+    const outputWidth = Math.max(1, Math.round(viewportWidth * scale))
+    const outputHeight = Math.max(1, Math.round(viewportHeight * scale))
+
+    const screenshot = await connection
+      .send<{ data: string }>(
+        'Page.captureScreenshot',
+        {
+          format: 'jpeg',
+          quality: COMPOSITED_PROBE_QUALITY,
+          fromSurface: true,
+          captureBeyondViewport: false,
+          clip: {
+            x: 0,
+            y: 0,
+            width: viewportWidth,
+            height: viewportHeight,
+            scale
+          }
+        },
+        sessionId,
+        VISUAL_STABILITY_COMMAND_TIMEOUT_MS
+      )
+      .catch(() => null)
+
+    if (!screenshot?.data) return null
+
+    const bytes = Buffer.from(screenshot.data, 'base64')
+    let hash = 2166136261
+
+    for (let index = 0; index < bytes.length; index += 3) {
+      hash ^= bytes[index] ?? 0
+      hash = Math.imul(hash, 16777619)
+    }
+
+    return {
+      hash: hash >>> 0,
+      byteLength: bytes.byteLength,
+      minUsefulBytes: Math.max(1600, Math.round(outputWidth * outputHeight * 0.11))
+    }
+  }
+
+  private async waitForCompositedReadiness(
+    connection: CdpConnection,
+    sessionId: string,
+    viewportWidth: number,
+    viewportHeight: number
+  ): Promise<boolean> {
+    this.compositedProbeChecks++
+
+    const deadline = performance.now() + COMPOSITED_PROBE_MAX_WAIT_MS
+    let previous: CompositedProbe | null = null
+    let richChangingFrames = 0
+    let richFrames = 0
+
+    while (performance.now() < deadline) {
+      const current = await this.captureCompositedProbe(
+        connection,
+        sessionId,
+        viewportWidth,
+        viewportHeight
+      )
+
+      if (current) {
+        const rich = current.byteLength >= current.minUsefulBytes
+
+        if (rich) {
+          richFrames++
+        } else {
+          richFrames = 0
+        }
+
+        if (previous) {
+          if (rich && richFrames >= 2 && current.hash === previous.hash) {
+            this.compositedProbePasses++
+            return true
+          }
+
+          if (rich && current.hash !== previous.hash) {
+            richChangingFrames++
+          }
+
+          if (richFrames >= 3 && richChangingFrames >= 2) {
+            this.compositedProbePasses++
+            return true
+          }
+        }
+
+        previous = current
+      }
+
+      await delay(COMPOSITED_PROBE_SAMPLE_MS)
+    }
+
+    this.compositedProbeTimeouts++
+    return false
+  }
+
+  private async evaluateVisualFingerprint(
+    connection: CdpConnection,
+    sessionId: string
+  ): Promise<number | null> {
+    const response = await connection
+      .send<{
+        result?: {
+          value?: unknown
+        }
+      }>(
+        'Runtime.evaluate',
+        {
+          expression: VISUAL_FINGERPRINT_SCRIPT,
+          returnByValue: true
+        },
+        sessionId,
+        VISUAL_STABILITY_COMMAND_TIMEOUT_MS
+      )
+      .catch(() => ({ result: { value: null } }))
+    const value = response.result?.value
+
+    return typeof value === 'number' ? value : null
+  }
+
+  private async waitForVisualStability(
+    connection: CdpConnection,
+    sessionId: string
+  ): Promise<boolean> {
+    this.visualStabilityChecks++
+
+    let previous = await this.evaluateVisualFingerprint(connection, sessionId)
+
+    if (previous === null) return false
+
+    await delay(VISUAL_STABILITY_SAMPLE_MS)
+
+    let current = await this.evaluateVisualFingerprint(connection, sessionId)
+
+    if (current !== null && current === previous) {
+      this.visualStabilityPasses++
+      return true
+    }
+
+    this.visualStabilityExtraWaits++
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      previous = current
+      await delay(VISUAL_STABILITY_RETRY_MS)
+      current = await this.evaluateVisualFingerprint(connection, sessionId)
+
+      if (current !== null && previous !== null && current === previous) {
+        this.visualStabilityPasses++
+        return true
+      }
+
+      if (attempt === 0) {
+        this.visualStabilityExtraWaits++
+      }
+    }
+
+    return false
   }
 
   private waitForNavigationReadiness(
@@ -531,6 +2960,52 @@ export default class LocalBrowserRenderer {
       }
 
       await delay(Math.min(DOCUMENT_READY_PROBE_INTERVAL_MS, remainingMs))
+    }
+
+    try {
+      const response = await connection.send<{
+        result?: {
+          value?: unknown
+        }
+      }>(
+        'Runtime.evaluate',
+        {
+          expression: `(() => ({
+            href: location.href,
+            hasDocumentElement: Boolean(document.documentElement),
+            hasBody: Boolean(document.body),
+            bodyChildren: document.body?.childElementCount ?? 0,
+            bodyTextLength: (document.body?.innerText ?? '').trim().length
+          }))()`,
+          returnByValue: true
+        },
+        sessionId,
+        DOCUMENT_READY_PROBE_COMMAND_TIMEOUT_MS
+      )
+      const value = response.result?.value
+
+      if (
+        value &&
+        typeof value === 'object' &&
+        'href' in value &&
+        typeof value.href === 'string' &&
+        value.href !== 'about:blank' &&
+        'hasDocumentElement' in value &&
+        value.hasDocumentElement === true &&
+        'hasBody' in value &&
+        value.hasBody === true &&
+        (('bodyChildren' in value &&
+          typeof value.bodyChildren === 'number' &&
+          value.bodyChildren > 0) ||
+          ('bodyTextLength' in value &&
+            typeof value.bodyTextLength === 'number' &&
+            value.bodyTextLength > 0))
+      ) {
+        this.navigationSoftReadinessWins++
+        return
+      }
+    } catch (error) {
+      lastError = toError(error)
     }
 
     throw new Error(
@@ -682,6 +3157,7 @@ export default class LocalBrowserRenderer {
       '--disable-renderer-backgrounding',
       '--hide-scrollbars',
       '--mute-audio',
+      '--autoplay-policy=no-user-gesture-required',
       '--window-size=896,896',
       'about:blank'
     ]

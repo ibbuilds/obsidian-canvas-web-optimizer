@@ -9,6 +9,9 @@ export type LocalBrowserDiagnostics = {
   concurrencySummary: string
   tuningStatus: string
   activeTasks: number
+  introWaitActive: number
+  introWaitYields: number
+  maxActiveTasks: number
   renderFailures: number
   launches: number
   closes: number
@@ -18,7 +21,29 @@ export type LocalBrowserDiagnostics = {
   averageSetupMs: number
   averageNavigationMs: number
   readinessProbeWins: number
+  softReadinessWins: number
   averagePaintReadyMs: number
+  averageVisualSettleMs: number
+  visualSettleMaxOuts: number
+  visualSettleComplexPages: number
+  visualSettleCommandFailures: number
+  fastPathCaptures: number
+  stabilityFastPathCaptures: number
+  introSettleSkips: number
+  visualStabilityChecks: number
+  visualStabilityPasses: number
+  visualStabilityExtraWaits: number
+  compositedProbeChecks: number
+  compositedProbePasses: number
+  compositedProbeTimeouts: number
+  loaderBypasses: number
+  cookieCleanupActions: number
+  cookieGuardActions: number
+  captureRecoveries: number
+  unresolvedSuspiciousCaptures: number
+  introWaits: number
+  introNaturalResolutions: number
+  averageIntroWaitMs: number
   averageScreenshotMs: number
   screenshotOptimizationStatus: string
   lastFailureSummary: string
@@ -39,6 +64,10 @@ export type DiagnosticsReportContext = {
   liveWebviews: number
   generatingThumbnails: number
   queued: number
+  stagedPreviews: number
+  previewRevealActive: boolean
+  sharedLocalRenderHits: number
+  sharedLocalRenderStarts: number
   interactiveWebviewActive: boolean
   interactiveLightPreferenceStatus: string
   interactiveMatchMediaLight: boolean | null
@@ -63,6 +92,10 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Live webviews: ${context.liveWebviews}`,
     `Generating thumbnails: ${context.generatingThumbnails}`,
     `Queued: ${context.queued}`,
+    `Staged previews: ${context.stagedPreviews}`,
+    `Preview reveal: ${context.previewRevealActive ? 'active' : 'idle'}`,
+    `Shared local render hits: ${context.sharedLocalRenderHits}`,
+    `Shared local render starts: ${context.sharedLocalRenderStarts}`,
     `Generation engine: ${generationEngine}`,
     `Local browser: ${local.status}`,
     `Local browser unavailable reason: ${local.unavailableReason}`,
@@ -70,6 +103,9 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser concurrency: ${local.concurrencySummary}`,
     `Local browser tuning: ${local.tuningStatus}`,
     `Local browser active tasks: ${local.activeTasks}`,
+    `Local browser active intro waits: ${local.introWaitActive}`,
+    `Local browser intro wait yields: ${local.introWaitYields}`,
+    `Local browser max active tasks: ${local.maxActiveTasks}`,
     `Interactive webview: ${context.interactiveWebviewActive ? 1 : 0}`,
     `Interactive light preference: ${context.interactiveLightPreferenceStatus}`,
     `Interactive matchMedia light: ${
@@ -104,7 +140,26 @@ export function formatDiagnosticsReport(context: DiagnosticsReportContext): stri
     `Local browser average setup: ${local.averageSetupMs} ms`,
     `Local browser average navigation: ${local.averageNavigationMs} ms`,
     `Local browser readiness probe wins: ${local.readinessProbeWins}`,
+    `Local browser soft readiness wins: ${local.softReadinessWins}`,
     `Local browser average paint ready: ${local.averagePaintReadyMs} ms`,
+    `Local browser average visual settle: ${local.averageVisualSettleMs} ms`,
+    `Local browser visual settle max-outs: ${local.visualSettleMaxOuts}`,
+    `Local browser complex settles: ${local.visualSettleComplexPages}`,
+    `Local browser visual settle command failures: ${local.visualSettleCommandFailures}`,
+    `Local browser fast-path captures: ${local.fastPathCaptures}`,
+    `Stability fast-path captures: ${local.stabilityFastPathCaptures}`,
+    `Intro settle skips: ${local.introSettleSkips}`,
+    `Visual stability checks/passes: ${local.visualStabilityChecks}/${local.visualStabilityPasses}`,
+    `Visual stability extra waits: ${local.visualStabilityExtraWaits}`,
+    `Composited probes checks/passes/timeouts: ${local.compositedProbeChecks}/${local.compositedProbePasses}/${local.compositedProbeTimeouts}`,
+    `Local browser loader bypasses: ${local.loaderBypasses}`,
+    `Cookie cleanup actions: ${local.cookieCleanupActions}`,
+    `Cookie guard actions: ${local.cookieGuardActions}`,
+    `Suspicious capture recoveries: ${local.captureRecoveries}`,
+    `Unresolved suspicious captures: ${local.unresolvedSuspiciousCaptures}`,
+    `Long intro waits: ${local.introWaits}`,
+    `Long intros resolved naturally: ${local.introNaturalResolutions}`,
+    `Average long intro wait: ${local.averageIntroWaitMs} ms`,
     `Local browser average screenshot: ${local.averageScreenshotMs} ms`,
     `Average local generation: ${summary.averageLocalGenerationMs} ms`,
     `Generation preload: ${context.generationPreloadDisabled ? 'disabled' : 'enabled'}`,

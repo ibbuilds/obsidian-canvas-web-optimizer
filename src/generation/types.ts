@@ -25,6 +25,7 @@ export type LocalConcurrentGeneration = {
   viewportWidth: number
   viewportHeight: number
   captureScale: number
+  renderKey: string
   task: LocalBrowserRenderTask
   requeue: boolean
   completed: boolean
@@ -33,6 +34,7 @@ export type LocalConcurrentGeneration = {
 
 export type LocalBatchTuningSnapshot = ConcurrencyCounters & {
   concurrency: number
+  introWaitYieldCount: number
 }
 
 export type ActiveGeneration = {
