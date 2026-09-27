@@ -1557,6 +1557,84 @@ const CAPTURE_RECOVERY_SCRIPT = String.raw`
       }
     }
 
+    const prominentElements = document.body?.querySelectorAll('h1, h2, h3, p, div, span') ?? []
+    let prominentRecovered = 0
+
+    for (let index = 0; index < Math.min(prominentElements.length, 700); index++) {
+      const candidate = prominentElements[index]
+
+      if (!(candidate instanceof HTMLElement) || !isVisible(candidate)) continue
+
+      const rect = candidate.getBoundingClientRect()
+
+      if (rect.top > innerHeight * 0.9 || rect.bottom < 0) continue
+
+      const ownText = [...candidate.childNodes]
+        .filter(node => node.nodeType === Node.TEXT_NODE)
+        .map(node => node.textContent?.trim() ?? '')
+        .join(' ')
+        .replace(/ +/g, ' ')
+        .trim()
+
+      if (ownText.length < 8 || ownText.length > 180) continue
+
+      const candidateStyle = getComputedStyle(candidate)
+      const fontSize = Number.parseFloat(candidateStyle.fontSize || '0')
+
+      if (!Number.isFinite(fontSize) || fontSize < 22) continue
+
+      const nodes = [candidate]
+      let parent = candidate.parentElement
+
+      for (let depth = 0; depth < 3 && parent; depth++) {
+        nodes.push(parent)
+        parent = parent.parentElement
+      }
+
+      for (const element of nodes) {
+        if (!(element instanceof HTMLElement || element instanceof SVGElement)) continue
+
+        const style = getComputedStyle(element)
+        const opacity = Number.parseFloat(style.opacity || '1')
+        const blurMatch = (style.filter || '').match(/blur\(([-0-9.]+)px\)/i)
+        const blur = blurMatch ? Number.parseFloat(blurMatch[1]) : 0
+        const elementRect = element.getBoundingClientRect()
+        let transformLooksTransient = false
+
+        if (style.transform && style.transform !== 'none') {
+          try {
+            const matrix = new DOMMatrixReadOnly(style.transform)
+            const scaleX = Math.hypot(matrix.a, matrix.b)
+            const scaleY = Math.hypot(matrix.c, matrix.d)
+
+            transformLooksTransient =
+              scaleX < 0.8 ||
+              scaleY < 0.8 ||
+              Math.abs(matrix.e) > Math.max(elementRect.width, 1) * 0.3 ||
+              Math.abs(matrix.f) > Math.max(elementRect.height, 1) * 0.7
+          } catch {}
+        }
+
+        if (
+          style.visibility === 'hidden' ||
+          opacity <= 0.2 ||
+          (Number.isFinite(blur) && blur >= 1) ||
+          transformLooksTransient
+        ) {
+          element.style.setProperty('visibility', 'visible', 'important')
+          element.style.setProperty('opacity', '1', 'important')
+          element.style.setProperty('filter', 'none', 'important')
+          element.style.setProperty('transform', 'none', 'important')
+          element.style.setProperty('clip-path', 'none', 'important')
+          element.style.setProperty('mask-image', 'none', 'important')
+          actions++
+          prominentRecovered++
+        }
+      }
+
+      if (prominentRecovered >= 8) break
+    }
+
     const visibleElements = document.body?.querySelectorAll('*') ?? []
 
     for (let index = 0; index < Math.min(visibleElements.length, 900); index++) {
